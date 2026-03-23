@@ -14,9 +14,9 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='iota',
-    maintainer_email='iota@todo.todo',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    maintainer_email='lp05180@student.uni-lj.si',
+    description='A semester project involving TurtleBot4 and ROS2',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',
@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'ring_detection = megatron.ring_detection:main'
+            'ring_detector = megatron.ring_detector:main'
         ],
     },
 )
