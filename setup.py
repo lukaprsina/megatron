@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'ring_detector = megatron.ring_detector:main'
+            'face_detector = megatron.face_detector:main'
         ],
     },
 )

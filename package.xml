@@ -4,7 +4,7 @@
   <name>megatron</name>
   <version>0.0.0</version>
   <description>A semester project involving TurtleBot4 and ROS2</description>
-  <maintainer email="iota@todo.todo">iota</maintainer>
+  <maintainer email="lp05180@student.uni-lj.si">iota</maintainer>
   <license>MIT</license>
 
   <test_depend>ament_copyright</test_depend>
