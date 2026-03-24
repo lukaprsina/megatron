@@ -13,10 +13,10 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='iota',
+    maintainer='luka',
     maintainer_email='lp05180@student.uni-lj.si',
     description='A semester project involving TurtleBot4 and ROS2',
-    license='MIT',
+    license='Apache-2.0',
     extras_require={
         'test': [
             'pytest',
@@ -24,8 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'ring_detector = megatron.ring_detector:main'
-            'face_detector = megatron.face_detector:main'
+            'ring_detector = megatron.ring_detector:main',
+            'face_detector = megatron.face_detector:main',
         ],
     },
 )
