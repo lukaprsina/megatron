@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data, QoSReliabilityPolicy
+from rclpy.qos import QoSProfile, qos_profile_sensor_data, QoSReliabilityPolicy
 from rclpy import time
 
 from sensor_msgs.msg import Image, PointCloud2
@@ -21,12 +21,10 @@ class FaceDetectorNode(Node):
     def __init__(self):
         super().__init__('face_detector')
 
-        self.declare_parameters(namespace='', parameters=[
-            ('device', ''),
-            ('confidence_threshold', 0.5),
-            ('confirmation_count', 3),
-            ('dedup_distance', 0.5),
-        ])
+        self.declare_parameter('device', '')
+        self.declare_parameter('confidence_threshold', 0.5)
+        self.declare_parameter('confirmation_count', 3)
+        self.declare_parameter('dedup_distance', 0.5)
 
         self.device = self.get_parameter('device').get_parameter_value().string_value
         self.confidence_threshold = self.get_parameter('confidence_threshold').get_parameter_value().double_value
@@ -48,7 +46,11 @@ class FaceDetectorNode(Node):
 
         # Publishers
         self.face_pub = self.create_publisher(PoseStamped, '/detected_faces', 10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/face_markers', QoSReliabilityPolicy.BEST_EFFORT)
+        self.marker_pub = self.create_publisher(
+            MarkerArray,
+            '/face_markers',
+            QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT),
+        )
         self.image_pub = self.create_publisher(Image, '/face_detections_image', 10)
 
         # State
@@ -72,8 +74,10 @@ class FaceDetectorNode(Node):
             classes=[0], device=self.device, conf=self.confidence_threshold)
 
         for r in res:
+            if r.boxes is None:
+                continue
             for box in r.boxes:
-                if box.xyxy.nelement() == 0:
+                if box.xyxy is None or len(box.xyxy) == 0:
                     continue
                 bbox = box.xyxy[0]
                 x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
@@ -96,15 +100,14 @@ class FaceDetectorNode(Node):
         height = data.height
         width = data.width
 
-        a = pc2.read_points_numpy(data, field_names=("x", "y", "z"))
+        a = pc2.read_points_numpy(data, field_names=["x", "y", "z"])
         a = a.reshape((height, width, 3))
 
         # Get transform from camera frame to map frame
         try:
             transform = self.tf_buffer.lookup_transform(
                 'map', data.header.frame_id, time.Time())
-        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
-                tf2_ros.ExtrapolationException) as e:
+        except Exception as e:
             self.get_logger().warn(f'TF lookup failed: {e}')
             return
 
@@ -201,6 +204,7 @@ class FaceDetectorNode(Node):
     def _publish_markers(self):
         """Publish all confirmed faces as a MarkerArray."""
         marker_array = MarkerArray()
+        markers: list[Marker] = []
         for i, pos in enumerate(self.confirmed):
             # Sphere marker
             marker = Marker()
@@ -222,7 +226,7 @@ class FaceDetectorNode(Node):
             marker.color.b = 1.0
             marker.color.a = 1.0
             marker.lifetime.sec = 0
-            marker_array.markers.append(marker)
+            markers.append(marker)
 
             # Text marker
             text = Marker()
@@ -243,8 +247,9 @@ class FaceDetectorNode(Node):
             text.color.a = 1.0
             text.text = f'Face {i + 1}'
             text.lifetime.sec = 0
-            marker_array.markers.append(text)
+            markers.append(text)
 
+        marker_array.markers = markers
         self.marker_pub.publish(marker_array)
 
 

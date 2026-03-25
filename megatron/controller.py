@@ -70,13 +70,11 @@ class MissionController(Node):
     def __init__(self):
         super().__init__('mission_controller')
 
-        self.declare_parameters(namespace='', parameters=[
-            ('dedup_distance', 0.8),
-            ('approach_distance', 0.8),
-            ('spin_at_waypoints', True),
-            ('total_faces', 3),
-            ('total_rings', 2),
-        ])
+        self.declare_parameter('dedup_distance', 0.8)
+        self.declare_parameter('approach_distance', 0.8)
+        self.declare_parameter('spin_at_waypoints', True)
+        self.declare_parameter('total_faces', 3)
+        self.declare_parameter('total_rings', 2)
 
         self.dedup_distance = self.get_parameter('dedup_distance').get_parameter_value().double_value
         self.approach_distance = self.get_parameter('approach_distance').get_parameter_value().double_value
@@ -432,7 +430,10 @@ class MissionController(Node):
         self._publish_goal_markers()
 
     def _finish(self):
-        elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
+        if self.start_time is None:
+            elapsed = 0.0
+        else:
+            elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
         self.state = State.DONE
         self._cancel_nav()
         self.get_logger().info(
@@ -445,6 +446,7 @@ class MissionController(Node):
     def _publish_goal_markers(self):
         """Publish waypoint goal markers for RViz."""
         marker_array = MarkerArray()
+        markers: list[Marker] = []
         for i, (x, y, yaw) in enumerate(WAYPOINTS):
             m = Marker()
             m.header.frame_id = 'map'
@@ -480,8 +482,9 @@ class MissionController(Node):
                 m.color.b = 1.0
                 m.color.a = 0.5
             m.lifetime.sec = 0
-            marker_array.markers.append(m)
+            markers.append(m)
 
+        marker_array.markers = markers
         self.goal_marker_pub.publish(marker_array)
 
 

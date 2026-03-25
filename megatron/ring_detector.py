@@ -3,6 +3,7 @@ import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSReliabilityPolicy
+from rclpy.time import Time
 
 from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
@@ -37,12 +38,10 @@ class RingDetectorNode(Node):
     def __init__(self):
         super().__init__('ring_detector')
 
-        self.declare_parameters(namespace='', parameters=[
-            ('min_area', 500),
-            ('min_circularity', 0.5),
-            ('confirmation_count', 3),
-            ('dedup_distance', 0.5),
-        ])
+        self.declare_parameter('min_area', 500)
+        self.declare_parameter('min_circularity', 0.5)
+        self.declare_parameter('confirmation_count', 3)
+        self.declare_parameter('dedup_distance', 0.5)
 
         self.min_area = self.get_parameter('min_area').get_parameter_value().integer_value
         self.min_circularity = self.get_parameter('min_circularity').get_parameter_value().double_value
@@ -64,7 +63,11 @@ class RingDetectorNode(Node):
         # Publishers
         self.ring_pub = self.create_publisher(PoseStamped, '/detected_rings', 10)
         self.color_pub = self.create_publisher(String, '/detected_ring_color', 10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/ring_markers', QoSReliabilityPolicy.BEST_EFFORT)
+        self.marker_pub = self.create_publisher(
+            MarkerArray,
+            '/ring_markers',
+            QoSReliabilityPolicy.BEST_EFFORT,
+        )
         self.image_pub = self.create_publisher(Image, '/ring_detections_image', 10)
 
         # State
@@ -147,14 +150,13 @@ class RingDetectorNode(Node):
         height = data.height
         width = data.width
 
-        a = pc2.read_points_numpy(data, field_names=("x", "y", "z"))
+        a = pc2.read_points_numpy(data, field_names=["x", "y", "z"])
         a = a.reshape((height, width, 3))
 
         try:
             transform = self.tf_buffer.lookup_transform(
-                'map', data.header.frame_id, rclpy.time.Time())
-        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
-                tf2_ros.ExtrapolationException) as e:
+            'map', data.header.frame_id, Time())
+        except Exception as e:
             self.get_logger().warn(f'TF lookup failed: {e}')
             return
 
@@ -245,6 +247,7 @@ class RingDetectorNode(Node):
     def _publish_markers(self):
         """Publish all confirmed rings as a MarkerArray."""
         marker_array = MarkerArray()
+        markers: list[Marker] = []
         for i, ring in enumerate(self.confirmed):
             pos = ring['pos']
             color = COLOR_RANGES.get(ring['color'], {'rgb': (1.0, 1.0, 1.0)})['rgb']
@@ -269,7 +272,7 @@ class RingDetectorNode(Node):
             marker.color.b = color[2]
             marker.color.a = 1.0
             marker.lifetime.sec = 0
-            marker_array.markers.append(marker)
+            markers.append(marker)
 
             # Text marker
             text = Marker()
@@ -290,8 +293,9 @@ class RingDetectorNode(Node):
             text.color.a = 1.0
             text.text = f'{ring["color"]} ring'
             text.lifetime.sec = 0
-            marker_array.markers.append(text)
+            markers.append(text)
 
+        marker_array.markers = markers
         self.marker_pub.publish(marker_array)
 
 
