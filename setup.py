@@ -15,6 +15,8 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'),
             glob(os.path.join('launch', '*.launch.py'))),
+        (os.path.join('share', package_name, 'config'),
+            glob(os.path.join('config', '*'))),
         (os.path.join('share', package_name, 'maps'),
             glob(os.path.join('maps', '*'))),
     ],
@@ -34,6 +36,7 @@ setup(
             'face_detector = megatron.face_detector:main',
             'ring_detector = megatron.ring_detector:main',
             'controller = megatron.controller:main',
+            'perception_visualizer = megatron.perception_visualizer:main',
         ],
     },
 )

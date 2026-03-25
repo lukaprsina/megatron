@@ -38,23 +38,9 @@ def generate_launch_description():
         launch_arguments=[
             ('world', LaunchConfiguration('world')),
             ('map', LaunchConfiguration('map')),
-            ('rviz', 'false'),
+            ('rviz', LaunchConfiguration('rviz')),
             ('use_sim_time', LaunchConfiguration('use_sim_time')),
         ],
-    )
-
-    rviz = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        arguments=['-d', PathJoinSubstitution([pkg_megatron, 'config', 'task1.rviz'])],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
-        remappings=[
-            ('/tf', 'tf'),
-            ('/tf_static', 'tf_static'),
-        ],
-        output='screen',
-        condition=IfCondition(LaunchConfiguration('rviz')),
     )
 
     # Face detector
@@ -98,7 +84,6 @@ def generate_launch_description():
 
     ld = LaunchDescription(args)
     ld.add_action(sim_nav)
-    ld.add_action(rviz)
     ld.add_action(face_detector)
     ld.add_action(ring_detector)
     ld.add_action(controller)

@@ -18,6 +18,7 @@
   <depend>action_msgs</depend>
   <depend>irobot_create_msgs</depend>
   <depend>turtle_tf2_py</depend>
+  <depend>rviz2</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

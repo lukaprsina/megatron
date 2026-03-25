@@ -113,6 +113,7 @@ class MissionController(Node):
 
         # Publishers
         self.goal_marker_pub = self.create_publisher(MarkerArray, '/goal_markers', 10)
+        self.mission_status_pub = self.create_publisher(String, '/mission_status', 10)
 
         # Action clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -291,6 +292,8 @@ class MissionController(Node):
     # ── Main state machine tick ───────────────────────────────────────
 
     def _tick(self):
+        self._publish_mission_status()
+
         if self.state == State.WAITING_FOR_NAV2:
             self._handle_waiting()
         elif self.state == State.UNDOCKING:
@@ -486,6 +489,14 @@ class MissionController(Node):
 
         marker_array.markers = markers
         self.goal_marker_pub.publish(marker_array)
+
+    def _publish_mission_status(self):
+        msg = String()
+        msg.data = (
+            f'{self.state.name} | faces {len(self.found_faces)}/{self.total_faces} '
+            f'| rings {len(self.found_rings)}/{self.total_rings}'
+        )
+        self.mission_status_pub.publish(msg)
 
 
 def main(args=None):
