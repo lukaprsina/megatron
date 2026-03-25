@@ -1,15 +1,7 @@
-
-
-import sys
-import torch
-print(f"--- DEBUG: Python Executable: {sys.executable}")
-print(f"--- DEBUG: Python Path: {sys.path}")
-print(f"--- DEBUG: Torch Version: {torch.__version__}")
-print(f"--- DEBUG: CUDA Available: {torch.cuda.is_available()}")
-
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSReliabilityPolicy
+from rclpy import time
 
 from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
@@ -110,7 +102,7 @@ class FaceDetectorNode(Node):
         # Get transform from camera frame to map frame
         try:
             transform = self.tf_buffer.lookup_transform(
-                'map', data.header.frame_id, rclpy.time.Time())
+                'map', data.header.frame_id, time.Time())
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
                 tf2_ros.ExtrapolationException) as e:
             self.get_logger().warn(f'TF lookup failed: {e}')
@@ -258,13 +250,6 @@ class FaceDetectorNode(Node):
 
 def main(args=None):
     print('Face detection node starting.')
-
-    import sys
-    import torch
-    print(f"--- DEBUG: Python Executable: {sys.executable}")
-    print(f"--- DEBUG: Python Path: {sys.path}")
-    print(f"--- DEBUG: Torch Version: {torch.__version__}")
-    print(f"--- DEBUG: CUDA Available: {torch.cuda.is_available()}")
 
     rclpy.init(args=args)
     node = FaceDetectorNode()
