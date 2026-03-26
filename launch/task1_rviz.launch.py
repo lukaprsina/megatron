@@ -10,11 +10,11 @@ def generate_launch_description():
     pkg_megatron = get_package_share_directory('megatron')
 
     args = [
-        DeclareLaunchArgument('use_sim_time', default_value='true',
-                              choices=['true', 'false']),
         DeclareLaunchArgument('rviz_config', default_value=PathJoinSubstitution(
             [pkg_megatron, 'config', 'task1_safe.rviz']),
             description='RViz config file'),
+        DeclareLaunchArgument('use_sim_time', default_value='true',
+                              choices=['true', 'false']),
     ]
 
     rviz = Node(
