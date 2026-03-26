@@ -4,7 +4,7 @@
 
 This plan covers the remaining phases of the Task 1 roadmap: detecting face posters, detecting colored rings, orchestrating mission behavior, adding speech output, wiring launch files, and validating the full system in simulation.
 
-The implementation should live primarily in the `megatron` package. The `vendor/` tree contains the lab tutorial repositories used as reference material, with `dis_tutorial3` still serving as the main navigation and simulation baseline and `dis_tutorial4` / `dis_tutorial5` providing additional TF and ring-detection patterns.
+The implementation should live primarily in the `megatron` package. The `vendor/` tree contains the ROS 2 documentation and the lab tutorial repositories (used for reference material), with `dis_tutorial3` still serving as the main navigation and simulation baseline and `dis_tutorial4` / `dis_tutorial5` providing additional TF and ring-detection patterns.
 
 ## Core architectural idea
 

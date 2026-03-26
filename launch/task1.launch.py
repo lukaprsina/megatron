@@ -19,7 +19,7 @@ def generate_launch_description():
         DeclareLaunchArgument('map', default_value=PathJoinSubstitution(
             [pkg_megatron, 'maps', 'task1.yaml']),
             description='Map YAML file'),
-        DeclareLaunchArgument('rviz', default_value='true',
+        DeclareLaunchArgument('launch_rviz', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('visualization', default_value='true',
                       choices=['true', 'false'],
@@ -29,6 +29,9 @@ def generate_launch_description():
                       description='Show the combined perception panel in an OpenCV window'),
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('rviz_config', default_value=PathJoinSubstitution(
+            [pkg_megatron, 'config', 'task1_safe.rviz']),
+            description='RViz config file'),
     ]
 
     # Include the full simulation + navigation stack from dis_tutorial3
@@ -47,14 +50,14 @@ def generate_launch_description():
         package='rviz2',
         executable='rviz2',
         name='rviz2',
-        arguments=['-d', PathJoinSubstitution([pkg_megatron, 'config', 'task1.rviz'])],
+        arguments=['-d', LaunchConfiguration('rviz_config')],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
         remappings=[
             ('/tf', 'tf'),
             ('/tf_static', 'tf_static'),
         ],
         output='screen',
-        condition=IfCondition(LaunchConfiguration('rviz')),
+        condition=IfCondition(LaunchConfiguration('launch_rviz')),
     )
 
     # Face detector

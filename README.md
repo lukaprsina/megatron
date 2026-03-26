@@ -32,11 +32,18 @@ side-by-side view for easier demos and recordings.
 Run the full Task 1 stack:
 
 ```bash
-ros2 launch megatron task1.launch.py world:=task1_yellow_demo           # currently doesn't work
-ros2 launch megatron task1_no_config.launch.py world:=task1_yellow_demo # use this
+ros2 launch megatron task1.launch.py world:=task1_yellow_demo
 
-# runs the visualizer since the RViz config doesn't work
+# if you want the simulation/navigation stack without the Megatron RViz preset
+ros2 launch megatron task1_no_config.launch.py world:=task1_yellow_demo
+
+# stand-alone RViz launcher for the Megatron preset
+ros2 launch megatron task1_rviz.launch.py
+
+# runs the visualizer panel in a local window
 ros2 run megatron perception_visualizer --ros-args -p show_window:=True
+
+ros2 launch megatron task1.launch.py world:=task1_yellow_demo rviz_config:=src/megatron/config/task1_safe.rviz
 ```
 
 Useful launch arguments:
@@ -53,7 +60,7 @@ ros2 launch megatron detectors_only.launch.py visualization:=true
 
 ## RViz preset
 
-Megatron installs a custom RViz config at `share/megatron/config/task1.rviz`.
+Megatron installs a custom RViz config at `share/megatron/config/task1_safe.rviz`.
 It shows the map, robot, scan, and the main MarkerArray topics:
 
 - `/face_markers`
@@ -61,3 +68,6 @@ It shows the map, robot, scan, and the main MarkerArray topics:
 - `/goal_markers`
 
 It also includes the combined image topic `/task1_visualization_image`.
+
+The older `task1.rviz` file is kept around for comparison, but the launch files
+now use the safer preset by default.
