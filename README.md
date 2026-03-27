@@ -36,14 +36,6 @@ ros2 launch megatron task1.launch.py world:=task1_yellow_demo
 
 # if you want the simulation/navigation stack without the Megatron RViz preset
 ros2 launch megatron task1_no_config.launch.py world:=task1_yellow_demo
-
-# stand-alone RViz launcher for the Megatron preset
-ros2 launch megatron task1_rviz.launch.py
-
-# runs the visualizer panel in a local window
-ros2 run megatron perception_visualizer --ros-args -p show_window:=True
-
-ros2 launch megatron task1.launch.py world:=task1_yellow_demo rviz_config:=src/megatron/config/task1_safe.rviz
 ```
 
 Useful launch arguments:
@@ -52,15 +44,9 @@ Useful launch arguments:
 - `visualization:=true|false` — start the combined perception visualizer
 - `show_debug_window:=true|false` — open the combined perception panel in a local OpenCV window
 
-For detector-only iteration:
-
-```bash
-ros2 launch megatron detectors_only.launch.py visualization:=true
-```
-
 ## RViz preset
 
-Megatron installs a custom RViz config at `share/megatron/config/task1_safe.rviz`.
+Megatron has a custom RViz config at `src/megatron/config/production.rviz`.
 It shows the map, robot, scan, and the main MarkerArray topics:
 
 - `/face_markers`
