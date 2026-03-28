@@ -11,7 +11,8 @@ from rclpy.qos import (
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
-from nav2_msgs.action import Spin, NavigateToPose
+from nav2_msgs.action import Spin
+from nav2_simple_commander.robot_navigator import BasicNavigator
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -134,7 +135,7 @@ class MissionController(Node):
 
         self.declare_parameter('dedup_distance', 0.8)
         self.declare_parameter('approach_distance', 0.8)
-        self.declare_parameter('spin_at_waypoints', True)
+        self.declare_parameter('spin_at_waypoints', False)
         self.declare_parameter('total_faces', 3)
         self.declare_parameter('total_rings', 2)
         self.declare_parameter('waypoints_file', 'waypoints/test1.yaml')
@@ -191,10 +192,15 @@ class MissionController(Node):
         self.goal_marker_pub = self.create_publisher(MarkerArray, '/goal_markers', 10)
         self.mission_status_pub = self.create_publisher(String, '/mission_status', 10)
 
-        # Action clients
-        self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        # Action clients / navigator
         self.spin_client = ActionClient(self, Spin, 'spin')
         self.undock_client = ActionClient(self, Undock, 'undock')
+        # BasicNavigator wraps Nav2 lifecycle and navigation actions
+        self.navigator = BasicNavigator()
+        self.nav2_ready = False
+        # Wait for Nav2 to become active in background to avoid blocking init
+        import threading
+        threading.Thread(target=self._wait_for_nav2, daemon=True).start()
 
         # Main loop timer (10 Hz)
         self.timer = self.create_timer(0.1, self._tick)
@@ -254,6 +260,16 @@ class MissionController(Node):
     def _feedback_callback(self, msg):
         self.feedback = msg.feedback
 
+    def _wait_for_nav2(self):
+        self.navigator.isNav2Active()
+        try:
+            self.get_logger().info("Waiting for Nav2 to become active...")
+            self.navigator.waitUntilNav2Active()
+            self.nav2_ready = True
+            self.get_logger().info('Nav2 is ready (navigator).')
+        except Exception as e:
+            self.get_logger().warn(f'Error waiting for Nav2: {e}')
+
     # ── Navigation helpers ────────────────────────────────────────────
 
     def _yaw_to_quaternion(self, yaw):
@@ -261,49 +277,43 @@ class MissionController(Node):
         return Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
 
     def _send_nav_goal(self, x, y, yaw):
-        """Send a NavigateToPose goal. Non-blocking."""
-        goal_pose = PoseStamped()
-        goal_pose.header.frame_id = 'map'
-        goal_pose.header.stamp = self.get_clock().now().to_msg()
-        goal_pose.pose.position.x = x
-        goal_pose.pose.position.y = y
-        goal_pose.pose.orientation = self._yaw_to_quaternion(yaw)
-
-        if not self.nav_client.wait_for_server(timeout_sec=1.0):
-            self.get_logger().warn('NavigateToPose server not available')
+        """Send a navigation goal using BasicNavigator (non-blocking)."""
+        if not self.nav2_ready:
+            self.get_logger().warn('Nav2 not ready (navigator)')
             return False
 
-        goal_msg = NavigateToPose.Goal()
-        goal_msg.pose = goal_pose
+        pose = PoseStamped()
+        pose.header.frame_id = 'map'
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.orientation = self._yaw_to_quaternion(yaw)
 
-        self.get_logger().info(f'Navigating to ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
-        future = self.nav_client.send_goal_async(goal_msg, self._feedback_callback)
-        future.add_done_callback(self._nav_goal_response)
+        self.get_logger().info(f'Navigating to ({x:.2f}, {y:.2f}, yaw={yaw:.2f}) via BasicNavigator')
+        # non-blocking
+        self.navigator.goToPoseAsync(pose)
         return True
 
     def _nav_goal_response(self, future):
-        self.goal_handle = future.result()
-        if not self.goal_handle.accepted:
-            self.get_logger().warn('Navigation goal rejected')
-            self.result_future = None
-            return
-        self.result_future = self.goal_handle.get_result_async()
-        self.result_future.add_done_callback(self._nav_result)
+        # legacy callback for NavigateToPose (no longer used)
+        return
 
     def _nav_result(self, future):
-        result = future.result()
-        self.status = result.status if result else GoalStatus.STATUS_ABORTED
+        # legacy handler for NavigateToPose (no longer used)
+        return
 
     def _cancel_nav(self):
-        if self.goal_handle is not None:
-            self.goal_handle.cancel_goal_async()
-            self.goal_handle = None
-            self.result_future = None
+        try:
+            self.navigator.cancelTask()
+        except Exception:
+            # fall back: nothing to cancel
+            pass
 
     def _is_nav_complete(self):
-        if self.result_future is None:
+        try:
+            return self.navigator.isTaskComplete()
+        except Exception:
             return True
-        return self.result_future.done()
 
     def _send_spin(self, angle=math.pi * 2, time_allowance=15):
         """Send a Spin action. Non-blocking."""
@@ -391,7 +401,8 @@ class MissionController(Node):
             return  # Still waiting for dock status
 
         # Check if Nav2 is ready (simplified: check if action server is available)
-        if not self.nav_client.server_is_ready():
+        # if not self.nav_client.server_is_ready():
+        if not self.nav2_ready:
             return
 
         if not self.initial_pose_received:
@@ -552,7 +563,7 @@ class MissionController(Node):
             elif i == self.waypoint_index - 1:
                 # Current target: bright yellow
                 m.color.r = 1.0
-                m.color.g = 0.0
+                m.color.g = 1.0
                 m.color.b = 0.0
                 m.color.a = 1.0
             else:
