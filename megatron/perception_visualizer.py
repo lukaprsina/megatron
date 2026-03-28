@@ -109,6 +109,14 @@ class PerceptionVisualizer(Node):
         body = np.hstack([left, right])
         header = np.full((88, body.shape[1], 3), 24, dtype=np.uint8)
 
+        info_text = f'Faces: {self.face_count}   Rings: {self.ring_count}   Last ring: {self.last_ring_color}'
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.62
+        thickness = 2
+        (text_width, text_height), baseline = cv2.getTextSize(info_text, font, font_scale, thickness)
+        x = max(20, body.shape[1] - text_width - 20)
+        y = 68
+        
         cv2.putText(
             header,
             'Megatron Task 1 Perception',
@@ -131,12 +139,12 @@ class PerceptionVisualizer(Node):
         )
         cv2.putText(
             header,
-            f'Faces: {self.face_count}   Rings: {self.ring_count}   Last ring: {self.last_ring_color}',
-            (body.shape[1] // 2 - 120, 68),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.62,
+            info_text,
+            (x, y),
+            font,
+            font_scale,
             (210, 210, 210),
-            2,
+            thickness,
             cv2.LINE_AA,
         )
 

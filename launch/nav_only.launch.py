@@ -9,7 +9,6 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    # Careful, thes are the ./install directory paths, rebuild
     pkg_dis_tutorial3 = get_package_share_directory('dis_tutorial3')
     pkg_megatron = get_package_share_directory('megatron')
 
@@ -20,7 +19,7 @@ def generate_launch_description():
         DeclareLaunchArgument('map', default_value=PathJoinSubstitution(
             [pkg_megatron, 'maps', 'task1.yaml']),
             description='Map YAML file'),
-        DeclareLaunchArgument('launch_rviz', default_value='true',
+        DeclareLaunchArgument('rviz', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('visualization', default_value='true',
                       choices=['true', 'false'],
@@ -31,8 +30,10 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('rviz_config', default_value=PathJoinSubstitution(
-            [pkg_megatron, 'config', 'production.rviz']),
+            [pkg_megatron, 'config', 'task1.rviz']),
             description='RViz config file'),
+        DeclareLaunchArgument('waypoints', default_value="test1.yaml",
+                              description='Waypoints YAML file'),
     ]
 
     # Include the full simulation + navigation stack from dis_tutorial3
@@ -42,7 +43,7 @@ def generate_launch_description():
         launch_arguments=[
             ('world', LaunchConfiguration('world')),
             ('map', LaunchConfiguration('map')),
-            ('rviz', 'false'), # we will configure it manually
+            ('rviz', 'false'),
             ('use_sim_time', LaunchConfiguration('use_sim_time')),
         ],
     )
@@ -52,32 +53,13 @@ def generate_launch_description():
         executable='rviz2',
         name='rviz2',
         arguments=['-d', LaunchConfiguration('rviz_config')],
-        arguments=['-d', LaunchConfiguration('rviz_config')],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
         remappings=[
             ('/tf', 'tf'),
             ('/tf_static', 'tf_static'),
         ],
         output='screen',
-        condition=IfCondition(LaunchConfiguration('launch_rviz')),
-    )
-
-    # Face detector
-    face_detector = Node(
-        package='megatron',
-        executable='face_detector',
-        name='face_detector',
-        output='screen',
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
-    )
-
-    # Ring detector
-    ring_detector = Node(
-        package='megatron',
-        executable='ring_detector',
-        name='ring_detector',
-        output='screen',
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+        #condition=IfCondition(LaunchConfiguration('rviz')),
     )
 
     # Mission controller
@@ -88,7 +70,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', 'test1.yaml']),
+            'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', LaunchConfiguration('waypoints')]),
 
         }],
     )
@@ -108,8 +90,6 @@ def generate_launch_description():
     ld = LaunchDescription(args)
     ld.add_action(sim_nav)
     ld.add_action(rviz)
-    ld.add_action(face_detector)
-    ld.add_action(ring_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
     return ld
