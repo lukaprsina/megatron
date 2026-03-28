@@ -16,8 +16,54 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 
+# ---------------------------------------------------------------------------
+# Shared UI helpers
+# ---------------------------------------------------------------------------
+
+def _overlay_label(image: np.ndarray, text: str, pos: tuple[int, int] = (4, 4),
+                   font_scale: float = 0.5, thickness: int = 1,
+                   alpha: float = 0.9) -> None:
+    """Draw a text label with a semi-transparent black background, in-place."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    x, y = pos
+    pad = 4
+    # Background rectangle
+    overlay = image.copy()
+    cv2.rectangle(overlay, (x, y), (x + tw + 2 * pad, y + th + 2 * pad + baseline),
+                  (0, 0, 0), -1)
+    cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0, image)
+    # Text
+    cv2.putText(image, text, (x + pad, y + pad + th),
+                font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
+def _fit_image(image: Optional[np.ndarray], target_w: int, target_h: int) -> np.ndarray:
+    """Resize an image to fit within target_w x target_h, preserving aspect ratio,
+    centered on a dark background. Returns a BGR image."""
+    canvas = np.full((target_h, target_w, 3), 18, dtype=np.uint8)
+    if image is None or image.size == 0:
+        return canvas
+    if len(image.shape) == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    scale = min(target_w / image.shape[1], target_h / image.shape[0])
+    rw = max(1, int(image.shape[1] * scale))
+    rh = max(1, int(image.shape[0] * scale))
+    resized = cv2.resize(image, (rw, rh))
+    y = (target_h - rh) // 2
+    x = (target_w - rw) // 2
+    canvas[y:y + rh, x:x + rw] = resized
+    return canvas
+
+
+# ---------------------------------------------------------------------------
+# Node
+# ---------------------------------------------------------------------------
+
 class PerceptionVisualizer(Node):
     """Compose detector outputs into a single demo-friendly visualization."""
+
+    WINDOW_NAME = 'Faces and Rings Camera'
 
     def __init__(self) -> None:
         super().__init__('perception_visualizer')
@@ -26,15 +72,11 @@ class PerceptionVisualizer(Node):
         self.declare_parameter('publish_combined_image', True)
         self.declare_parameter('refresh_rate', 10.0)
         self.declare_parameter('panel_height', 360)
-        self.declare_parameter('window_name', 'Megatron Perception')
-        self.declare_parameter('show_ring_debug', False)
 
         self.show_window = self.get_parameter('show_window').get_parameter_value().bool_value
         self.publish_combined_image = self.get_parameter('publish_combined_image').get_parameter_value().bool_value
         self.refresh_rate = self.get_parameter('refresh_rate').get_parameter_value().double_value
         self.panel_height = self.get_parameter('panel_height').get_parameter_value().integer_value
-        self.window_name = self.get_parameter('window_name').get_parameter_value().string_value
-        self.show_ring_debug = self.get_parameter('show_ring_debug').get_parameter_value().bool_value
 
         if self.refresh_rate <= 0.0:
             self.refresh_rate = 10.0
@@ -43,212 +85,165 @@ class PerceptionVisualizer(Node):
 
         self.bridge = CvBridge()
 
+        # Main detector images
         self.face_image: Optional[np.ndarray] = None
         self.ring_image: Optional[np.ndarray] = None
         self.face_count = 0
         self.ring_count = 0
         self.last_ring_color = '—'
         self.mission_status = 'WAITING_FOR_NAV2'
+
         # Ring debug images (4 stages)
         self.ring_debug_binary: Optional[np.ndarray] = None
         self.ring_debug_ellipses: Optional[np.ndarray] = None
         self.ring_debug_pairs: Optional[np.ndarray] = None
         self.ring_debug_color: Optional[np.ndarray] = None
-        self.create_subscription(
-            Image, '/face_detections_image', self._face_image_callback, qos_profile_sensor_data)
-        self.create_subscription(
-            Image, '/ring_detections_image', self._ring_image_callback, qos_profile_sensor_data)
-        self.create_subscription(PoseStamped, '/detected_faces', self._face_pose_callback, 10)
-        self.create_subscription(PoseStamped, '/detected_rings', self._ring_pose_callback, 10)
-        self.create_subscription(String, '/detected_ring_color', self._ring_color_callback, 10)
-        self.create_subscription(String, '/mission_status', self._mission_status_callback, 10)
 
-        # Ring debug subscriptions
-        self.create_subscription(Image, '/ring_debug/binary', self._ring_debug_binary_cb, 10)
-        self.create_subscription(Image, '/ring_debug/ellipses', self._ring_debug_ellipses_cb, 10)
-        self.create_subscription(Image, '/ring_debug/pairs', self._ring_debug_pairs_cb, 10)
-        self.create_subscription(Image, '/ring_debug/color', self._ring_debug_color_cb, 10)
+        # Subscriptions — main
+        self.create_subscription(
+            Image, '/face_detections_image', self._face_image_cb, qos_profile_sensor_data)
+        self.create_subscription(
+            Image, '/ring_detections_image', self._ring_image_cb, qos_profile_sensor_data)
+        self.create_subscription(PoseStamped, '/detected_faces', self._face_pose_cb, 10)
+        self.create_subscription(PoseStamped, '/detected_rings', self._ring_pose_cb, 10)
+        self.create_subscription(String, '/detected_ring_color', self._ring_color_cb, 10)
+        self.create_subscription(String, '/mission_status', self._mission_status_cb, 10)
 
+        # Subscriptions — ring debug
+        self.create_subscription(Image, '/ring_debug/binary', self._rd_binary_cb, 10)
+        self.create_subscription(Image, '/ring_debug/ellipses', self._rd_ellipses_cb, 10)
+        self.create_subscription(Image, '/ring_debug/pairs', self._rd_pairs_cb, 10)
+        self.create_subscription(Image, '/ring_debug/color', self._rd_color_cb, 10)
+
+        # Publisher
         self.image_pub = self.create_publisher(Image, '/task1_visualization_image', 10)
 
-        self.timer = self.create_timer(1.0 / self.refresh_rate, self._publish_visualization)
-
-        if self.show_ring_debug:
-            cv2.namedWindow('Ring Debug', cv2.WINDOW_NORMAL)
+        self.timer = self.create_timer(1.0 / self.refresh_rate, self._tick)
 
         self.get_logger().info('Perception visualizer initialized.')
 
-    def _face_image_callback(self, msg: Image) -> None:
-        self.face_image = self._msg_to_bgr(msg)
+    # --- Callbacks --------------------------------------------------------
 
-    def _ring_image_callback(self, msg: Image) -> None:
-        self.ring_image = self._msg_to_bgr(msg)
+    def _face_image_cb(self, msg: Image) -> None:
+        self.face_image = self._to_bgr(msg)
 
-    def _face_pose_callback(self, _: PoseStamped) -> None:
+    def _ring_image_cb(self, msg: Image) -> None:
+        self.ring_image = self._to_bgr(msg)
+
+    def _face_pose_cb(self, _: PoseStamped) -> None:
         self.face_count += 1
 
-    def _ring_pose_callback(self, _: PoseStamped) -> None:
+    def _ring_pose_cb(self, _: PoseStamped) -> None:
         self.ring_count += 1
 
-    def _ring_color_callback(self, msg: String) -> None:
+    def _ring_color_cb(self, msg: String) -> None:
         self.last_ring_color = msg.data or 'unknown'
 
-    def _mission_status_callback(self, msg: String) -> None:
+    def _mission_status_cb(self, msg: String) -> None:
         self.mission_status = msg.data or 'unknown'
 
-    # Ring debug callbacks
-    def _ring_debug_binary_cb(self, msg: Image) -> None:
-        self.ring_debug_binary = self._msg_to_cv2(msg)
+    def _rd_binary_cb(self, msg: Image) -> None:
+        self.ring_debug_binary = self._to_any(msg)
 
-    def _ring_debug_ellipses_cb(self, msg: Image) -> None:
-        self.ring_debug_ellipses = self._msg_to_bgr(msg)
+    def _rd_ellipses_cb(self, msg: Image) -> None:
+        self.ring_debug_ellipses = self._to_bgr(msg)
 
-    def _ring_debug_pairs_cb(self, msg: Image) -> None:
-        self.ring_debug_pairs = self._msg_to_bgr(msg)
+    def _rd_pairs_cb(self, msg: Image) -> None:
+        self.ring_debug_pairs = self._to_bgr(msg)
 
-    def _ring_debug_color_cb(self, msg: Image) -> None:
-        self.ring_debug_color = self._msg_to_bgr(msg)
+    def _rd_color_cb(self, msg: Image) -> None:
+        self.ring_debug_color = self._to_bgr(msg)
 
-    def _msg_to_cv2(self, msg: Image) -> Optional[np.ndarray]:
-        """Convert any image message to a numpy array, preserving encoding."""
+    # --- Image conversion -------------------------------------------------
+
+    def _to_bgr(self, msg: Image) -> Optional[np.ndarray]:
+        try:
+            return np.ascontiguousarray(
+                self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8'))
+        except CvBridgeError as exc:
+            self.get_logger().warn(f'Image conversion failed: {exc}')
+            return None
+
+    def _to_any(self, msg: Image) -> Optional[np.ndarray]:
         try:
             return np.ascontiguousarray(self.bridge.imgmsg_to_cv2(msg))
         except CvBridgeError as exc:
-            self.get_logger().warn(f'Failed to convert image: {exc}')
+            self.get_logger().warn(f'Image conversion failed: {exc}')
             return None
 
-    def _msg_to_bgr(self, msg: Image) -> Optional[np.ndarray]:
-        try:
-            image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        except CvBridgeError as exc:
-            self.get_logger().warn(f'Failed to convert image: {exc}')
-            return None
-        return np.ascontiguousarray(image)
+    # --- Timer callback ----------------------------------------------------
 
-    def _publish_visualization(self) -> None:
+    def _tick(self) -> None:
         canvas = self._build_canvas()
 
         if self.publish_combined_image:
             try:
                 self.image_pub.publish(self.bridge.cv2_to_imgmsg(canvas, encoding='bgr8'))
             except CvBridgeError as exc:
-                self.get_logger().warn(f'Failed to publish visualization image: {exc}')
+                self.get_logger().warn(f'Failed to publish: {exc}')
 
         if self.show_window:
-            cv2.imshow(self.window_name, canvas)
+            cv2.imshow(self.WINDOW_NAME, canvas)
             cv2.waitKey(1)
 
-        if self.show_ring_debug:
-            self._show_ring_debug_window()
+    # --- Canvas construction -----------------------------------------------
 
     def _build_canvas(self) -> np.ndarray:
-        left = self._prepare_panel(self.face_image, 'Faces', (60, 80, 220))
-        right = self._prepare_panel(self.ring_image, 'Rings', (60, 180, 75))
+        pw = 480  # panel width for each column
+        ph = self.panel_height
 
-        body = np.hstack([left, right])
-        header = np.full((88, body.shape[1], 3), 24, dtype=np.uint8)
+        # Row 1: Faces | Rings
+        face_panel = _fit_image(self.face_image, pw, ph)
+        _overlay_label(face_panel, 'Faces')
+        ring_panel = _fit_image(self.ring_image, pw, ph)
+        _overlay_label(ring_panel, 'Rings')
+        row1 = np.hstack([face_panel, ring_panel])
 
-        info_text = f'Faces: {self.face_count}   Rings: {self.ring_count}   Last ring: {self.last_ring_color}'
+        # Row 2: Ring debug 2x2 (each cell = pw/2 x ph/2)
+        cw, ch = pw // 2, ph // 2
+        db_binary = _fit_image(self.ring_debug_binary, cw, ch)
+        _overlay_label(db_binary, 'Binary', font_scale=0.4)
+        db_ellipses = _fit_image(self.ring_debug_ellipses, cw, ch)
+        _overlay_label(db_ellipses, 'Ellipses', font_scale=0.4)
+        db_pairs = _fit_image(self.ring_debug_pairs, cw, ch)
+        _overlay_label(db_pairs, 'Pairs', font_scale=0.4)
+        db_color = _fit_image(self.ring_debug_color, cw, ch)
+        _overlay_label(db_color, 'Color', font_scale=0.4)
+        row2 = np.vstack([
+            np.hstack([db_binary, db_ellipses, db_pairs, db_color]),
+        ])
+
+        body = np.vstack([row1, row2])
+
+        # Header
+        header_h = 72
+        header = np.full((header_h, body.shape[1], 3), 24, dtype=np.uint8)
+
+        title = 'Megatron Task 1 Perception'
+        status_line = (
+            f'State: {self.mission_status} | '
+            f'faces {self.face_count}/3 | '
+            f'rings {self.ring_count}/2 | '
+            f'waypoint ?/?'
+        )
+        info = f'Faces: {self.face_count}   Rings: {self.ring_count}   Last ring: {self.last_ring_color}'
+
+        cv2.putText(header, title, (16, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.82, (245, 245, 245), 2, cv2.LINE_AA)
+        cv2.putText(header, status_line, (16, 56),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (210, 210, 210), 1, cv2.LINE_AA)
+
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.62
-        thickness = 2
-        (text_width, text_height), baseline = cv2.getTextSize(info_text, font, font_scale, thickness)
-        x = max(20, body.shape[1] - text_width - 20)
-        y = 68
-        
-        cv2.putText(
-            header,
-            'Megatron Task 1 Perception',
-            (20, 34),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.95,
-            (245, 245, 245),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            header,
-            f'State: {self.mission_status}',
-            (20, 68),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.62,
-            (210, 210, 210),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            header,
-            info_text,
-            (x, y),
-            font,
-            font_scale,
-            (210, 210, 210),
-            thickness,
-            cv2.LINE_AA,
-        )
+        (tw, _), _ = cv2.getTextSize(info, font, 0.52, 1)
+        cv2.putText(header, info, (max(16, body.shape[1] - tw - 16), 56),
+                    font, 0.52, (210, 210, 210), 1, cv2.LINE_AA)
 
         return np.vstack([header, body])
 
-    def _prepare_panel(self, image: Optional[np.ndarray], title: str, accent_bgr: tuple[int, int, int]) -> np.ndarray:
-        panel = np.full((self.panel_height, 640, 3), 18, dtype=np.uint8)
-        cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (60, 60, 60), 1)
-        cv2.rectangle(panel, (0, 0), (panel.shape[1], 44), accent_bgr, -1)
-        cv2.putText(panel, title, (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
-
-        if image is None or image.size == 0:
-            cv2.putText(
-                panel,
-                'Waiting for detector image...',
-                (120, self.panel_height // 2),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (180, 180, 180),
-                2,
-                cv2.LINE_AA,
-            )
-            return panel
-
-        content_height = self.panel_height - 60
-        scale = min((panel.shape[1] - 24) / image.shape[1], content_height / image.shape[0])
-        resized = cv2.resize(image, (max(1, int(image.shape[1] * scale)), max(1, int(image.shape[0] * scale))))
-
-        y = 52 + max(0, (content_height - resized.shape[0]) // 2)
-        x = max(0, (panel.shape[1] - resized.shape[1]) // 2)
-        panel[y:y + resized.shape[0], x:x + resized.shape[1]] = resized
-        return panel
-
-    def _show_ring_debug_window(self) -> None:
-        """Build and show a 2x2 grid of the ring debug pipeline stages."""
-        target_h, target_w = 240, 320
-
-        def _to_bgr_resized(img: Optional[np.ndarray], label: str) -> np.ndarray:
-            if img is None or img.size == 0:
-                placeholder = np.full((target_h, target_w, 3), 30, dtype=np.uint8)
-                cv2.putText(placeholder, f'{label}: waiting...',
-                            (10, target_h // 2), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, (100, 100, 100), 1)
-                return placeholder
-            if len(img.shape) == 2:
-                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-            resized = cv2.resize(img, (target_w, target_h))
-            cv2.putText(resized, label, (5, 18),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-            return resized
-
-        top = np.hstack([
-            _to_bgr_resized(self.ring_debug_binary, 'Binary'),
-            _to_bgr_resized(self.ring_debug_ellipses, 'Ellipses'),
-        ])
-        bottom = np.hstack([
-            _to_bgr_resized(self.ring_debug_pairs, 'Pairs'),
-            _to_bgr_resized(self.ring_debug_color, 'Color'),
-        ])
-        grid = np.vstack([top, bottom])
-        cv2.imshow('Ring Debug', grid)
-        cv2.waitKey(1)
+    # --- Cleanup -----------------------------------------------------------
 
     def destroy_node(self) -> None:
-        if self.show_window or self.show_ring_debug:
+        if self.show_window:
             cv2.destroyAllWindows()
         super().destroy_node()
 

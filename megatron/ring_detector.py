@@ -84,6 +84,35 @@ def classify_ring_color(
     return best_name, confidence
 
 
+def _check_hole(image_gray: np.ndarray,
+                outer_ellipse: tuple, inner_ellipse: tuple,
+                min_brightness_diff: float = 20.0) -> bool:
+    """Verify the ring has a genuine hole — the interior should look different
+    from the ring band.
+
+    For a real ring the inner region shows the wall/background behind it, which
+    is brighter or at least significantly different from the colored ring band.
+    A solid cylinder has the same color inside and outside.
+
+    Returns True if the interior differs enough from the band (= real hole).
+    """
+    h, w = image_gray.shape[:2]
+    # Band mask (ring material)
+    band_mask = _build_annular_mask((h, w), outer_ellipse, inner_ellipse)
+    # Inner mask (the hole)
+    inner_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.ellipse(inner_mask, inner_ellipse, (255,), -1)
+
+    band_pixels = cv2.mean(image_gray, mask=band_mask)[0]
+    inner_pixels = cv2.mean(image_gray, mask=inner_mask)[0]
+
+    # If either region has no pixels, skip
+    if cv2.countNonZero(band_mask) == 0 or cv2.countNonZero(inner_mask) == 0:
+        return False
+
+    return abs(band_pixels - inner_pixels) >= min_brightness_diff
+
+
 # ---------------------------------------------------------------------------
 # Ellipse quality scoring
 # ---------------------------------------------------------------------------
@@ -203,8 +232,8 @@ class RingDetectorNode(Node):
         self.declare_parameter('min_pair_score', 0.30)
         # Color classification
         self.declare_parameter('min_color_confidence', 0.15)
-        # Debug
-        self.declare_parameter('show_debug_window', False)
+        # Hole check
+        self.declare_parameter('min_brightness_diff', 20.0)
 
         self.confirmation_count = self.get_parameter('confirmation_count').get_parameter_value().integer_value
         self.dedup_distance = self.get_parameter('dedup_distance').get_parameter_value().double_value
@@ -217,7 +246,7 @@ class RingDetectorNode(Node):
         self.center_thr = self.get_parameter('center_thr').get_parameter_value().double_value
         self.min_pair_score = self.get_parameter('min_pair_score').get_parameter_value().double_value
         self.min_color_confidence = self.get_parameter('min_color_confidence').get_parameter_value().double_value
-        self.show_debug_window = self.get_parameter('show_debug_window').get_parameter_value().bool_value
+        self.min_brightness_diff = self.get_parameter('min_brightness_diff').get_parameter_value().double_value
 
         # Enforce odd block size >= 3
         if self.thresh_block_size % 2 == 0:
@@ -255,9 +284,6 @@ class RingDetectorNode(Node):
         self.detections_px: list[tuple] = []
         self.candidates: list[dict] = []   # [{'pos': np.array, 'color': str, 'count': int}]
         self.confirmed: list[dict] = []    # [{'pos': np.array, 'color': str}]
-
-        if self.show_debug_window:
-            cv2.namedWindow('Ring Debug', cv2.WINDOW_NORMAL)
 
         self.get_logger().info('Ring detector initialized (ellipse-pair mode).')
 
@@ -379,11 +405,22 @@ class RingDetectorNode(Node):
         # Publish debug 3 — pairs
         self._publish_debug(self.debug_pairs_pub, debug_pairs_img)
 
-        # ---- Stage 4: color classification ----
+        # ---- Stage 4: color classification + hole check ----
         debug_color_img = cv_image.copy()
         output_img = cv_image.copy()  # for /ring_detections_image
+        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)  # reuse for hole check
 
         for outer, inner, ps, (cx_px, cy_px) in ring_candidates:
+            # Hole check: reject solid objects (e.g. cylinders)
+            has_hole = _check_hole(gray, outer, inner, self.min_brightness_diff)
+            if not has_hole:
+                cv2.ellipse(debug_color_img, outer, (0, 0, 180), 1)
+                cv2.ellipse(debug_color_img, inner, (0, 0, 180), 1)
+                cv2.putText(debug_color_img, 'solid',
+                            (cx_px + 8, cy_px),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 180), 1)
+                continue
+
             color_name, confidence = classify_ring_color(cv_image, outer, inner)
 
             if color_name is None or confidence < self.min_color_confidence:
@@ -426,10 +463,6 @@ class RingDetectorNode(Node):
             self.image_pub.publish(self.bridge.cv2_to_imgmsg(output_img, "bgr8"))
         except CvBridgeError:
             pass
-
-        # Optional local debug window (2x2 grid)
-        if self.show_debug_window:
-            self._show_local_debug(thresh, debug_ellipses_img, debug_pairs_img, debug_color_img)
 
     # ------------------------------------------------------------------
     # Point cloud callback — 3D localization with multi-point sampling
@@ -514,14 +547,14 @@ class RingDetectorNode(Node):
                 return
 
         matched = False
-        for cand in self.candidates:
+        for idx, cand in enumerate(self.candidates):
             if np.linalg.norm(map_point - cand['pos']) < self.dedup_distance:
                 cand['count'] += 1
                 cand['pos'] = (cand['pos'] * (cand['count'] - 1) + map_point) / cand['count']
                 matched = True
                 if cand['count'] >= self.confirmation_count:
                     self._confirm_ring(cand['pos'], cand['color'], stamp)
-                    self.candidates.remove(cand)
+                    del self.candidates[idx]
                 break
 
         if not matched:
@@ -618,37 +651,11 @@ class RingDetectorNode(Node):
         except CvBridgeError:
             pass
 
-    def _show_local_debug(self, binary: np.ndarray, ellipses: np.ndarray,
-                          pairs: np.ndarray, color: np.ndarray) -> None:
-        """Show a 2x2 grid of debug images in a local OpenCV window."""
-        target_h, target_w = 240, 320
-
-        def _resize(img: np.ndarray) -> np.ndarray:
-            if len(img.shape) == 2:
-                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-            return cv2.resize(img, (target_w, target_h))
-
-        top = np.hstack([_resize(binary), _resize(ellipses)])
-        bottom = np.hstack([_resize(pairs), _resize(color)])
-
-        # Add small labels
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        for label, x in [('Binary', 5), ('Ellipses', target_w + 5)]:
-            cv2.putText(top, label, (x, 18), font, 0.5, (0, 255, 255), 1)
-        for label, x in [('Pairs', 5), ('Color', target_w + 5)]:
-            cv2.putText(bottom, label, (x, 18), font, 0.5, (0, 255, 255), 1)
-
-        grid = np.vstack([top, bottom])
-        cv2.imshow('Ring Debug', grid)
-        cv2.waitKey(1)
-
 
 def main(args=None):
     print('Ring detection node starting.')
     rclpy.init(args=args)
     node = RingDetectorNode()
     rclpy.spin(node)
-    if node.show_debug_window:
-        cv2.destroyAllWindows()
     node.destroy_node()
     rclpy.shutdown()
