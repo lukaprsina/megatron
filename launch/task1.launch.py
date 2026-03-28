@@ -29,8 +29,7 @@ def generate_launch_description():
                       description='Show the combined perception panel in an OpenCV window'),
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               choices=['true', 'false']),
-        DeclareLaunchArgument('rviz_config', default_value=PathJoinSubstitution(
-            [pkg_megatron, 'config', 'task1.rviz']),
+        DeclareLaunchArgument('rviz_config', default_value="task1.rviz",
             description='RViz config file')
     ]
 
@@ -50,7 +49,8 @@ def generate_launch_description():
         package='rviz2',
         executable='rviz2',
         name='rviz2',
-        arguments=['-d', LaunchConfiguration('rviz_config')],
+        arguments=['-d', PathJoinSubstitution(
+            [pkg_megatron, 'config', LaunchConfiguration('rviz_config')])],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
         remappings=[
             ('/tf', 'tf'),
