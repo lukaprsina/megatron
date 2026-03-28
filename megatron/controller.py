@@ -25,6 +25,8 @@ from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
 from megatron.speech import Speaker
 
 import numpy as np
+import yaml
+from pathlib import Path
 
 
 class State(Enum):
@@ -43,7 +45,7 @@ amcl_pose_qos = QoSProfile(
     history=QoSHistoryPolicy.KEEP_LAST,
     depth=1,
 )
-
+# !!!!!!!!! THESE ARE THE DEFAULT WAYPOINTS, BUT YOU CAN OVERRIDE THEM BY PROVIDING A YAML FILE WITH THE SAME FORMAT AND PASSING ITS NAME AS A LAUNCH ARGUMENT !!!!!!!!!
 # Exploration waypoints: (x, y, yaw) covering the ~6x7.5m task1 arena
 # Arena bounds approximately: X [-3.1, 3.1], Y [-4.4, 3.2]
 # Robot spawns near (0, 0). Perimeter + interior zigzag pattern.
@@ -65,6 +67,66 @@ WAYPOINTS = [
 ]
 
 
+# Function for waypoints 
+def _quaternion_to_yaw(q_list):
+    """Convert quaternion (x,y,z,w) to yaw angle (radians)."""
+    try:
+        x, y, z, w = q_list
+    except Exception:
+        return 0.0
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+# Function for waypoints 
+def load_waypoints_from_yaml(path):
+    """Load waypoints from a YAML file.
+
+    Supports formats:
+      - dict under top-level key 'waypoints' (mapping names -> {pose, orientation})
+      - top-level list of entries like [x, y, yaw] or {pose: [...], orientation: [...]}
+    Returns list of (x, y, yaw) tuples.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f'Waypoints file not found: {p}')
+    data = yaml.safe_load(p.read_text())
+    out = []
+    candidates = []
+    if isinstance(data, dict) and 'waypoints' in data:
+        wp_dict = data['waypoints']
+        candidates = list(wp_dict.values())
+    elif isinstance(data, list):
+        candidates = data
+    elif isinstance(data, dict):
+        candidates = list(data.values())
+
+    for entry in candidates:
+        x = y = yaw = None
+        if isinstance(entry, dict):
+            pose = entry.get('pose')
+            orient = entry.get('orientation')
+            if pose and len(pose) >= 2:
+                x = float(pose[0])
+                y = float(pose[1])
+            if orient and len(orient) == 4:
+                yaw = _quaternion_to_yaw(orient)
+        elif isinstance(entry, (list, tuple)):
+            if len(entry) >= 2:
+                x = float(entry[0])
+                y = float(entry[1])
+            if len(entry) >= 3:
+                yaw = float(entry[2])
+
+        if x is None or y is None:
+            continue
+        if yaw is None:
+            yaw = 0.0
+        out.append((x, y, yaw))
+
+    return out
+
+
 class MissionController(Node):
 
     def __init__(self):
@@ -75,6 +137,7 @@ class MissionController(Node):
         self.declare_parameter('spin_at_waypoints', True)
         self.declare_parameter('total_faces', 3)
         self.declare_parameter('total_rings', 2)
+        self.declare_parameter('waypoints_file', 'waypoints/test1.yaml')
 
         self.dedup_distance = self.get_parameter('dedup_distance').get_parameter_value().double_value
         self.approach_distance = self.get_parameter('approach_distance').get_parameter_value().double_value
@@ -96,6 +159,19 @@ class MissionController(Node):
         self.current_pose = None
         self.waypoint_index = 0
         self.start_time = None
+
+        # Load waypoints from YAML if provided, fallback to global WAYPOINTS
+        try:
+            wp_file = self.get_parameter('waypoints_file').get_parameter_value().string_value
+        except Exception:
+            wp_file = 'waypoints/test1.yaml'
+
+        try:
+            self.waypoints = load_waypoints_from_yaml(wp_file)
+            self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints from {wp_file}')
+        except Exception as e:
+            self.get_logger().warn(f'Failed to load waypoints from {wp_file}: {e}; using default WAYPOINTS')
+            self.waypoints = WAYPOINTS
 
         # Detection state
         self.found_faces = []  # [np.array([x,y,z])]
@@ -422,12 +498,13 @@ class MissionController(Node):
             self._send_next_waypoint()
 
     def _send_next_waypoint(self):
-        if self.waypoint_index >= len(WAYPOINTS):
+        if self.waypoint_index >= len(self.waypoints):
             # Loop back to the start of waypoints
             self.waypoint_index = 0
             self.get_logger().info('Completed all waypoints, looping.')
 
-        x, y, yaw = WAYPOINTS[self.waypoint_index]
+        self.get_logger().info(f'Heading to waypoint {self.waypoint_index} ')
+        x, y, yaw = self.waypoints[self.waypoint_index]
         self.waypoint_index += 1
         self._send_nav_goal(x, y, yaw)
         self._publish_goal_markers()
@@ -450,7 +527,7 @@ class MissionController(Node):
         """Publish waypoint goal markers for RViz."""
         marker_array = MarkerArray()
         markers: list[Marker] = []
-        for i, (x, y, yaw) in enumerate(WAYPOINTS):
+        for i, (x, y, yaw) in enumerate(self.waypoints):
             m = Marker()
             m.header.frame_id = 'map'
             m.header.stamp = self.get_clock().now().to_msg()
@@ -475,7 +552,7 @@ class MissionController(Node):
             elif i == self.waypoint_index - 1:
                 # Current target: bright yellow
                 m.color.r = 1.0
-                m.color.g = 1.0
+                m.color.g = 0.0
                 m.color.b = 0.0
                 m.color.a = 1.0
             else:
@@ -494,8 +571,10 @@ class MissionController(Node):
         msg = String()
         msg.data = (
             f'{self.state.name} | faces {len(self.found_faces)}/{self.total_faces} '
-            f'| rings {len(self.found_rings)}/{self.total_rings}'
+            f'| rings {len(self.found_rings)}/{self.total_rings} '
+            f'| waypoint {self.waypoint_index}/{len(self.waypoints)}'
         )
+        self.get_logger().info(f'Mission status: {msg.data}')
         self.mission_status_pub.publish(msg)
 
 
