@@ -195,11 +195,7 @@ class PerceptionVisualizer(Node):
         header = np.full((64, width, 3), 24, dtype=np.uint8)
         cv2.putText(header, 'Megatron Task 1 Perception', (16, 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.82, (245, 245, 245), 2, cv2.LINE_AA)
-        status = (
-            f'State: {self.mission_status} | '
-            f'faces {self.face_count}/3 | rings {self.ring_count}/2 | '
-            f'last ring: {self.last_ring_color}'
-        )
+        status = f'{self.mission_status}'
         cv2.putText(header, status, (16, 52),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52, (210, 210, 210), 1, cv2.LINE_AA)
         return header

@@ -572,7 +572,8 @@ class MissionController(Node):
         msg.data = (
             f'{self.state.name} | faces {len(self.found_faces)}/{self.total_faces} '
             f'| rings {len(self.found_rings)}/{self.total_rings} '
-            f'| waypoint {self.waypoint_index}/{len(self.waypoints)}'
+            f'| waypoint {self.waypoint_index}/{len(self.waypoints)} '
+            f'| last ring: {self.last_ring_color}'
         )
         self.get_logger().info(f'Mission status: {msg.data}')
         self.mission_status_pub.publish(msg)
