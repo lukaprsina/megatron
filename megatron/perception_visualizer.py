@@ -69,12 +69,10 @@ class PerceptionVisualizer(Node):
         super().__init__('perception_visualizer')
 
         self.declare_parameter('show_window', False)
-        self.declare_parameter('publish_combined_image', True)
         self.declare_parameter('refresh_rate', 10.0)
         self.declare_parameter('panel_height', 360)
 
         self.show_window = self.get_parameter('show_window').get_parameter_value().bool_value
-        self.publish_combined_image = self.get_parameter('publish_combined_image').get_parameter_value().bool_value
         self.refresh_rate = self.get_parameter('refresh_rate').get_parameter_value().double_value
         self.panel_height = self.get_parameter('panel_height').get_parameter_value().integer_value
 
@@ -115,8 +113,9 @@ class PerceptionVisualizer(Node):
         self.create_subscription(Image, '/ring_debug/pairs', self._rd_pairs_cb, 10)
         self.create_subscription(Image, '/ring_debug/color', self._rd_color_cb, 10)
 
-        # Publisher
+        # Publishers
         self.image_pub = self.create_publisher(Image, '/task1_visualization_image', 10)
+        self.rviz_pub = self.create_publisher(Image, '/task1_rviz_image', 10)
 
         self.timer = self.create_timer(1.0 / self.refresh_rate, self._tick)
 
@@ -174,71 +173,58 @@ class PerceptionVisualizer(Node):
     # --- Timer callback ----------------------------------------------------
 
     def _tick(self) -> None:
-        canvas = self._build_canvas()
+        det_row = self._build_detection_row()
+        header = self._build_header(det_row.shape[1])
 
-        if self.publish_combined_image:
-            try:
-                self.image_pub.publish(self.bridge.cv2_to_imgmsg(canvas, encoding='bgr8'))
-            except CvBridgeError as exc:
-                self.get_logger().warn(f'Failed to publish: {exc}')
+        rviz_canvas = np.vstack([header, det_row])
+        debug_canvas = np.vstack([header, det_row, self._build_debug_row()])
+
+        try:
+            self.rviz_pub.publish(self.bridge.cv2_to_imgmsg(rviz_canvas, encoding='bgr8'))
+            self.image_pub.publish(self.bridge.cv2_to_imgmsg(debug_canvas, encoding='bgr8'))
+        except CvBridgeError as exc:
+            self.get_logger().warn(f'Failed to publish: {exc}')
 
         if self.show_window:
-            cv2.imshow(self.WINDOW_NAME, canvas)
+            cv2.imshow(self.WINDOW_NAME, debug_canvas)
             cv2.waitKey(1)
 
     # --- Canvas construction -----------------------------------------------
 
-    def _build_canvas(self) -> np.ndarray:
-        pw = 480  # panel width for each column
-        ph = self.panel_height
+    def _build_header(self, width: int) -> np.ndarray:
+        header = np.full((64, width, 3), 24, dtype=np.uint8)
+        cv2.putText(header, 'Megatron Task 1 Perception', (16, 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.82, (245, 245, 245), 2, cv2.LINE_AA)
+        status = (
+            f'State: {self.mission_status} | '
+            f'faces {self.face_count}/3 | rings {self.ring_count}/2 | '
+            f'last ring: {self.last_ring_color}'
+        )
+        cv2.putText(header, status, (16, 52),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (210, 210, 210), 1, cv2.LINE_AA)
+        return header
 
-        # Row 1: Faces | Rings
+    def _build_detection_row(self) -> np.ndarray:
+        pw, ph = 480, self.panel_height
         face_panel = _fit_image(self.face_image, pw, ph)
         _overlay_label(face_panel, 'Faces')
         ring_panel = _fit_image(self.ring_image, pw, ph)
         _overlay_label(ring_panel, 'Rings')
-        row1 = np.hstack([face_panel, ring_panel])
+        return np.hstack([face_panel, ring_panel])
 
-        # Row 2: Ring debug 2x2 (each cell = pw/2 x ph/2)
-        cw, ch = pw // 2, ph // 2
-        db_binary = _fit_image(self.ring_debug_binary, cw, ch)
-        _overlay_label(db_binary, 'Binary', font_scale=0.4)
-        db_ellipses = _fit_image(self.ring_debug_ellipses, cw, ch)
-        _overlay_label(db_ellipses, 'Ellipses', font_scale=0.4)
-        db_pairs = _fit_image(self.ring_debug_pairs, cw, ch)
-        _overlay_label(db_pairs, 'Pairs', font_scale=0.4)
-        db_color = _fit_image(self.ring_debug_color, cw, ch)
-        _overlay_label(db_color, 'Color', font_scale=0.4)
-        row2 = np.vstack([
-            np.hstack([db_binary, db_ellipses, db_pairs, db_color]),
-        ])
-
-        body = np.vstack([row1, row2])
-
-        # Header
-        header_h = 72
-        header = np.full((header_h, body.shape[1], 3), 24, dtype=np.uint8)
-
-        title = 'Megatron Task 1 Perception'
-        status_line = (
-            f'State: {self.mission_status} | '
-            f'faces {self.face_count}/3 | '
-            f'rings {self.ring_count}/2 | '
-            f'waypoint ?/?'
-        )
-        info = f'Faces: {self.face_count}   Rings: {self.ring_count}   Last ring: {self.last_ring_color}'
-
-        cv2.putText(header, title, (16, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.82, (245, 245, 245), 2, cv2.LINE_AA)
-        cv2.putText(header, status_line, (16, 56),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (210, 210, 210), 1, cv2.LINE_AA)
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        (tw, _), _ = cv2.getTextSize(info, font, 0.52, 1)
-        cv2.putText(header, info, (max(16, body.shape[1] - tw - 16), 56),
-                    font, 0.52, (210, 210, 210), 1, cv2.LINE_AA)
-
-        return np.vstack([header, body])
+    def _build_debug_row(self) -> np.ndarray:
+        cw, ch = 240, self.panel_height // 2
+        cells = []
+        for img, label in [
+            (self.ring_debug_binary,   'Binary'),
+            (self.ring_debug_ellipses, 'Ellipses'),
+            (self.ring_debug_pairs,    'Pairs'),
+            (self.ring_debug_color,    'Color'),
+        ]:
+            cell = _fit_image(img, cw, ch)
+            _overlay_label(cell, label, font_scale=0.4)
+            cells.append(cell)
+        return np.hstack(cells)
 
     # --- Cleanup -----------------------------------------------------------
 
