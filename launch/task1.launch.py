@@ -28,6 +28,9 @@ def generate_launch_description():
         DeclareLaunchArgument('show_debug_window', default_value='false',
                       choices=['true', 'false'],
                       description='Show the combined perception panel in an OpenCV window'),
+        DeclareLaunchArgument('show_ring_debug', default_value='false',
+                      choices=['true', 'false'],
+                      description='Show ring detector debug pipeline window'),
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('rviz_config', default_value=PathJoinSubstitution(
@@ -51,7 +54,6 @@ def generate_launch_description():
         package='rviz2',
         executable='rviz2',
         name='rviz2',
-        arguments=['-d', LaunchConfiguration('rviz_config')],
         arguments=['-d', LaunchConfiguration('rviz_config')],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
         remappings=[
@@ -77,7 +79,10 @@ def generate_launch_description():
         executable='ring_detector',
         name='ring_detector',
         output='screen',
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'show_debug_window': LaunchConfiguration('show_ring_debug'),
+        }],
     )
 
     # Mission controller
@@ -101,6 +106,7 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'show_window': LaunchConfiguration('show_debug_window'),
+            'show_ring_debug': LaunchConfiguration('show_ring_debug'),
         }],
         condition=IfCondition(LaunchConfiguration('visualization')),
     )
