@@ -24,12 +24,23 @@ class FaceDetectorNode(Node):
         self.declare_parameter('device', '')
         self.declare_parameter('confidence_threshold', 0.5)
         self.declare_parameter('confirmation_count', 3)
-        self.declare_parameter('dedup_distance', 0.5)
+        # B: separate radii for association vs. immunity
+        self.declare_parameter('association_radius', 0.4)
+        self.declare_parameter('immunity_radius', 0.8)
+        # C: stale candidate expiry
+        self.declare_parameter('candidate_timeout', 10.0)
+        # D: multi-viewpoint confirmation
+        self.declare_parameter('min_viewpoints', 2)
+        self.declare_parameter('viewpoint_separation', 0.8)
 
         self.device = self.get_parameter('device').get_parameter_value().string_value
         self.confidence_threshold = self.get_parameter('confidence_threshold').get_parameter_value().double_value
         self.confirmation_count = self.get_parameter('confirmation_count').get_parameter_value().integer_value
-        self.dedup_distance = self.get_parameter('dedup_distance').get_parameter_value().double_value
+        self.association_radius = self.get_parameter('association_radius').get_parameter_value().double_value
+        self.immunity_radius = self.get_parameter('immunity_radius').get_parameter_value().double_value
+        self.candidate_timeout = self.get_parameter('candidate_timeout').get_parameter_value().double_value
+        self.min_viewpoints = self.get_parameter('min_viewpoints').get_parameter_value().integer_value
+        self.viewpoint_separation = self.get_parameter('viewpoint_separation').get_parameter_value().double_value
 
         self.bridge = CvBridge()
         self.model = YOLO("yolov8n.pt")
@@ -58,10 +69,11 @@ class FaceDetectorNode(Node):
 
         # State
         self.detections_px = []  # [(cx, cy)] from latest RGB frame
-        self.candidates = []     # [{'pos': np.array([x,y,z]), 'count': int}]
+        self.candidates = []     # [{'pos', 'count', 'robot_positions', 'last_seen'}]
         self.confirmed = []      # [np.array([x,y,z])]
         self.last_detection_event = 'none'
 
+        self.create_timer(2.0, self._evict_stale_candidates)  # C
         self.get_logger().info('Face detector initialized.')
 
     def rgb_callback(self, data):
@@ -129,6 +141,14 @@ class FaceDetectorNode(Node):
             self.get_logger().warn(f'TF lookup failed: {e}')
             return
 
+        # D: look up current robot position for viewpoint tracking
+        try:
+            robot_tf = self.tf_buffer.lookup_transform('map', 'base_link', time.Time())
+            rt = robot_tf.transform.translation
+            robot_pos = np.array([rt.x, rt.y, rt.z])
+        except Exception:
+            robot_pos = np.zeros(3)
+
         for cx, cy in self.detections_px:
             if cy >= height or cx >= width:
                 continue
@@ -142,7 +162,7 @@ class FaceDetectorNode(Node):
             if map_point is None:
                 continue
 
-            self._process_detection(map_point, data.header.stamp)
+            self._process_detection(map_point, robot_pos, data.header.stamp)
 
         self._publish_status_image()
         self.detections_px = []
@@ -176,33 +196,59 @@ class FaceDetectorNode(Node):
 
         return np.array([rx + t.x, ry + t.y, rz + t.z])
 
-    def _process_detection(self, map_point, stamp):
-        """Multi-frame confirmation and deduplication."""
-        # Check against already confirmed faces
+    def _process_detection(self, map_point, robot_pos, stamp):
+        # B: wider immunity zone — prevents re-reporting already-confirmed objects
         for conf in self.confirmed:
-            if np.linalg.norm(map_point - conf) < self.dedup_distance:
+            if np.linalg.norm(map_point - conf) < self.immunity_radius:
                 self.last_detection_event = 'dedup-ignored'
-                return  # Already found this face
+                return
 
-        # Check against candidates
-        matched = False
+        # B: tighter association radius — join obs to the nearest existing candidate
         for cand in self.candidates:
-            if np.linalg.norm(map_point - cand['pos']) < self.dedup_distance:
+            if np.linalg.norm(map_point - cand['pos']) < self.association_radius:
+                # D: only count if robot is at a genuinely new viewpoint
+                is_new_vp = all(
+                    np.linalg.norm(robot_pos - rp) >= self.viewpoint_separation
+                    for rp in cand['robot_positions']
+                )
+                if not is_new_vp:
+                    self.last_detection_event = (
+                        f'same vp {cand["count"]}/{self.confirmation_count}')
+                    return
+                cand['robot_positions'].append(robot_pos.copy())
                 cand['count'] += 1
-                # Update position with running average
                 cand['pos'] = (cand['pos'] * (cand['count'] - 1) + map_point) / cand['count']
-                matched = True
-                if cand['count'] >= self.confirmation_count:
+                cand['last_seen'] = self.get_clock().now().nanoseconds  # C
+                nvp = len(cand['robot_positions'])
+                if (cand['count'] >= self.confirmation_count
+                        and nvp >= self.min_viewpoints):
                     self._confirm_face(cand['pos'], stamp)
                     self.last_detection_event = f'confirmed #{len(self.confirmed)}'
                     self.candidates.remove(cand)
                 else:
-                    self.last_detection_event = f'obs {cand["count"]}/{self.confirmation_count}'
-                break
+                    self.last_detection_event = (
+                        f'obs {cand["count"]}/{self.confirmation_count} '
+                        f'vp {nvp}/{self.min_viewpoints}')
+                return
 
-        if not matched:
-            self.candidates.append({'pos': map_point.copy(), 'count': 1})
-            self.last_detection_event = f'new candidate #{len(self.candidates)}'
+        self.candidates.append({
+            'pos': map_point.copy(),
+            'count': 1,
+            'robot_positions': [robot_pos.copy()],
+            'last_seen': self.get_clock().now().nanoseconds,  # C
+        })
+        self.last_detection_event = f'new candidate #{len(self.candidates)}'
+
+    def _evict_stale_candidates(self):
+        """C: remove candidates not refreshed within candidate_timeout seconds."""
+        now_ns = self.get_clock().now().nanoseconds
+        timeout_ns = int(self.candidate_timeout * 1e9)
+        before = len(self.candidates)
+        self.candidates = [c for c in self.candidates
+                           if now_ns - c['last_seen'] < timeout_ns]
+        evicted = before - len(self.candidates)
+        if evicted:
+            self.get_logger().debug(f'Evicted {evicted} stale face candidate(s)')
 
     def _confirm_face(self, map_point, stamp):
         """Publish a confirmed face detection."""
@@ -293,9 +339,11 @@ class FaceDetectorNode(Node):
         y += 22
         for cand in self.candidates[:4]:
             count = cand['count']
+            nvp = len(cand['robot_positions'])
             bar_right = int((w - 16) * count / max(self.confirmation_count, 1))
             cv2.rectangle(img, (8, y - 12), (8 + bar_right, y - 4), (60, 130, 200), -1)
             cv2.putText(img, (f'{count}/{self.confirmation_count} '
+                              f'vp {nvp}/{self.min_viewpoints} '
                               f'@({cand["pos"][0]:.1f},{cand["pos"][1]:.1f})'),
                         (8, y), font, 0.38, (160, 200, 240), 1, cv2.LINE_AA)
             y += 22

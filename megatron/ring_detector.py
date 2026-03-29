@@ -218,7 +218,14 @@ class RingDetectorNode(Node):
 
         # ---- Parameters ----
         self.declare_parameter('confirmation_count', 3)
-        self.declare_parameter('dedup_distance', 0.5)
+        # B: separate radii for association vs. immunity
+        self.declare_parameter('association_radius', 0.4)
+        self.declare_parameter('immunity_radius', 0.8)
+        # C: stale candidate expiry
+        self.declare_parameter('candidate_timeout', 10.0)
+        # D: multi-viewpoint confirmation
+        self.declare_parameter('min_viewpoints', 2)
+        self.declare_parameter('viewpoint_separation', 0.8)
         # Adaptive threshold
         self.declare_parameter('thresh_block_size', 15)
         self.declare_parameter('thresh_c', 25)
@@ -236,7 +243,11 @@ class RingDetectorNode(Node):
         self.declare_parameter('min_brightness_diff', 20.0)
 
         self.confirmation_count = self.get_parameter('confirmation_count').get_parameter_value().integer_value
-        self.dedup_distance = self.get_parameter('dedup_distance').get_parameter_value().double_value
+        self.association_radius = self.get_parameter('association_radius').get_parameter_value().double_value
+        self.immunity_radius = self.get_parameter('immunity_radius').get_parameter_value().double_value
+        self.candidate_timeout = self.get_parameter('candidate_timeout').get_parameter_value().double_value
+        self.min_viewpoints = self.get_parameter('min_viewpoints').get_parameter_value().integer_value
+        self.viewpoint_separation = self.get_parameter('viewpoint_separation').get_parameter_value().double_value
         self.thresh_block_size = self.get_parameter('thresh_block_size').get_parameter_value().integer_value
         self.thresh_c = self.get_parameter('thresh_c').get_parameter_value().integer_value
         self.min_contour_points = self.get_parameter('min_contour_points').get_parameter_value().integer_value
@@ -282,9 +293,10 @@ class RingDetectorNode(Node):
         # State
         # Each detection: (outer_ellipse, inner_ellipse, center_xy, color_name)
         self.detections_px: list[tuple] = []
-        self.candidates: list[dict] = []   # [{'pos': np.array, 'color': str, 'count': int}]
+        self.candidates: list[dict] = []   # [{'pos', 'color', 'count', 'robot_positions', 'last_seen'}]
         self.confirmed: list[dict] = []    # [{'pos': np.array, 'color': str}]
 
+        self.create_timer(2.0, self._evict_stale_candidates)  # C
         self.get_logger().info('Ring detector initialized (ellipse-pair mode).')
 
     # ------------------------------------------------------------------
@@ -485,6 +497,14 @@ class RingDetectorNode(Node):
             self.get_logger().warn(f'TF lookup failed: {e}')
             return
 
+        # D: look up current robot position for viewpoint tracking
+        try:
+            robot_tf = self.tf_buffer.lookup_transform('map', 'base_link', Time())
+            rt = robot_tf.transform.translation
+            robot_pos = np.array([rt.x, rt.y, rt.z])
+        except Exception:
+            robot_pos = np.zeros(3)
+
         for outer, inner, (cx_px, cy_px), color_name in self.detections_px:
             # Sample multiple points around the outer ellipse boundary
             sample_pts = _sample_ellipse_points(outer, n=12)
@@ -511,7 +531,7 @@ class RingDetectorNode(Node):
             if map_point is None:
                 continue
 
-            self._process_detection(map_point, color_name, data.header.stamp)
+            self._process_detection(map_point, color_name, robot_pos, data.header.stamp)
 
         self.detections_px = []
 
@@ -540,25 +560,54 @@ class RingDetectorNode(Node):
 
         return np.array([rx + t.x, ry + t.y, rz + t.z])
 
-    def _process_detection(self, map_point, color_name, stamp):
-        """Multi-frame confirmation and deduplication."""
+    def _process_detection(self, map_point, color_name, robot_pos, stamp):
+        # A+B: confirmed objects suppress same-color detections within immunity_radius;
+        # different colors are intentionally never suppressed by each other.
         for conf in self.confirmed:
-            if np.linalg.norm(map_point - conf['pos']) < self.dedup_distance:
+            if (conf['color'] == color_name
+                    and np.linalg.norm(map_point - conf['pos']) < self.immunity_radius):
                 return
 
-        matched = False
-        for idx, cand in enumerate(self.candidates):
-            if np.linalg.norm(map_point - cand['pos']) < self.dedup_distance:
+        # A+B: associate to existing candidate — must match position AND color
+        for cand in self.candidates:
+            if (cand['color'] == color_name
+                    and np.linalg.norm(map_point - cand['pos']) < self.association_radius):
+                # D: only count if robot is at a genuinely new viewpoint
+                is_new_vp = all(
+                    np.linalg.norm(robot_pos - rp) >= self.viewpoint_separation
+                    for rp in cand['robot_positions']
+                )
+                if not is_new_vp:
+                    return
+                cand['robot_positions'].append(robot_pos.copy())
                 cand['count'] += 1
                 cand['pos'] = (cand['pos'] * (cand['count'] - 1) + map_point) / cand['count']
-                matched = True
-                if cand['count'] >= self.confirmation_count:
+                cand['last_seen'] = self.get_clock().now().nanoseconds  # C
+                nvp = len(cand['robot_positions'])
+                if (cand['count'] >= self.confirmation_count
+                        and nvp >= self.min_viewpoints):
                     self._confirm_ring(cand['pos'], cand['color'], stamp)
-                    del self.candidates[idx]
-                break
+                    self.candidates.remove(cand)
+                return
 
-        if not matched:
-            self.candidates.append({'pos': map_point.copy(), 'color': color_name, 'count': 1})
+        self.candidates.append({
+            'pos': map_point.copy(),
+            'color': color_name,
+            'count': 1,
+            'robot_positions': [robot_pos.copy()],
+            'last_seen': self.get_clock().now().nanoseconds,  # C
+        })
+
+    def _evict_stale_candidates(self):
+        """C: remove candidates not refreshed within candidate_timeout seconds."""
+        now_ns = self.get_clock().now().nanoseconds
+        timeout_ns = int(self.candidate_timeout * 1e9)
+        before = len(self.candidates)
+        self.candidates = [c for c in self.candidates
+                           if now_ns - c['last_seen'] < timeout_ns]
+        evicted = before - len(self.candidates)
+        if evicted:
+            self.get_logger().debug(f'Evicted {evicted} stale ring candidate(s)')
 
     def _confirm_ring(self, map_point, color_name, stamp):
         """Publish a confirmed ring detection."""
