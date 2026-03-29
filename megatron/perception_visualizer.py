@@ -97,6 +97,10 @@ class PerceptionVisualizer(Node):
         self.ring_debug_pairs: Optional[np.ndarray] = None
         self.ring_debug_color: Optional[np.ndarray] = None
 
+        # Face debug images
+        self.face_debug_detections: Optional[np.ndarray] = None
+        self.face_debug_status: Optional[np.ndarray] = None
+
         # Subscriptions — main
         self.create_subscription(
             Image, '/face_detections_image', self._face_image_cb, qos_profile_sensor_data)
@@ -112,6 +116,10 @@ class PerceptionVisualizer(Node):
         self.create_subscription(Image, '/ring_debug/ellipses', self._rd_ellipses_cb, 10)
         self.create_subscription(Image, '/ring_debug/pairs', self._rd_pairs_cb, 10)
         self.create_subscription(Image, '/ring_debug/color', self._rd_color_cb, 10)
+
+        # Subscriptions — face debug
+        self.create_subscription(Image, '/face_debug/detections', self._fd_detections_cb, 10)
+        self.create_subscription(Image, '/face_debug/status', self._fd_status_cb, 10)
 
         # Publishers
         self.image_pub = self.create_publisher(Image, '/task1_visualization_image', 10)
@@ -153,6 +161,12 @@ class PerceptionVisualizer(Node):
     def _rd_color_cb(self, msg: Image) -> None:
         self.ring_debug_color = self._to_bgr(msg)
 
+    def _fd_detections_cb(self, msg: Image) -> None:
+        self.face_debug_detections = self._to_bgr(msg)
+
+    def _fd_status_cb(self, msg: Image) -> None:
+        self.face_debug_status = self._to_bgr(msg)
+
     # --- Image conversion -------------------------------------------------
 
     def _to_bgr(self, msg: Image) -> Optional[np.ndarray]:
@@ -177,7 +191,9 @@ class PerceptionVisualizer(Node):
         header = self._build_header(det_row.shape[1])
 
         rviz_canvas = np.vstack([header, det_row])
-        debug_canvas = np.vstack([header, det_row, self._build_debug_row()])
+        debug_canvas = np.vstack([header, det_row,
+                                   self._build_face_debug_row(),
+                                   self._build_ring_debug_row()])
 
         try:
             self.rviz_pub.publish(self.bridge.cv2_to_imgmsg(rviz_canvas, encoding='bgr8'))
@@ -208,14 +224,26 @@ class PerceptionVisualizer(Node):
         _overlay_label(ring_panel, 'Rings')
         return np.hstack([face_panel, ring_panel])
 
-    def _build_debug_row(self) -> np.ndarray:
+    def _build_face_debug_row(self) -> np.ndarray:
+        cw, ch = 480, self.panel_height // 2
+        cells = []
+        for img, label in [
+            (self.face_debug_detections, 'Face: Detections'),
+            (self.face_debug_status,     'Face: Candidates'),
+        ]:
+            cell = _fit_image(img, cw, ch)
+            _overlay_label(cell, label, font_scale=0.4)
+            cells.append(cell)
+        return np.hstack(cells)
+
+    def _build_ring_debug_row(self) -> np.ndarray:
         cw, ch = 240, self.panel_height // 2
         cells = []
         for img, label in [
-            (self.ring_debug_binary,   'Binary'),
-            (self.ring_debug_ellipses, 'Ellipses'),
-            (self.ring_debug_pairs,    'Pairs'),
-            (self.ring_debug_color,    'Color'),
+            (self.ring_debug_binary,   'Ring: Binary'),
+            (self.ring_debug_ellipses, 'Ring: Ellipses'),
+            (self.ring_debug_pairs,    'Ring: Pairs'),
+            (self.ring_debug_color,    'Ring: Color'),
         ]:
             cell = _fit_image(img, cw, ch)
             _overlay_label(cell, label, font_scale=0.4)

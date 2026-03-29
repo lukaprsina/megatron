@@ -73,7 +73,7 @@ def _quaternion_to_yaw(q_list):
     """Convert quaternion (x,y,z,w) to yaw angle (radians)."""
     try:
         w, x, y, z = q_list
-        #x, y, z, w = q_list
+        # x, y, z, w = q_list
     except Exception:
         return 0.0
     siny_cosp = 2.0 * (w * z + x * y)
@@ -149,6 +149,7 @@ class MissionController(Node):
 
         # Speech
         self.speaker = Speaker()
+        self.speaker.set_node_logger(self)
 
         # Navigation state
         self.state = State.WAITING_FOR_NAV2
@@ -209,6 +210,7 @@ class MissionController(Node):
         self.timer = self.create_timer(0.1, self._tick)
 
         self.get_logger().info('Mission controller initialized.')
+        self.speaker.speak('Mission controller initialized.')
 
     # ── Detection callbacks ───────────────────────────────────────────
 

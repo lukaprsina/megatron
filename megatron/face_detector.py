@@ -52,11 +52,15 @@ class FaceDetectorNode(Node):
             QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT),
         )
         self.image_pub = self.create_publisher(Image, '/face_detections_image', 10)
+        # Publishers — debug
+        self.debug_detections_pub = self.create_publisher(Image, '/face_debug/detections', 10)
+        self.debug_status_pub = self.create_publisher(Image, '/face_debug/status', 10)
 
         # State
         self.detections_px = []  # [(cx, cy)] from latest RGB frame
         self.candidates = []     # [{'pos': np.array([x,y,z]), 'count': int}]
         self.confirmed = []      # [np.array([x,y,z])]
+        self.last_detection_event = 'none'
 
         self.get_logger().info('Face detector initialized.')
 
@@ -73,6 +77,8 @@ class FaceDetectorNode(Node):
             cv_image, imgsz=(256, 320), show=False, verbose=False,
             classes=[0], device=self.device, conf=self.confidence_threshold)
 
+        debug_img = cv_image.copy()
+
         for r in res:
             if r.boxes is None:
                 continue
@@ -83,15 +89,27 @@ class FaceDetectorNode(Node):
                 x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
                 cx = (x1 + x2) // 2
                 cy = (y1 + y2) // 2
+                conf = float(box.conf[0]) if box.conf is not None and len(box.conf) > 0 else 1.0
 
+                # Existing annotated image — fixed red colour
                 cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.circle(cv_image, (cx, cy), 4, (0, 0, 255), -1)
                 self.detections_px.append((cx, cy))
+
+                # Debug image — colour scaled by confidence (green=high, red=low)
+                g = int(255 * conf)
+                r_val = int(255 * (1.0 - conf))
+                col = (0, g, r_val)
+                cv2.rectangle(debug_img, (x1, y1), (x2, y2), col, 2)
+                cv2.circle(debug_img, (cx, cy), 4, col, -1)
+                cv2.putText(debug_img, f'{conf:.2f}', (x1, max(y1 - 4, 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1, cv2.LINE_AA)
 
         try:
             self.image_pub.publish(self.bridge.cv2_to_imgmsg(cv_image, "bgr8"))
         except CvBridgeError:
             pass
+        self._publish_debug(self.debug_detections_pub, debug_img)
 
     def pointcloud_callback(self, data):
         if not self.detections_px:
@@ -126,6 +144,7 @@ class FaceDetectorNode(Node):
 
             self._process_detection(map_point, data.header.stamp)
 
+        self._publish_status_image()
         self.detections_px = []
 
     def _transform_point(self, point, transform):
@@ -162,6 +181,7 @@ class FaceDetectorNode(Node):
         # Check against already confirmed faces
         for conf in self.confirmed:
             if np.linalg.norm(map_point - conf) < self.dedup_distance:
+                self.last_detection_event = 'dedup-ignored'
                 return  # Already found this face
 
         # Check against candidates
@@ -174,11 +194,15 @@ class FaceDetectorNode(Node):
                 matched = True
                 if cand['count'] >= self.confirmation_count:
                     self._confirm_face(cand['pos'], stamp)
+                    self.last_detection_event = f'confirmed #{len(self.confirmed)}'
                     self.candidates.remove(cand)
+                else:
+                    self.last_detection_event = f'obs {cand["count"]}/{self.confirmation_count}'
                 break
 
         if not matched:
             self.candidates.append({'pos': map_point.copy(), 'count': 1})
+            self.last_detection_event = f'new candidate #{len(self.candidates)}'
 
     def _confirm_face(self, map_point, stamp):
         """Publish a confirmed face detection."""
@@ -251,6 +275,43 @@ class FaceDetectorNode(Node):
 
         marker_array.markers = markers
         self.marker_pub.publish(marker_array)
+
+    def _publish_debug(self, pub, img: np.ndarray) -> None:
+        try:
+            pub.publish(self.bridge.cv2_to_imgmsg(img, encoding='bgr8'))
+        except CvBridgeError:
+            pass
+
+    def _publish_status_image(self) -> None:
+        h, w = 240, 320
+        img = np.full((h, w, 3), 18, dtype=np.uint8)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        y = 22
+
+        cv2.putText(img, f'Candidates: {len(self.candidates)}', (8, y),
+                    font, 0.5, (200, 180, 80), 1, cv2.LINE_AA)
+        y += 22
+        for cand in self.candidates[:4]:
+            count = cand['count']
+            bar_right = int((w - 16) * count / max(self.confirmation_count, 1))
+            cv2.rectangle(img, (8, y - 12), (8 + bar_right, y - 4), (60, 130, 200), -1)
+            cv2.putText(img, (f'{count}/{self.confirmation_count} '
+                              f'@({cand["pos"][0]:.1f},{cand["pos"][1]:.1f})'),
+                        (8, y), font, 0.38, (160, 200, 240), 1, cv2.LINE_AA)
+            y += 22
+
+        y += 6
+        cv2.putText(img, f'Confirmed: {len(self.confirmed)}', (8, y),
+                    font, 0.5, (80, 220, 80), 1, cv2.LINE_AA)
+        y += 22
+        for i, pos in enumerate(self.confirmed[:4]):
+            cv2.putText(img, f'#{i + 1} ({pos[0]:.1f}, {pos[1]:.1f})',
+                        (8, y), font, 0.38, (100, 255, 100), 1, cv2.LINE_AA)
+            y += 20
+
+        cv2.putText(img, f'last: {self.last_detection_event}',
+                    (8, h - 10), font, 0.38, (180, 180, 180), 1, cv2.LINE_AA)
+        self._publish_debug(self.debug_status_pub, img)
 
 
 def main(args=None):
