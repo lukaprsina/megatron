@@ -46,26 +46,6 @@ amcl_pose_qos = QoSProfile(
     history=QoSHistoryPolicy.KEEP_LAST,
     depth=1,
 )
-# !!!!!!!!! THESE ARE THE DEFAULT WAYPOINTS, BUT YOU CAN OVERRIDE THEM BY PROVIDING A YAML FILE WITH THE SAME FORMAT AND PASSING ITS NAME AS A LAUNCH ARGUMENT !!!!!!!!!
-# Exploration waypoints: (x, y, yaw) covering the ~6x7.5m task1 arena
-# Arena bounds approximately: X [-3.1, 3.1], Y [-4.4, 3.2]
-# Robot spawns near (0, 0). Perimeter + interior zigzag pattern.
-WAYPOINTS = [
-    # Perimeter sweep (counter-clockwise)
-    ( 1.5,  0.0,  0.0),
-    ( 2.0,  1.5,  math.pi / 2),
-    ( 1.0,  2.5,  math.pi),
-    (-1.0,  2.5,  math.pi),
-    (-2.0,  1.5,  -math.pi / 2),
-    (-2.0, -1.0,  -math.pi / 2),
-    (-1.0, -3.0,  0.0),
-    ( 1.0, -3.0,  0.0),
-    ( 2.0, -1.5,  math.pi / 2),
-    # Interior pass
-    ( 0.0,  0.0,  math.pi / 4),
-    ( 0.0, -1.5, -math.pi / 4),
-    ( 0.0,  1.5,  3 * math.pi / 4),
-]
 
 
 # Function for waypoints 
@@ -149,7 +129,8 @@ class MissionController(Node):
 
         # Speech
         self.speaker = Speaker()
-
+        self.speaker.set_node_logger(self)
+        
         # Navigation state
         self.state = State.WAITING_FOR_NAV2
         self.goal_handle = None
@@ -175,7 +156,7 @@ class MissionController(Node):
             self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints from {wp_file}')
         except Exception as e:
             self.get_logger().warn(f'Failed to load waypoints from {wp_file}: {e}; using default WAYPOINTS')
-            self.waypoints = WAYPOINTS
+            raise e
 
         # Detection state
         self.found_faces = []  # [np.array([x,y,z])]
@@ -620,7 +601,7 @@ class MissionController(Node):
             f'| waypoint {self.waypoint_index + 1}/{len(self.waypoints)} '
             f'| last ring: {self.last_ring_color}'
         )
-        self.get_logger().info(f'Mission status: {msg.data}, status: {self.status}')
+        self.get_logger().info(f'Mission status: {msg.data}, status: {self.status} f: {self.feedback}')
         self.mission_status_pub.publish(msg)
 
 
