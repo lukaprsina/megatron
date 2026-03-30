@@ -166,7 +166,7 @@ class FaceDetectorNode(Node):
 
         # Check against candidates
         matched = False
-        for cand in self.candidates:
+        for idx, cand in enumerate(self.candidates):
             if np.linalg.norm(map_point - cand['pos']) < self.dedup_distance:
                 cand['count'] += 1
                 # Update position with running average
@@ -174,7 +174,7 @@ class FaceDetectorNode(Node):
                 matched = True
                 if cand['count'] >= self.confirmation_count:
                     self._confirm_face(cand['pos'], stamp)
-                    self.candidates.remove(cand)
+                    del self.candidates[idx]
                 break
 
         if not matched:
