@@ -10,7 +10,6 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     # Careful, thes are the ./install directory paths, rebuild
-    pkg_dis_tutorial3 = get_package_share_directory('dis_tutorial3')
     pkg_megatron = get_package_share_directory('megatron')
 
     # Arguments
