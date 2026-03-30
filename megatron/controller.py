@@ -11,8 +11,7 @@ from rclpy.qos import (
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
-from nav2_msgs.action import Spin
-from nav2_simple_commander.robot_navigator import BasicNavigator
+from nav2_msgs.action import Spin, NavigateToPose
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -29,6 +28,7 @@ import numpy as np
 import yaml
 from pathlib import Path
 
+from lifecycle_msgs.srv import GetState
 
 class State(Enum):
     WAITING_FOR_NAV2 = auto()
@@ -46,33 +46,14 @@ amcl_pose_qos = QoSProfile(
     history=QoSHistoryPolicy.KEEP_LAST,
     depth=1,
 )
-# !!!!!!!!! THESE ARE THE DEFAULT WAYPOINTS, BUT YOU CAN OVERRIDE THEM BY PROVIDING A YAML FILE WITH THE SAME FORMAT AND PASSING ITS NAME AS A LAUNCH ARGUMENT !!!!!!!!!
-# Exploration waypoints: (x, y, yaw) covering the ~6x7.5m task1 arena
-# Arena bounds approximately: X [-3.1, 3.1], Y [-4.4, 3.2]
-# Robot spawns near (0, 0). Perimeter + interior zigzag pattern.
-WAYPOINTS = [
-    # Perimeter sweep (counter-clockwise)
-    ( 1.5,  0.0,  0.0),
-    ( 2.0,  1.5,  math.pi / 2),
-    ( 1.0,  2.5,  math.pi),
-    (-1.0,  2.5,  math.pi),
-    (-2.0,  1.5,  -math.pi / 2),
-    (-2.0, -1.0,  -math.pi / 2),
-    (-1.0, -3.0,  0.0),
-    ( 1.0, -3.0,  0.0),
-    ( 2.0, -1.5,  math.pi / 2),
-    # Interior pass
-    ( 0.0,  0.0,  math.pi / 4),
-    ( 0.0, -1.5, -math.pi / 4),
-    ( 0.0,  1.5,  3 * math.pi / 4),
-]
 
 
 # Function for waypoints 
 def _quaternion_to_yaw(q_list):
     """Convert quaternion (x,y,z,w) to yaw angle (radians)."""
     try:
-        x, y, z, w = q_list
+        w, x, y, z = q_list
+        #x, y, z, w = q_list
     except Exception:
         return 0.0
     siny_cosp = 2.0 * (w * z + x * y)
@@ -148,7 +129,8 @@ class MissionController(Node):
 
         # Speech
         self.speaker = Speaker()
-
+        self.speaker.set_node_logger(self)
+        
         # Navigation state
         self.state = State.WAITING_FOR_NAV2
         self.goal_handle = None
@@ -160,7 +142,9 @@ class MissionController(Node):
         self.current_pose = None
         self.waypoint_index = 0
         self.start_time = None
-
+        self.nodes = ['amcl', 'bt_navigator']
+        self.states = {n: "Unknown" for n in self.nodes}
+        
         # Load waypoints from YAML if provided, fallback to global WAYPOINTS
         try:
             wp_file = self.get_parameter('waypoints_file').get_parameter_value().string_value
@@ -172,7 +156,7 @@ class MissionController(Node):
             self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints from {wp_file}')
         except Exception as e:
             self.get_logger().warn(f'Failed to load waypoints from {wp_file}: {e}; using default WAYPOINTS')
-            self.waypoints = WAYPOINTS
+            raise e
 
         # Detection state
         self.found_faces = []  # [np.array([x,y,z])]
@@ -192,15 +176,15 @@ class MissionController(Node):
         self.goal_marker_pub = self.create_publisher(MarkerArray, '/goal_markers', 10)
         self.mission_status_pub = self.create_publisher(String, '/mission_status', 10)
 
-        # Action clients / navigator
+        # Action clients
+        self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.spin_client = ActionClient(self, Spin, 'spin')
         self.undock_client = ActionClient(self, Undock, 'undock')
-        # BasicNavigator wraps Nav2 lifecycle and navigation actions
-        self.navigator = BasicNavigator()
+
+
+        # Create clients for Nav2 checks
+        self.nav2_lifecycle_clients = {n: self.create_client(GetState, f'/{n}/get_state') for n in self.nodes}
         self.nav2_ready = False
-        # Wait for Nav2 to become active in background to avoid blocking init
-        import threading
-        threading.Thread(target=self._wait_for_nav2, daemon=True).start()
 
         # Main loop timer (10 Hz)
         self.timer = self.create_timer(0.1, self._tick)
@@ -260,60 +244,90 @@ class MissionController(Node):
     def _feedback_callback(self, msg):
         self.feedback = msg.feedback
 
-    def _wait_for_nav2(self):
-        self.navigator.isNav2Active()
-        try:
-            self.get_logger().info("Waiting for Nav2 to become active...")
-            self.navigator.waitUntilNav2Active()
-            self.nav2_ready = True
-            self.get_logger().info('Nav2 is ready (navigator).')
-        except Exception as e:
-            self.get_logger().warn(f'Error waiting for Nav2: {e}')
-
     # ── Navigation helpers ────────────────────────────────────────────
+
+    def check_states(self):
+        #self.get_logger().info('sending req to check nav2')
+        for name, client in self.nav2_lifecycle_clients.items():
+            if client.service_is_ready():
+                # Use a lambda to pass the node 'name' into the callback
+                future = client.call_async(GetState.Request())
+                future.add_done_callback(lambda f, n=name: self.state_cb(f, n))
+    
+    def state_cb(self, future, node_name):
+        #self.get_logger().info(f'Checking state for {node_name}')
+        try:
+            res = future.result()
+            self.states[node_name] = res.current_state.label
+            #self.get_logger().info(f"STATUS -> {node_name}: {self.states[node_name]}")
+            
+            # Check if everything is Active (ID 3)
+            if all(s == "active" for s in self.states.values()):
+                self.get_logger().info("ALL NODES ACTIVE: System is ready for goals.")
+                self.nav2_ready = True
+            else:  
+                self.nav2_ready = False
+        except Exception as e:
+            self.get_logger().error(f"Service call failed for {node_name}: {e}")
 
     def _yaw_to_quaternion(self, yaw):
         q = quaternion_from_euler(0, 0, yaw)
         return Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
 
     def _send_nav_goal(self, x, y, yaw):
-        """Send a navigation goal using BasicNavigator (non-blocking)."""
-        if not self.nav2_ready:
-            self.get_logger().warn('Nav2 not ready (navigator)')
+        """Send a NavigateToPose goal. Non-blocking."""
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose.header.frame_id = 'map'
+        goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
+        goal_msg.pose.pose.position.x = x
+        goal_msg.pose.pose.position.y = y
+        goal_msg.pose.pose.orientation = self._yaw_to_quaternion(yaw)
+
+        if not self.nav_client.wait_for_server(timeout_sec=1.0):
+            self.get_logger().warn('NavigateToPose server not available')
             return False
 
-        pose = PoseStamped()
-        pose.header.frame_id = 'map'
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x = x
-        pose.pose.position.y = y
-        pose.pose.orientation = self._yaw_to_quaternion(yaw)
-
-        self.get_logger().info(f'Navigating to ({x:.2f}, {y:.2f}, yaw={yaw:.2f}) via BasicNavigator')
-        # non-blocking
-        self.navigator.goToPoseAsync(pose)
+        self.get_logger().info(f'Navigating to ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
+        future = self.nav_client.send_goal_async(goal_msg, self._feedback_callback)
+        future.add_done_callback(self._nav_goal_response)
         return True
 
     def _nav_goal_response(self, future):
-        # legacy callback for NavigateToPose (no longer used)
-        return
+        self.status = 0
+        self.goal_handle = future.result()
+        
+        if not self.goal_handle.accepted:
+            self.get_logger().warn(f'Navigation goal rejected ')
+            self.nav_rejected = True
+            if self.nav2_ready:
+                self.get_logger().warn('This is unexpected since Nav2 is active')
+
+            self.result_future = None
+            return
+        else: 
+            self.nav_rejected = False
+            
+        self.result_future = self.goal_handle.get_result_async()
+        self.result_future.add_done_callback(self._nav_result)
 
     def _nav_result(self, future):
-        # legacy handler for NavigateToPose (no longer used)
-        return
+        result = future.result()
+        self.status = result.status if result else GoalStatus.STATUS_ABORTED
+        
+        # when a goal is complete, check if we were exploring and if so, move to the next waypoint
+        if self.status == GoalStatus.STATUS_SUCCEEDED and self.state == State.EXPLORING:
+            self.waypoint_index += 1  # Move to next waypoint on success
 
     def _cancel_nav(self):
-        try:
-            self.navigator.cancelTask()
-        except Exception:
-            # fall back: nothing to cancel
-            pass
+        if self.goal_handle is not None:
+            self.goal_handle.cancel_goal_async()
+            self.goal_handle = None
+            self.result_future = None
 
     def _is_nav_complete(self):
-        try:
-            return self.navigator.isTaskComplete()
-        except Exception:
+        if self.result_future is None:
             return True
+        return self.result_future.done() and not self.nav_rejected
 
     def _send_spin(self, angle=math.pi * 2, time_allowance=15):
         """Send a Spin action. Non-blocking."""
@@ -401,7 +415,8 @@ class MissionController(Node):
             return  # Still waiting for dock status
 
         # Check if Nav2 is ready (simplified: check if action server is available)
-        # if not self.nav_client.server_is_ready():
+        self.check_states()
+           
         if not self.nav2_ready:
             return
 
@@ -516,7 +531,7 @@ class MissionController(Node):
 
         self.get_logger().info(f'Heading to waypoint {self.waypoint_index} ')
         x, y, yaw = self.waypoints[self.waypoint_index]
-        self.waypoint_index += 1
+        #self.waypoint_index += 1
         self._send_nav_goal(x, y, yaw)
         self._publish_goal_markers()
 
@@ -560,7 +575,7 @@ class MissionController(Node):
                 m.color.g = 0.7
                 m.color.b = 0.3
                 m.color.a = 0.5
-            elif i == self.waypoint_index - 1:
+            elif i == self.waypoint_index:
                 # Current target: bright yellow
                 m.color.r = 1.0
                 m.color.g = 1.0
@@ -583,9 +598,10 @@ class MissionController(Node):
         msg.data = (
             f'{self.state.name} | faces {len(self.found_faces)}/{self.total_faces} '
             f'| rings {len(self.found_rings)}/{self.total_rings} '
-            f'| waypoint {self.waypoint_index}/{len(self.waypoints)}'
+            f'| waypoint {self.waypoint_index + 1}/{len(self.waypoints)} '
+            f'| last ring: {self.last_ring_color}'
         )
-        self.get_logger().info(f'Mission status: {msg.data}')
+        self.get_logger().info(f'Mission status: {msg.data}, status: {self.status} f: {self.feedback}')
         self.mission_status_pub.publish(msg)
 
 
