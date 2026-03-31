@@ -154,6 +154,7 @@ class MissionController(Node):
         self.declare_parameter('max_loops', 2)
         self.declare_parameter('waypoints_file', 'waypoints/test1.yaml')
         self.declare_parameter('verify_pause_sec', 1.0)
+        self.declare_parameter('approach_pause_sec', 1.0)
 
         self.dedup_distance = self.get_parameter('dedup_distance').value
         self.approach_distance = self.get_parameter('approach_distance').value
@@ -163,6 +164,7 @@ class MissionController(Node):
         self.total_rings = self.get_parameter('total_rings').value
         self.max_loops = self.get_parameter('max_loops').value
         self.verify_pause_sec = self.get_parameter('verify_pause_sec').value
+        self.approach_pause_sec = self.get_parameter('approach_pause_sec').value
 
         # Speech
         self.speaker = Speaker()
@@ -210,6 +212,8 @@ class MissionController(Node):
         # Approach tracking
         self.current_approach = None  # the dict from pending_approaches being executed
         self.approach_retried = False
+        self.approach_pausing = False  # True during initial pause phase
+        self.approach_pause_start_time = None  # when the pause started
         self.verify_start_time = None
 
         # Subscribers
@@ -517,9 +521,11 @@ class MissionController(Node):
             self._cancel_nav()
             self.current_approach = approach
             self.approach_retried = False
-            ax, ay, yaw = self._compute_approach_pose(approach['pos'], approach['normal'])
+            self.approach_pausing = True  # Start pause phase
+            self.approach_pause_start_time = self.get_clock().now()
             self.state = State.APPROACHING_OBJECT
-            self._send_nav_goal(ax, ay, yaw)
+            self.get_logger().info(
+                f'Detection arrived — pausing for {self.approach_pause_sec}s to accumulate frames...')
             return
 
         # Check if current navigation is done
@@ -553,6 +559,19 @@ class MissionController(Node):
                 self._send_next_waypoint()
 
     def _handle_approaching(self):
+        # During pause phase, wait for tracker to accumulate frames
+        if self.approach_pausing:
+            elapsed = (self.get_clock().now() - self.approach_pause_start_time).nanoseconds / 1e9
+            if elapsed < self.approach_pause_sec:
+                return  # Still pausing, keep waiting
+            # Pause complete — send nav goal
+            self.approach_pausing = False
+            approach = self.current_approach
+            ax, ay, yaw = self._compute_approach_pose(approach['pos'], approach['normal'])
+            self._send_nav_goal(ax, ay, yaw)
+            self.get_logger().info('Pause complete, starting approach navigation.')
+            return
+
         if not self._is_nav_complete():
             return
 
@@ -577,6 +596,7 @@ class MissionController(Node):
                 # Give up on this approach
                 self.get_logger().warn('Approach failed after retry, resuming exploration.')
                 self.current_approach = None
+                self.approach_pausing = False
                 self.state = State.EXPLORING
                 self._send_next_waypoint()
 
