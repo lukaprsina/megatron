@@ -192,6 +192,10 @@ class FaceDetectorNode(Node):
                 map_pos = transform_point(centroid_cam, transform)
                 map_normal = transform_vector(normal_cam, transform)
 
+                self.get_logger().debug(
+                    f'Face 3D: cam_pos={centroid_cam} cam_normal={normal_cam} '
+                    f'→ map_pos={map_pos} map_normal={map_normal}')
+
                 # Feed into tracker
                 track_id, newly_confirmed = self.tracker.add_observation(
                     map_pos, map_normal, cam_dist,

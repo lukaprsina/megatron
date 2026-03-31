@@ -445,6 +445,10 @@ class RingDetectorNode(Node):
             map_pos = transform_point(centroid_cam, transform)
             map_normal = transform_vector(normal_cam, transform)
 
+            self.get_logger().debug(
+                f'Ring 3D ({color_name}): cam_pos={centroid_cam} cam_normal={normal_cam} '
+                f'→ map_pos={map_pos} map_normal={map_normal}')
+
             track_id, newly_confirmed = self.tracker.add_observation(
                 map_pos, map_normal, cam_dist,
                 rgb_msg.header.stamp, label=color_name)

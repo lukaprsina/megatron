@@ -137,9 +137,9 @@ class MissionController(Node):
 
         # ---- Parameters ----
         self.declare_parameter('dedup_distance', 0.8)
-        self.declare_parameter('approach_distance', 0.1)
+        self.declare_parameter('approach_distance', 0.6)
 
-        self.declare_parameter('approach_fallback_distance', 0.35)
+        self.declare_parameter('approach_fallback_distance', 0.4)
         self.declare_parameter('spin_at_waypoints', False)
         self.declare_parameter('total_faces', 3)
         self.declare_parameter('total_rings', 2)
@@ -257,7 +257,7 @@ class MissionController(Node):
             f'total: {len(self.found_faces) + 1}')
         self.found_faces.append(pos)
 
-        if self.state == State.EXPLORING and self.pending_object is None:
+        if self.pending_object is None and self.state in (State.EXPLORING, State.VERIFYING):
             self.pending_object = {
                 'type': 'face',
                 'pose': msg,
@@ -284,7 +284,7 @@ class MissionController(Node):
             f'total: {len(self.found_rings) + 1}')
         self.found_rings.append({'pos': pos, 'color': color})
 
-        if self.state == State.EXPLORING and self.pending_object is None:
+        if self.pending_object is None and self.state in (State.EXPLORING, State.VERIFYING):
             self.pending_object = {
                 'type': 'ring',
                 'pose': msg,
@@ -427,11 +427,14 @@ class MissionController(Node):
 
         normal_xy = normal_xy / n_len
 
-        ax = tx + normal_xy[0] * distance
-        ay = ty + normal_xy[1] * distance
+        ax = tx - normal_xy[0] * distance
+        ay = ty - normal_xy[1] * distance
         # Face toward the surface (opposite the normal)
         yaw = math.atan2(-normal_xy[1], -normal_xy[0])
 
+        self.get_logger().debug(
+            f'Approach: face=({tx:.2f}, {ty:.2f}) normal_xy={normal_xy} '
+            f'→ goal=({ax:.2f}, {ay:.2f}) yaw={math.degrees(yaw):.1f}°')
         return ax, ay, yaw
 
     # ==================================================================
