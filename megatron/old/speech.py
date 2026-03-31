@@ -33,10 +33,6 @@ class Speaker:
             # If node doesn't provide get_logger, ignore and keep std logger
             self._logger.warning('Failed to set node logger; continuing with std logger')
 
-    def is_busy(self) -> bool:
-        """Return True if espeak-ng is currently speaking."""
-        return self._process is not None and self._process.poll() is None
-
     def speak(self, text: str) -> None:
         """Fire-and-forget speech synthesis. Non-blocking."""
         if self._espeak is None:
@@ -44,7 +40,7 @@ class Speaker:
             return
 
         # Don't overlap with a currently speaking process
-        if self.is_busy():
+        if self._process is not None and self._process.poll() is None:
             self._logger.debug('Previous espeak-ng process still running; skipping speak()')
             return
 

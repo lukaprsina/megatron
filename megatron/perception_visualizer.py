@@ -14,6 +14,7 @@ from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from typing import Optional as _Optional
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +105,6 @@ class PerceptionVisualizer(Node):
             Image, '/ring_detections_image', self._ring_image_cb, qos_profile_sensor_data)
         self.create_subscription(PoseStamped, '/detected_faces', self._face_pose_cb, 10)
         self.create_subscription(PoseStamped, '/detected_rings', self._ring_pose_cb, 10)
-        self.create_subscription(String, '/detected_ring_color', self._ring_color_cb, 10)
         self.create_subscription(String, '/mission_status', self._mission_status_cb, 10)
 
         # Subscriptions — ring debug
@@ -132,11 +132,14 @@ class PerceptionVisualizer(Node):
     def _face_pose_cb(self, _: PoseStamped) -> None:
         self.face_count += 1
 
-    def _ring_pose_cb(self, _: PoseStamped) -> None:
+    def _ring_pose_cb(self, msg: PoseStamped) -> None:
         self.ring_count += 1
-
-    def _ring_color_cb(self, msg: String) -> None:
-        self.last_ring_color = msg.data or 'unknown'
+        # Parse color from frame_id ("map|color")
+        frame_id = msg.header.frame_id
+        if '|' in frame_id:
+            self.last_ring_color = frame_id.split('|', 1)[1]
+        else:
+            self.last_ring_color = 'unknown'
 
     def _mission_status_cb(self, msg: String) -> None:
         self.mission_status = msg.data or 'unknown'
