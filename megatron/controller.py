@@ -242,6 +242,7 @@ class MissionController(Node):
         self.current_pose = msg.pose
 
     def _feedback_callback(self, msg):
+        # self._logger.info(f'1!Action feedback: {msg.feedback}')
         self.feedback = msg.feedback
 
     # ── Navigation helpers ────────────────────────────────────────────

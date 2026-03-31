@@ -10,7 +10,6 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     # Careful, thes are the ./install directory paths, rebuild
-    pkg_dis_tutorial3 = get_package_share_directory('dis_tutorial3')
     pkg_megatron = get_package_share_directory('megatron')
 
     # Arguments
@@ -36,14 +35,16 @@ def generate_launch_description():
     ]
 
     # Include the full simulation + navigation stack from dis_tutorial3
+    # Use megatron/config/nav2.yaml as the nav2 params file
     sim_nav = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            PathJoinSubstitution([pkg_dis_tutorial3, 'launch', 'sim_turtlebot_nav.launch.py'])),
+            PathJoinSubstitution([pkg_megatron, 'launch', 'sim_turtlebot_nav.launch.py'])),
         launch_arguments=[
             ('world', LaunchConfiguration('world')),
             ('map', LaunchConfiguration('map')),
             ('rviz', 'false'), # we will configure it manually
             ('use_sim_time', LaunchConfiguration('use_sim_time')),
+            ('nav2_config', PathJoinSubstitution([pkg_megatron, 'config', 'nav2.yaml'])),
         ],
     )
 
