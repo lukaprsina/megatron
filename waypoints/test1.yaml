@@ -32,7 +32,7 @@ waypoints:
   waypoint3:
     pose:
       - -2.15
-      - 0.79
+      - 0.75
       - 0
     orientation:
       - 0.72444696120121777
