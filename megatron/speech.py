@@ -50,7 +50,7 @@ class Speaker:
 
         try:
             self._process = subprocess.Popen(
-                [self._espeak, text],
+                [self._espeak, "-s", "150", f"Attention please. {text}"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

@@ -47,7 +47,7 @@ COLOR_RANGES = {
                'rgb': (0.0, 0.0, 1.0)},
     'yellow': {'lower1': (20, 100, 100),  'upper1': (35, 255, 255),
                'rgb': (1.0, 1.0, 0.0)},
-    'black':  {'lower1': (0, 0, 0),       'upper1': (180, 255, 50),
+    'black':  {'lower1': (0, 0, 0),       'upper1': (180, 255, 35),
                'rgb': (0.2, 0.2, 0.2)},
 }
 
@@ -110,6 +110,63 @@ def _check_hole(image_gray: np.ndarray,
         return False
 
     return abs(band_pixels - inner_pixels) >= min_brightness_diff
+
+
+def _check_band_uniformity(image_bgr: np.ndarray,
+                           outer_ellipse: tuple, inner_ellipse: tuple,
+                           max_std: float = 35.0) -> bool:
+    """Reject candidates whose annular band has high color variance.
+
+    Real rings are a single solid color (low V-channel std).  Face regions,
+    textured surfaces, etc. have high variance and get rejected.
+    """
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    band_mask = _build_annular_mask(image_bgr.shape, outer_ellipse, inner_ellipse)
+    if cv2.countNonZero(band_mask) == 0:
+        return False
+    v_channel = hsv[:, :, 2]
+    pixels = v_channel[band_mask > 0]
+    return float(np.std(pixels)) <= max_std
+
+
+def _check_depth_discontinuity(pc2_msg: PointCloud2,
+                                outer_ellipse: tuple, inner_ellipse: tuple,
+                                shape: tuple,
+                                min_depth_gap: float = 0.15) -> bool:
+    """Check if the ring hole shows a depth gap vs. the band.
+
+    For hanging rings the hole is open air (NaN/far) while the band is at
+    ring distance.  Returns True if the hole is significantly farther or
+    mostly invalid, confirming a real ring.  Returns False (inconclusive)
+    for wall-mounted rings where depths are similar — caller should NOT
+    use this as a hard reject, only as additive evidence.
+    """
+    h, w = shape[:2]
+    band_mask = _build_annular_mask((h, w), outer_ellipse, inner_ellipse)
+    inner_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.ellipse(inner_mask, inner_ellipse, (255,), -1)
+
+    band_pts = extract_3d_points_from_pc2(band_mask, pc2_msg)
+    inner_pts = extract_3d_points_from_pc2(inner_mask, pc2_msg)
+
+    if len(band_pts) < 3:
+        return False
+
+    band_depths = np.linalg.norm(band_pts, axis=1)
+    band_median = float(np.median(band_depths))
+
+    # If most inner points are invalid/missing → open air behind the ring
+    inner_pixel_count = int(cv2.countNonZero(inner_mask))
+    if inner_pixel_count > 0 and len(inner_pts) < inner_pixel_count * 0.3:
+        return True
+
+    if len(inner_pts) < 3:
+        return True  # very few valid inner points → likely open air
+
+    inner_depths = np.linalg.norm(inner_pts, axis=1)
+    inner_median = float(np.median(inner_depths))
+
+    return (inner_median - band_median) >= min_depth_gap
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +245,15 @@ class RingDetectorNode(Node):
         self.declare_parameter('max_aspect_ratio', 1.8)
         # Pair matching
         self.declare_parameter('center_thr', 15.0)
-        self.declare_parameter('min_pair_score', 0.30)
+        self.declare_parameter('min_pair_score', 0.40)
         # Color classification
         self.declare_parameter('min_color_confidence', 0.15)
         # Hole check
         self.declare_parameter('min_brightness_diff', 20.0)
+        # Band uniformity (low = solid color ring, high = textured face/wall)
+        self.declare_parameter('max_band_std', 35.0)
+        # Depth discontinuity (hanging rings have gap behind hole)
+        self.declare_parameter('min_depth_gap', 0.15)
 
         self.confirmation_count = self.get_parameter('confirmation_count').value
         self.dedup_distance = self.get_parameter('dedup_distance').value
@@ -207,6 +268,8 @@ class RingDetectorNode(Node):
         self.min_pair_score = self.get_parameter('min_pair_score').value
         self.min_color_confidence = self.get_parameter('min_color_confidence').value
         self.min_brightness_diff = self.get_parameter('min_brightness_diff').value
+        self.max_band_std = self.get_parameter('max_band_std').value
+        self.min_depth_gap = self.get_parameter('min_depth_gap').value
 
         # Enforce odd block size >= 3
         if self.thresh_block_size % 2 == 0:
@@ -389,6 +452,15 @@ class RingDetectorNode(Node):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 180), 1)
                 continue
 
+            # Band uniformity: reject high-variance regions (faces, textures)
+            if not _check_band_uniformity(cv_image, outer, inner, self.max_band_std):
+                cv2.ellipse(debug_color_img, outer, (0, 128, 180), 1)
+                cv2.ellipse(debug_color_img, inner, (0, 128, 180), 1)
+                cv2.putText(debug_color_img, 'nonuniform',
+                            (cx_px + 8, cy_px),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 128, 180), 1)
+                continue
+
             color_name, confidence = classify_ring_color(cv_image, outer, inner)
 
             if color_name is None or confidence < self.min_color_confidence:
@@ -419,6 +491,10 @@ class RingDetectorNode(Node):
             cv2.circle(output_img, (cx_px, cy_px), 4, (0, 255, 0), -1)
             cv2.putText(output_img, color_name, (cx_px + 10, cy_px),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+            # Depth discontinuity: additive signal for hanging rings
+            has_depth_gap = _check_depth_discontinuity(
+                pc2_msg, outer, inner, cv_image.shape, self.min_depth_gap)
 
             # ---- 3D projection via annular mask + PointCloud2 ----
             annular_mask = _build_annular_mask((h, w), outer, inner)
@@ -487,16 +563,18 @@ class RingDetectorNode(Node):
     def _publish_markers(self):
         marker_array = MarkerArray()
         markers: list[Marker] = []
+        now_stamp = self.get_clock().now().to_msg()
         for track in self.track_manager.get_confirmed_tracks():
-            pos, _ = self.track_manager.get_best_estimate(track)
+            pos, nrm = self.track_manager.get_best_estimate(track)
             color_name = track.get('label', 'unknown')
             i = track['id'] - 1
 
             rgb = COLOR_RANGES.get(color_name, {'rgb': (1.0, 1.0, 1.0)})['rgb']
 
+            # Sphere marker
             m = Marker()
             m.header.frame_id = 'map'
-            m.header.stamp = self.get_clock().now().to_msg()
+            m.header.stamp = now_stamp
             m.ns = 'rings'
             m.id = i
             m.type = Marker.SPHERE
@@ -513,9 +591,33 @@ class RingDetectorNode(Node):
             m.lifetime.sec = 0
             markers.append(m)
 
+            # Arrow marker (surface normal direction)
+            qx, qy, qz, qw = normal_to_quaternion(nrm[:2])
+            a = Marker()
+            a.header.frame_id = 'map'
+            a.header.stamp = now_stamp
+            a.ns = 'ring_normals'
+            a.id = i
+            a.type = Marker.ARROW
+            a.action = Marker.ADD
+            a.pose.position.x = float(pos[0])
+            a.pose.position.y = float(pos[1])
+            a.pose.position.z = float(pos[2])
+            a.pose.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
+            a.scale.x = 0.5   # shaft length
+            a.scale.y = 0.05  # shaft diameter
+            a.scale.z = 0.08  # head diameter
+            a.color.r = rgb[0]
+            a.color.g = rgb[1]
+            a.color.b = rgb[2]
+            a.color.a = 1.0
+            a.lifetime.sec = 0
+            markers.append(a)
+
+            # Text label
             t = Marker()
             t.header.frame_id = 'map'
-            t.header.stamp = self.get_clock().now().to_msg()
+            t.header.stamp = now_stamp
             t.ns = 'ring_labels'
             t.id = i
             t.type = Marker.TEXT_VIEW_FACING
