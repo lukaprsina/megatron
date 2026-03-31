@@ -1,9 +1,9 @@
-"""Ring detector with depth image projection and SVD surface fitting.
+"""Ring detector with PointCloud2-based 3D projection and SVD surface fitting.
 
-Subscribes to synced RGB + depth images via message_filters, detects concentric
-ellipse pairs (rings), classifies color via HSV, projects the annular region to
-3D via pinhole model, fits surface normals, and publishes confirmed detections
-as PoseStamped with color packed in frame_id ("map|{color}").
+Subscribes to synced RGB + PointCloud2 via message_filters, detects concentric
+ellipse pairs (rings), classifies color via HSV, extracts 3D points from the
+annular region via the organized PointCloud2, fits surface normals, and publishes
+confirmed detections as PoseStamped with color packed in frame_id ("map|{color}").
 """
 
 import math
@@ -19,15 +19,15 @@ import numpy as np
 import cv2
 import tf2_ros
 
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, PointCloud2
 from geometry_msgs.msg import PoseStamped, Quaternion
 from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge, CvBridgeError
 
 from megatron.perception_utils import (
-    DepthCameraGeometry,
     IncrementalTrackManager,
     compute_robust_surface,
+    extract_3d_points_from_pc2,
     normal_to_quaternion,
     transform_point_and_normal,
 )
@@ -220,21 +220,15 @@ class RingDetectorNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # Depth geometry (intrinsics loaded on first CameraInfo)
-        self.geometry = DepthCameraGeometry()
-        self.camera_info_sub = self.create_subscription(
-            CameraInfo, '/oakd/rgb/preview/camera_info',
-            self._camera_info_callback, 10)
-
-        # Synced RGB + Depth via message_filters
+        # Synced RGB + PointCloud2 via message_filters
         self.rgb_sub = message_filters.Subscriber(
             self, Image, '/oakd/rgb/preview/image_raw',
             qos_profile=qos_profile_sensor_data)
-        self.depth_sub = message_filters.Subscriber(
-            self, Image, '/oakd/rgb/preview/depth',
+        self.pc2_sub = message_filters.Subscriber(
+            self, PointCloud2, '/oakd/rgb/preview/depth/points',
             qos_profile=qos_profile_sensor_data)
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.depth_sub], queue_size=5, slop=0.1)
+            [self.rgb_sub, self.pc2_sub], queue_size=10, slop=0.15)
         self.sync.registerCallback(self._synced_callback)
 
         # Publishers — detections
@@ -257,46 +251,30 @@ class RingDetectorNode(Node):
         # Rate limiting
         self.last_inference_time = 0.0
 
-        self.get_logger().info('Ring detector initialized (depth image mode).')
+        self.get_logger().info('Ring detector initialized (PointCloud2 mode).')
 
     # ------------------------------------------------------------------
-    # CameraInfo — grab intrinsics once
+    # Synced RGB + PointCloud2 callback
     # ------------------------------------------------------------------
 
-    def _camera_info_callback(self, msg: CameraInfo):
-        if self.geometry.ready:
-            return
-        self.geometry.update_intrinsics(msg)
-        self.get_logger().info(
-            f'Camera intrinsics loaded: fx={self.geometry.fx:.1f} '
-            f'fy={self.geometry.fy:.1f} cx={self.geometry.cx:.1f} cy={self.geometry.cy:.1f}')
-
-    # ------------------------------------------------------------------
-    # Synced RGB + Depth callback
-    # ------------------------------------------------------------------
-
-    def _synced_callback(self, rgb_msg: Image, depth_msg: Image):
+    def _synced_callback(self, rgb_msg: Image, pc2_msg: PointCloud2):
         # Rate limit
         now = self.get_clock().now().nanoseconds / 1e9
         if now - self.last_inference_time < self.min_inference_period:
             return
         self.last_inference_time = now
 
-        if not self.geometry.ready:
-            return
-
-        # Convert images
+        # Convert RGB image
         try:
             cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
-            depth_image = self.bridge.imgmsg_to_cv2(depth_msg, '32FC1')
         except CvBridgeError as e:
             self.get_logger().error(f'Image conversion failed: {e}')
             return
 
         h, w = cv_image.shape[:2]
 
-        # Get TF: camera optical frame → map
-        frame_id = depth_msg.header.frame_id
+        # Get TF: PC2 frame → map
+        frame_id = pc2_msg.header.frame_id
         if not frame_id:
             frame_id = 'oakd_rgb_camera_optical_frame'
         try:
@@ -442,9 +420,9 @@ class RingDetectorNode(Node):
             cv2.putText(output_img, color_name, (cx_px + 10, cy_px),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            # ---- 3D projection via annular mask + depth ----
+            # ---- 3D projection via annular mask + PointCloud2 ----
             annular_mask = _build_annular_mask((h, w), outer, inner)
-            points_3d = self.geometry.extract_3d_points(annular_mask, depth_image)
+            points_3d = extract_3d_points_from_pc2(annular_mask, pc2_msg)
             if len(points_3d) < 5:
                 continue
 

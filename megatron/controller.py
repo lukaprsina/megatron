@@ -146,8 +146,8 @@ class MissionController(Node):
 
         # Parameters
         self.declare_parameter('dedup_distance', 0.8)
-        self.declare_parameter('approach_distance', 0.8)
-        self.declare_parameter('approach_retry_offset', 0.2)
+        self.declare_parameter('approach_distance', 0.55)
+        self.declare_parameter('approach_retry_offset', 0.1)
         self.declare_parameter('spin_at_waypoints', False)
         self.declare_parameter('total_faces', 3)
         self.declare_parameter('total_rings', 4)
