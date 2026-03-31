@@ -159,6 +159,9 @@ class DepthCameraGeometry:
 
         if len(zs) == 0:
             return np.empty((0, 3), dtype=np.float64)
+        
+        if self.cx is None or self.cy is None or self.fx is None or self.fy is None:
+            raise ValueError('Camera intrinsics not set in DepthCameraGeometry')
 
         xs = (us.astype(np.float64) - self.cx) * zs / self.fx
         ys = (vs.astype(np.float64) - self.cy) * zs / self.fy

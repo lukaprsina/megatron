@@ -137,7 +137,8 @@ class MissionController(Node):
 
         # ---- Parameters ----
         self.declare_parameter('dedup_distance', 0.8)
-        self.declare_parameter('approach_distance', 0.6)
+        self.declare_parameter('approach_distance', 0.1)
+
         self.declare_parameter('approach_fallback_distance', 0.35)
         self.declare_parameter('spin_at_waypoints', False)
         self.declare_parameter('total_faces', 3)
@@ -641,7 +642,12 @@ class MissionController(Node):
             self._send_next_waypoint()
             return
 
-        elapsed = (self.get_clock().now() - self.verify_start_time).nanoseconds / 1e9
+        start_time = self.verify_start_time # TODO
+        if start_time is None:
+            self.get_logger().error('Verification started without a timestamp!')
+            return
+        
+        elapsed = (self.get_clock().now() - start_time).nanoseconds / 1e9
         obj_type = self.current_approach['type']
 
         # Check if we've received a recent detection of the right type
@@ -670,6 +676,12 @@ class MissionController(Node):
 
     def _greet_object(self) -> None:
         obj = self.current_approach
+        if obj is None:
+            self.get_logger().error('Greet called with no current approach!')
+            self.state = State.EXPLORING
+            self._send_next_waypoint()
+            return
+        
         self.current_approach = None
 
         if obj['type'] == 'face':
