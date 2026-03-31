@@ -181,9 +181,19 @@ class FaceDetectorNode(Node):
                     continue
                 centroid, normal = result
 
+                self.get_logger().info(
+                    f'[DBG_FACE] n_pts={len(points_3d)} '
+                    f'cam_c=({centroid[0]:.2f},{centroid[1]:.2f},{centroid[2]:.2f}) '
+                    f'cam_n=({normal[0]:.2f},{normal[1]:.2f},{normal[2]:.2f}) '
+                    f'tf_frame={depth_msg.header.frame_id!r}')
+
                 # Transform to map frame
                 map_point, map_normal = transform_point_and_normal(
                     centroid, normal, tf_stamped)
+
+                self.get_logger().info(
+                    f'[DBG_FACE] map_pos=({map_point[0]:.2f},{map_point[1]:.2f},{map_point[2]:.2f}) '
+                    f'map_n=({map_normal[0]:.2f},{map_normal[1]:.2f},{map_normal[2]:.2f})')
 
                 cam_dist = float(np.linalg.norm(centroid))
 

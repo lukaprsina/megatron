@@ -250,6 +250,11 @@ class MissionController(Node):
         nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
 
         self.get_logger().info(
+            f'[DBG_CTRL] face recv pos=({pos[0]:.2f},{pos[1]:.2f}) '
+            f'q=({msg.pose.orientation.x:.2f},{msg.pose.orientation.y:.2f},'
+            f'{msg.pose.orientation.z:.2f},{msg.pose.orientation.w:.2f}) '
+            f'decoded_normal=({nx:.2f},{ny:.2f})')
+        self.get_logger().info(
             f'New face detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_faces) + 1}')
 
         self.found_faces.append({'pos': pos, 'normal': (nx, ny)})
@@ -433,6 +438,10 @@ class MissionController(Node):
         ay = float(pos[1]) + ny * distance
         # Face toward the object
         yaw = math.atan2(-ny, -nx)
+        self.get_logger().info(
+            f'[DBG_CTRL] approach: obj=({float(pos[0]):.2f},{float(pos[1]):.2f}) '
+            f'n=({nx:.2f},{ny:.2f}) dist={distance:.2f} '
+            f'-> goal=({ax:.2f},{ay:.2f}) yaw={math.degrees(yaw):.1f}deg')
         return ax, ay, yaw
 
     # ── Completion check ──────────────────────────────────────────────
@@ -555,7 +564,7 @@ class MissionController(Node):
 
         if self._nav_aborted() or self.nav_rejected:
             if not self.approach_retried:
-                # Retry closer
+                # Retry farther out (avoid costmap obstacles)
                 self.approach_retried = True
                 closer_dist = self.approach_distance + self.approach_retry_offset
                 self.get_logger().warn(
