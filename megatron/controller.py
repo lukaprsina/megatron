@@ -221,6 +221,7 @@ class MissionController(Node):
         # Publishers
         self.goal_marker_pub = self.create_publisher(MarkerArray, '/goal_markers', 10)
         self.mission_status_pub = self.create_publisher(String, '/mission_status', 10)
+        self.approaching_object = self.create_publisher(Marker, '/approaching_object', 10)
 
         # Action clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -519,6 +520,7 @@ class MissionController(Node):
             self.approach_retried = False
             ax, ay, yaw = self._compute_approach_pose(approach['pos'], approach['normal'])
             self.state = State.APPROACHING_OBJECT
+            self._publish_approaching_object(approach['pos'])
             self._send_nav_goal(ax, ay, yaw)
             return
 
@@ -600,6 +602,7 @@ class MissionController(Node):
             self._say(f'I see a {color} ring')
 
         self.current_approach = None
+        self._publish_approaching_object(None, none=True)
 
         if self._all_found():
             self._finish()
@@ -628,6 +631,35 @@ class MissionController(Node):
         self._say('Mission complete!')
 
     # ── Visualization ─────────────────────────────────────────────────
+
+    def _publish_approaching_object(self, pos, none=False):
+        t = Marker()
+        t.header.frame_id = 'map'
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.ns = 'approaching_object'
+        t.id = 0
+
+        if none or pos is None:
+            t.action = Marker.DELETE
+            self.approaching_object.publish(t)
+            return
+
+        self.get_logger().info(
+            f'Publishing approaching marker at ({float(pos[0]):.2f}, {float(pos[1]):.2f})')
+        t.type = Marker.TEXT_VIEW_FACING
+        t.action = Marker.ADD
+        t.pose.position.x = float(pos[0]) + 0.1
+        t.pose.position.y = float(pos[1])
+        t.pose.position.z = float(pos[2])
+        t.pose.orientation.w = 1.0
+        t.scale.z = 0.12
+        t.color.r = 1.0
+        t.color.g = 1.0
+        t.color.b = 0.0
+        t.color.a = 1.0
+        t.text = 'APPROACHING'
+        t.lifetime.sec = 0
+        self.approaching_object.publish(t)
 
     def _publish_goal_markers(self):
         marker_array = MarkerArray()
