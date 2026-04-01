@@ -8,7 +8,7 @@ bt_navigator:
     default_server_timeout: 20
     wait_for_service_timeout: 1000
     action_server_result_timeout: 900.0
-    navigators: ["navigate_to_pose", "navigate_through_poses"]
+    navigators: [ "navigate_to_pose", "navigate_through_poses" ]
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
     navigate_through_poses:
@@ -25,9 +25,9 @@ controller_server:
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
     failure_tolerance: 0.3
-    progress_checker_plugins: ["progress_checker"]
-    goal_checker_plugins: ["general_goal_checker"]
-    controller_plugins: ["FollowPath"]
+    progress_checker_plugins: [ "progress_checker" ]
+    goal_checker_plugins: [ "general_goal_checker" ]
+    controller_plugins: [ "FollowPath" ]
     use_realtime_priority: false
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
@@ -36,8 +36,8 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.08   # changed from 0.07
-      yaw_goal_tolerance: 0.07   # changed from 0.05
+      xy_goal_tolerance: 0.08 # changed from 0.07
+      yaw_goal_tolerance: 0.07 # changed from 0.05
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.5
@@ -76,15 +76,10 @@ local_costmap:
       width: 3
       height: 3
       resolution: 0.06
-      footprint: "[[ 0.189,  0.000],
-                  [ 0.134, -0.134],
-                  [ 0.000, -0.189],
-                  [-0.134, -0.134],
-                  [-0.189,  0.000],
-                  [-0.134,  0.134],
-                  [ 0.000,  0.189],
-                  [ 0.134,  0.134]]"
-      plugins: ["static_layer", "voxel_layer", "inflation_layer"]
+      footprint: "[[ 0.189,  0.000], [ 0.134, -0.134], [ 0.000, -0.189], [-0.134,
+        -0.134], [-0.189,  0.000], [-0.134,  0.134], [ 0.000,  0.189], [
+        0.134,  0.134]]"
+      plugins: [ "static_layer", "voxel_layer", "inflation_layer" ]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 4.0
@@ -99,7 +94,8 @@ local_costmap:
         max_obstacle_height: 2.0
         mark_threshold: 0
         observation_sources: scan_filtered
-        scan_filtered: # changed because it was wrongly named
+        scan_filtered:
+          # changed because it was wrongly named
           topic: scan_filtered # changed because it was wrongly named
           max_obstacle_height: 2.0
           clearing: true
@@ -122,17 +118,12 @@ global_costmap:
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_link
-      footprint: "[[ 0.189,  0.000],
-                  [ 0.134, -0.134],
-                  [ 0.000, -0.189],
-                  [-0.134, -0.134],
-                  [-0.189,  0.000],
-                  [-0.134,  0.134],
-                  [ 0.000,  0.189],
-                  [ 0.134,  0.134]]"
+      footprint: "[[ 0.189,  0.000], [ 0.134, -0.134], [ 0.000, -0.189], [-0.134,
+        -0.134], [-0.189,  0.000], [-0.134,  0.134], [ 0.000,  0.189], [
+        0.134,  0.134]]"
       resolution: 0.06
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      plugins: [ "static_layer", "obstacle_layer", "inflation_layer" ]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -160,7 +151,7 @@ planner_server:
   ros__parameters:
     enable_stamped_cmd_vel: true
     #expected_planner_frequency: 20.0
-    planner_plugins: ["GridBased"]
+    planner_plugins: [ "GridBased" ]
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
       tolerance: 0.5
@@ -170,10 +161,10 @@ planner_server:
 smoother_server:
   ros__parameters:
     enable_stamped_cmd_vel: true
-    smoother_plugins: ["simple_smoother"]
+    smoother_plugins: [ "simple_smoother" ]
     simple_smoother:
       plugin: "nav2_smoother::SimpleSmoother"
-      tolerance: 1.0e-10
+      tolerance: 1e-10
       max_its: 1000
       do_refinement: true
 
@@ -185,7 +176,7 @@ behavior_server:
     local_footprint_topic: local_costmap/published_footprint
     global_footprint_topic: global_costmap/published_footprint
     cycle_frequency: 10.0
-    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    behavior_plugins: [ "spin", "backup", "drive_on_heading", "assisted_teleop", "wait" ]
     spin:
       plugin: "nav2_behaviors::Spin"
     backup:
@@ -223,13 +214,13 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 1.0]
-    min_velocity: [-0.26, 0.0, -1.0]
-    max_accel: [2.5, 0.0, 3.2]
-    max_decel: [-2.5, 0.0, -3.2]
+    max_velocity: [ 0.26, 0.0, 1.0 ]
+    min_velocity: [ -0.26, 0.0, -1 ]
+    max_accel: [ 2.5, 0.0, 3.2 ]
+    max_decel: [ -2.5, 0.0, -3.2 ]
     odom_topic: "odom"
     odom_duration: 0.1
-    deadband_velocity: [0.0, 0.0, 0.0]
+    deadband_velocity: [ 0.0, 0.0, 0.0 ]
     velocity_timeout: 1.0
 
 collision_monitor:
@@ -246,7 +237,7 @@ collision_monitor:
     stop_pub_timeout: 2.0
     # Polygons represent zone around the robot for "stop", "slowdown" and "limit" action types,
     # and robot footprint for "approach" action type.
-    polygons: ["FootprintApproach"]
+    polygons: [ "FootprintApproach" ]
     FootprintApproach:
       type: "polygon"
       action_type: "approach"
@@ -256,7 +247,7 @@ collision_monitor:
       min_points: 6
       visualize: False
       enabled: True
-    observation_sources: ["scan"]
+    observation_sources: [ "scan" ]
     scan:
       type: "scan"
       topic: "scan"
@@ -280,9 +271,9 @@ docking_server:
     dock_prestaging_tolerance: 0.5
 
     # Types of docks
-    dock_plugins: ['simple_charging_dock']
+    dock_plugins: [ "simple_charging_dock" ]
     simple_charging_dock:
-      plugin: 'opennav_docking::SimpleChargingDock'
+      plugin: "opennav_docking::SimpleChargingDock"
       docking_threshold: 0.05
       staging_x_offset: -0.7
       use_external_detection_pose: true
