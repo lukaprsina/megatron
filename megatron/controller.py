@@ -23,6 +23,7 @@ from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
 from nav2_msgs.action import Spin, NavigateToPose
+from nav2_msgs.action import ComputePathToPose
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -154,6 +155,7 @@ class MissionController(Node):
         self.declare_parameter('max_loops', 2)
         self.declare_parameter('waypoints_file', 'waypoints/test1.yaml')
         self.declare_parameter('verify_pause_sec', 1.0)
+        self.declare_parameter('detour_threshold', 2.0)  # min distance saved to justify immediate approach
 
         self.dedup_distance = self.get_parameter('dedup_distance').value
         self.approach_distance = self.get_parameter('approach_distance').value
@@ -163,6 +165,7 @@ class MissionController(Node):
         self.total_rings = self.get_parameter('total_rings').value
         self.max_loops = self.get_parameter('max_loops').value
         self.verify_pause_sec = self.get_parameter('verify_pause_sec').value
+        self.detour_threshold = self.get_parameter('detour_threshold').value
 
         # Speech
         self.speaker = Speaker()
@@ -183,8 +186,8 @@ class MissionController(Node):
         self.loop_count = 0
         self.start_time = None
 
-        # Nav2 lifecycle check
-        self.nodes = ['amcl', 'bt_navigator']
+        # Nav2 lifecycle check (include planner_server so we know planner/service is active)
+        self.nodes = ['amcl', 'bt_navigator', 'planner_server']
         self.states = {n: 'Unknown' for n in self.nodes}
         self.nav2_ready = False
         self.last_nav2_check = 0.0
@@ -205,10 +208,15 @@ class MissionController(Node):
         # Detection state
         self.found_faces: list[dict] = []   # [{'pos': np.array, 'normal': (nx,ny)}]
         self.found_rings: list[dict] = []   # [{'pos': np.array, 'color': str, 'normal': (nx,ny)}]
-        self.pending_approaches: list[dict] = []  # queue of {'type': 'face'|'ring', 'pos', 'normal', 'color'}
+
+        # Task queue: unified queue of waypoints and detected objects
+        # Each task: {'type': 'waypoint'|'face'|'ring', 'pos': np.array, 'yaw': float, 'normal': tuple, 'color': str, 'index': int}
+        self.task_queue: list[dict] = []
+        self._init_task_queue()
 
         # Approach tracking
-        self.current_approach = None  # the dict from pending_approaches being executed
+        self.current_task = None  # the current task being executed
+        self.current_approach = None  # the dict from task_queue being executed (for faces/rings)
         self.approach_retried = False
         self.verify_start_time = None
 
@@ -233,11 +241,252 @@ class MissionController(Node):
             n: self.create_client(GetState, f'/{n}/get_state') for n in self.nodes
         }
 
+        # Compute path action client (planner server)
+        self.compute_path_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
+
         # Timers
         self.timer = self.create_timer(0.1, self._tick)              # 10 Hz state machine
         self.speech_timer = self.create_timer(0.5, self._speech_tick) # 2 Hz speech queue
 
         self.get_logger().info('Mission controller initialized.')
+
+    # ── Task queue management ─────────────────────────────────────────
+
+    def _init_task_queue(self):
+        """Initialize task queue with waypoints."""
+        self.task_queue = []
+        for i, (x, y, yaw) in enumerate(self.waypoints):
+            self.task_queue.append({
+                'type': 'waypoint',
+                'pos': np.array([x, y, 0.0]),
+                'yaw': yaw,
+                'index': i,
+                'normal': None,
+                'color': None,
+            })
+
+    def _get_robot_pos(self):
+        """Get current robot position as numpy array."""
+        if self.current_pose is None:
+            return None
+        return np.array([
+            self.current_pose.pose.position.x,
+            self.current_pose.pose.position.y,
+            0.0
+        ])
+
+    def _compute_path_length_sync(self, goal_pos, timeout_sec: float = 1.0):
+        """Compute path length to goal synchronously. Returns None on failure."""
+        if not self.nav2_ready or self.current_pose is None:
+            return None
+
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = 'map'
+        goal_pose.header.stamp = self.get_clock().now().to_msg()
+        goal_pose.pose.position.x = float(goal_pos[0])
+        goal_pose.pose.position.y = float(goal_pos[1])
+        goal_pose.pose.orientation.w = 1.0
+
+        goal_msg = ComputePathToPose.Goal()
+        start = PoseStamped()
+        start.header.frame_id = 'map'
+        start.header.stamp = self.get_clock().now().to_msg()
+        start.pose = self.current_pose.pose
+        goal_msg.start = start
+        goal_msg.goal = goal_pose
+
+        if not self.compute_path_client.server_is_ready():
+            return None
+
+        try:
+            goal_future = self.compute_path_client.send_goal_async(goal_msg)
+            # Spin until done or timeout
+            start_time = self.get_clock().now()
+            while not goal_future.done():
+                rclpy.spin_once(self, timeout_sec=0.05)
+                elapsed = (self.get_clock().now() - start_time).nanoseconds / 1e9
+                if elapsed > timeout_sec:
+                    return None
+
+            goal_handle = goal_future.result()
+            if not goal_handle.accepted:
+                self.get_logger().warn('ComputePathToPose goal rejected')
+                return None
+            
+            result_future = goal_handle.get_result_async()
+            # Spin until result is done or timeout
+            while not result_future.done():
+                rclpy.spin_once(self, timeout_sec=0.05)
+                elapsed = (self.get_clock().now() - start_time).nanoseconds / 1e9
+                if elapsed > timeout_sec:
+                    return None
+            
+            result = result_future.result().result
+            if result is None or len(result.path.poses) < 2:
+                return 0.0
+
+            length = 0.0
+            for i in range(1, len(result.path.poses)):
+                x0 = result.path.poses[i-1].pose.position.x
+                y0 = result.path.poses[i-1].pose.position.y
+                x1 = result.path.poses[i].pose.position.x
+                y1 = result.path.poses[i].pose.position.y
+                length += math.hypot(x1 - x0, y1 - y0)
+            return length
+        except Exception as e:
+            self.get_logger().warn(f'Path computation failed: {e}')
+            return None
+
+    def _compute_path_from_to(self, start_pos, goal_pos, timeout_sec: float = 1.0):
+        """Compute path length between two positions. Returns None on failure."""
+        if not self.nav2_ready:
+            return None
+
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = 'map'
+        goal_pose.header.stamp = self.get_clock().now().to_msg()
+        goal_pose.pose.position.x = float(goal_pos[0])
+        goal_pose.pose.position.y = float(goal_pos[1])
+        goal_pose.pose.orientation.w = 1.0
+
+        start_pose = PoseStamped()
+        start_pose.header.frame_id = 'map'
+        start_pose.header.stamp = self.get_clock().now().to_msg()
+        start_pose.pose.position.x = float(start_pos[0])
+        start_pose.pose.position.y = float(start_pos[1])
+        start_pose.pose.orientation.w = 1.0
+
+        goal_msg = ComputePathToPose.Goal()
+        goal_msg.start = start_pose
+        goal_msg.goal = goal_pose
+
+        if not self.compute_path_client.server_is_ready():
+            return None
+
+        try:
+            goal_future = self.compute_path_client.send_goal_async(goal_msg)
+            start_time = self.get_clock().now()
+            while not goal_future.done():
+                rclpy.spin_once(self, timeout_sec=0.05)
+                elapsed = (self.get_clock().now() - start_time).nanoseconds / 1e9
+                if elapsed > timeout_sec:
+                    return None
+
+            goal_handle = goal_future.result()
+            if not goal_handle.accepted:
+                self.get_logger().warn('ComputePathToPose goal rejected')
+                return None
+            
+            result_future = goal_handle.get_result_async()
+            # Spin until result is done or timeout
+            while not result_future.done():
+                rclpy.spin_once(self, timeout_sec=0.05)
+                elapsed = (self.get_clock().now() - start_time).nanoseconds / 1e9
+                if elapsed > timeout_sec:
+                    return None
+
+            result = result_future.result().result
+            if result is None or len(result.path.poses) < 2:
+                return 0.0
+
+            length = 0.0
+            for i in range(1, len(result.path.poses)):
+                x0 = result.path.poses[i-1].pose.position.x
+                y0 = result.path.poses[i-1].pose.position.y
+                x1 = result.path.poses[i].pose.position.x
+                y1 = result.path.poses[i].pose.position.y
+                length += math.hypot(x1 - x0, y1 - y0)
+            return length
+        except Exception as e:
+            self.get_logger().warn(f'Path computation from/to failed: {e}')
+            return None
+
+    def _schedule_detection(self, detection: dict):
+        """Schedule a detected object (face/ring) optimally in the task queue.
+        
+        Decides whether to approach the object immediately or defer it until
+        after the next waypoint based on path distance comparison.
+        """
+        robot_pos = self._get_robot_pos()
+        if robot_pos is None:
+            # No pose available, just insert at front
+            self.task_queue.insert(0, detection)
+            self.get_logger().info(
+                f'Scheduled {detection["type"]} immediately (no pose available)')
+            return
+
+        # Find the next waypoint in the queue
+        next_waypoint = None
+        next_waypoint_idx = None
+        waypoints = [task for task in self.task_queue if task['type'] == 'waypoint']
+        for i, task in enumerate(self.task_queue):
+            if task['type'] == 'waypoint':
+                next_waypoint = task
+                next_waypoint_idx = i
+                break
+
+        if next_waypoint is None:
+            # No waypoints left, just insert at front
+            self.task_queue.insert(0, detection)
+            self.get_logger().info(
+                f'Scheduled {detection["type"]} immediately (no waypoints left)')
+            return
+
+        # Compute approach pose for the detection
+        ax, ay, _ = self._compute_approach_pose(detection['pos'], detection['normal'])
+        approach_pos = np.array([ax, ay, 0.0])
+
+        # Option 1: Go to object now (robot → object)
+        dist_now = self._compute_path_length_sync(approach_pos)
+
+        # Option 2: Go via waypoint (robot → waypoint → object)
+        # dist_to_waypoint = self._compute_path_length_sync(next_waypoint['pos'])
+        closest_waypoint = None
+        for waypoint in waypoints: 
+            dist_waypoint_to_obj = self._compute_path_from_to(waypoint['pos'], approach_pos)
+            if closest_waypoint is None or (dist_waypoint_to_obj is not None and dist_waypoint_to_obj < closest_waypoint[1]):
+                closest_waypoint = (waypoint, dist_waypoint_to_obj)
+
+        dist_waypoint_to_obj = closest_waypoint[1] if closest_waypoint is not None else None
+
+        for i, task in enumerate(self.task_queue):
+            if task['type'] == 'waypoint' and closest_waypoint is not None and task['index'] == closest_waypoint[0]['index']:
+                next_waypoint = task
+                next_waypoint_idx = i
+                break
+
+        # Fallbackif  to Euclidean if path computation fails
+        if dist_now is None:
+            dist_now = np.linalg.norm(approach_pos[:2] - robot_pos[:2])
+        # if dist_to_waypoint is None:
+        #     dist_to_waypoint = np.linalg.norm(next_waypoint['pos'][:2] - robot_pos[:2])
+        if dist_waypoint_to_obj is None:
+            dist_waypoint_to_obj = np.linalg.norm(approach_pos[:2] - next_waypoint['pos'][:2])
+
+        dist_via_waypoint = dist_waypoint_to_obj
+
+        savings = dist_via_waypoint - dist_now
+
+        self.get_logger().info(
+            f'[SCHED] {detection["type"]} at ({detection["pos"][0]:.2f}, {detection["pos"][1]:.2f}): '
+            f'dist_now={dist_now:.2f}m,' 
+            #f' dist_via_wp={dist_via_waypoint:.2f}m, '
+            #f'savings={savings:.2f}m, threshold={self.detour_threshold:.2f}m'
+            )
+
+        #if savings >= self.detour_threshold:
+        if savings > 0:
+            # Worth approaching now - insert at front
+            self.task_queue.insert(0, detection)
+            self.get_logger().info(
+                f'Scheduled {detection["type"]} IMMEDIATELY (saves {savings:.2f}m)')
+        else:
+            # Defer - insert after the next waypoint
+            insert_idx = next_waypoint_idx + 1 if next_waypoint_idx is not None else 0
+            self.task_queue.insert(insert_idx, detection)
+            self.get_logger().info(
+                f'Scheduled {detection["type"]} AFTER waypoint {next_waypoint["index"]} '
+                f'(only saves {savings:.2f}m)')
 
     # ── Detection callbacks ───────────────────────────────────────────
 
@@ -260,12 +509,22 @@ class MissionController(Node):
 
         self.found_faces.append({'pos': pos, 'normal': (nx, ny)})
 
-        if self.state == State.EXPLORING:
-            self.pending_approaches.append({
+        # if self.state == State.EXPLORING:
+        #     self._schedule_detection({
+        #         'type': 'face',
+        #         'pos': pos,
+        #         'normal': (nx, ny),
+        #         'color': None,
+        #         'yaw': None,
+        #         'index': None,
+        #     })
+        self._schedule_detection({
                 'type': 'face',
                 'pos': pos,
                 'normal': (nx, ny),
                 'color': None,
+                'yaw': None,
+                'index': None,
             })
 
     def _ring_callback(self, msg: PoseStamped):
@@ -288,13 +547,24 @@ class MissionController(Node):
 
         self.found_rings.append({'pos': pos, 'color': color, 'normal': (nx, ny)})
 
-        if self.state == State.EXPLORING:
-            self.pending_approaches.append({
+        self._schedule_detection({
                 'type': 'ring',
                 'pos': pos,
                 'normal': (nx, ny),
                 'color': color,
+                'yaw': None,
+                'index': None,
             })
+        
+        # if self.state == State.EXPLORING:
+        #     self._schedule_detection({
+        #         'type': 'ring',
+        #         'pos': pos,
+        #         'normal': (nx, ny),
+        #         'color': color,
+        #         'yaw': None,
+        #         'index': None,
+        #     })
 
     # ── Nav2 / dock callbacks ─────────────────────────────────────────
 
@@ -348,6 +618,72 @@ class MissionController(Node):
         q = quaternion_from_euler(0, 0, yaw)
         return Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
 
+    def _compute_path_length_to(self, goal_pose_stamped: PoseStamped, timeout_sec: float = 2.0):
+        """Request ComputePathToPose asynchronously and log the computed length.
+
+        This is non-blocking: it sends the request and returns immediately. The
+        result is processed in `_on_compute_path_done` which logs the length.
+        """
+        # Ensure service is available and we have a pose
+        if not self.nav2_ready:
+            self.get_logger().warn('ComputePathToPose service not available')
+            return False
+
+        if self.current_pose is None:
+            self.get_logger().warn('No current robot pose available for path compute')
+            return False
+
+        goal_msg = ComputePathToPose.Goal()
+        start = PoseStamped()
+        start.header.frame_id = 'map'
+        start.header.stamp = self.get_clock().now().to_msg()
+        start.pose = self.current_pose.pose
+        goal_msg.start = start
+        goal_msg.goal = goal_pose_stamped
+
+        goal_future = self.compute_path_client.send_goal_async(goal_msg)
+        goal_future.add_done_callback(lambda f, g=goal_pose_stamped: self._on_compute_path_goal_done(f, g))
+        return True
+
+    def _on_compute_path_goal_done(self, goal_future, goal_pose_stamped: PoseStamped):
+        try:
+            goal_handle = goal_future.result()
+            if not goal_handle.accepted:
+                self.get_logger().warn('ComputePathToPose goal rejected')
+                return
+            
+            result_future = goal_handle.get_result_async()
+            result_future.add_done_callback(lambda f, g=goal_pose_stamped: self._on_compute_path_done(f, g))
+        except Exception as e:
+            self.get_logger().warn(f'ComputePathToPose goal failed: {e}')
+            return
+
+    def _on_compute_path_done(self, result_future, goal_pose_stamped: PoseStamped):
+        try:
+            result = result_future.result().result
+        except Exception as e:
+            self.get_logger().warn(f'ComputePathToPose failed: {e}')
+            return
+
+        if result is None or not hasattr(result, 'path'):
+            self.get_logger().warn('ComputePathToPose returned no path')
+            return
+
+        poses = result.path.poses
+        if len(poses) < 2:
+            length = 0.0
+        else:
+            length = 0.0
+            for i in range(1, len(poses)):
+                x0 = poses[i-1].pose.position.x
+                y0 = poses[i-1].pose.position.y
+                x1 = poses[i].pose.position.x
+                y1 = poses[i].pose.position.y
+                length += math.hypot(x1 - x0, y1 - y0)
+
+        self.last_path_length = length
+        self.get_logger().info(f'Computed path length to goal: {length:.2f} m')
+
     def _send_nav_goal(self, x, y, yaw):
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
@@ -355,6 +691,17 @@ class MissionController(Node):
         goal_msg.pose.pose.position.x = x
         goal_msg.pose.pose.position.y = y
         goal_msg.pose.pose.orientation = self._yaw_to_quaternion(yaw)
+
+        # # Prepare a PoseStamped to request path length asynchronously
+        # goal_pose_stamped = PoseStamped()
+        # goal_pose_stamped.header = goal_msg.pose.header
+        # goal_pose_stamped.pose = goal_msg.pose.pose
+        # # Request path length (non-blocking) and log result when ready
+        # try:
+        #     self._compute_path_length_to(goal_pose_stamped)
+        # except Exception:
+        #     # don't fail sending goal if compute_path request fails
+        #     pass
 
         if not self.nav_client.wait_for_server(timeout_sec=1.0):
             self.get_logger().warn('NavigateToPose server not available')
@@ -509,50 +856,85 @@ class MissionController(Node):
     def _undock_done(self, future):
         self.get_logger().info('Undocked successfully.')
         self.state = State.EXPLORING
-        self._send_next_waypoint()
+        self._process_next_task()
 
     def _handle_exploring(self):
-        # Check if a detection needs approach
-        if self.pending_approaches:
-            approach = self.pending_approaches.pop(0)
-            self._cancel_nav()
-            self.current_approach = approach
-            self.approach_retried = False
-            ax, ay, yaw = self._compute_approach_pose(approach['pos'], approach['normal'])
-            self.state = State.APPROACHING_OBJECT
-            self._publish_approaching_object(approach['pos'])
-            self._send_nav_goal(ax, ay, yaw)
-            return
-
-        # Check if current navigation is done
+        # Check if current task changed or navigation is done
         if self._is_nav_complete():
             if self._all_found():
                 self._finish()
                 return
 
-            if self._nav_aborted():
-                # Waypoint aborted — skip to next
-                self.get_logger().warn(
-                    f'Waypoint {self.waypoint_index} navigation aborted, skipping.')
-                self.waypoint_index += 1
-
-            if self._nav_succeeded():
-                self.waypoint_index += 1
-
-            # Check for loop completion
-            if self.waypoint_index >= len(self.waypoints):
-                self.waypoint_index = 0
-                self.loop_count += 1
-                self.get_logger().info(
-                    f'Completed waypoint loop {self.loop_count}/{self.max_loops}')
-                if self.loop_count >= self.max_loops:
-                    self._finish()
+            current = self.current_task
+            if current is not None:
+                if current['type'] == 'waypoint':
+                    if self._nav_aborted():
+                        self.get_logger().warn(
+                            f'Waypoint {current["index"]} navigation aborted, skipping.')
+                    elif self._nav_succeeded():
+                        self.get_logger().info(f'Reached waypoint {current["index"]}')
+                        # Check for loop completion
+                        self._check_loop_completion()
+                elif current['type'] in ('face', 'ring'):
+                    # Reached approach pose — enter verify state
+                    self.current_approach = current
+                    self.state = State.APPROACHING_OBJECT
                     return
 
-            if self.spin_at_waypoints:
-                self._send_spin()
+            # Process next task from queue
+            self._process_next_task()
+
+    def _check_loop_completion(self):
+        """Check if we completed a loop through all waypoints."""
+        # Count remaining waypoints in queue
+        remaining_waypoints = sum(1 for t in self.task_queue if t['type'] == 'waypoint')
+        if remaining_waypoints == 0:
+            self.loop_count += 1
+            self.get_logger().info(
+                f'Completed waypoint loop {self.loop_count}/{self.max_loops}')
+            if self.loop_count < self.max_loops:
+                # Reload waypoints for next loop
+                self._init_task_queue()
+
+    def _process_next_task(self):
+        """Pop and process the next task from the queue."""
+        if self._all_found():
+            self._finish()
+            return
+
+        if self.loop_count >= self.max_loops and not self.task_queue:
+            self._finish()
+            return
+
+        if not self.task_queue:
+            # Queue empty but not done - reload waypoints for next loop
+            if self.loop_count < self.max_loops:
+                self._init_task_queue()
             else:
-                self._send_next_waypoint()
+                self._finish()
+                return
+
+        task = self.task_queue.pop(0)
+        self.current_task = task
+
+        if task['type'] == 'waypoint':
+            self.waypoint_index = task['index']
+            self.get_logger().info(f'Heading to waypoint {task["index"]}')
+            x, y = float(task['pos'][0]), float(task['pos'][1])
+            yaw = task['yaw']
+            self._send_nav_goal(x, y, yaw)
+            self._publish_goal_markers()
+            if self.spin_at_waypoints:
+                # Will spin after reaching waypoint
+                pass
+        elif task['type'] in ('face', 'ring'):
+            self._cancel_nav()
+            self.current_approach = task
+            self.approach_retried = False
+            ax, ay, yaw = self._compute_approach_pose(task['pos'], task['normal'])
+            self.state = State.APPROACHING_OBJECT
+            self._publish_approaching_object(task['pos'])
+            self._send_nav_goal(ax, ay, yaw)
 
     def _handle_approaching(self):
         if not self._is_nav_complete():
@@ -579,8 +961,9 @@ class MissionController(Node):
                 # Give up on this approach
                 self.get_logger().warn('Approach failed after retry, resuming exploration.')
                 self.current_approach = None
+                self.current_task = None
                 self.state = State.EXPLORING
-                self._send_next_waypoint()
+                self._process_next_task()
 
     def _handle_verifying(self):
         elapsed = (self.get_clock().now() - self.verify_start_time).nanoseconds / 1e9
@@ -590,7 +973,7 @@ class MissionController(Node):
         approach = self.current_approach
         if approach is None:
             self.state = State.EXPLORING
-            self._send_next_waypoint()
+            self._process_next_task()
             return
 
         if approach['type'] == 'face':
@@ -602,22 +985,18 @@ class MissionController(Node):
             self._say(f'I see a {color} ring')
 
         self.current_approach = None
+        self.current_task = None
         self._publish_approaching_object(None, none=True)
 
         if self._all_found():
             self._finish()
         else:
             self.state = State.EXPLORING
-            self._send_next_waypoint()
+            self._process_next_task()
 
     def _send_next_waypoint(self):
-        if self.waypoint_index >= len(self.waypoints):
-            self.waypoint_index = 0
-
-        self.get_logger().info(f'Heading to waypoint {self.waypoint_index}')
-        x, y, yaw = self.waypoints[self.waypoint_index]
-        self._send_nav_goal(x, y, yaw)
-        self._publish_goal_markers()
+        """Legacy method - delegates to _process_next_task for backwards compatibility."""
+        self._process_next_task()
 
     def _finish(self):
         elapsed = 0.0
@@ -680,10 +1059,10 @@ class MissionController(Node):
             m.scale.y = 0.08
             m.scale.z = 0.08
 
-            if i < self.waypoint_index:
-                m.color.r, m.color.g, m.color.b, m.color.a = 0.3, 0.7, 0.3, 0.5
-            elif i == self.waypoint_index:
+            if i == self.waypoint_index and self.state == State.EXPLORING:
                 m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 1.0, 0.0, 1.0
+            elif i < self.waypoint_index:
+                m.color.r, m.color.g, m.color.b, m.color.a = 0.3, 0.7, 0.3, 0.5
             else:
                 m.color.r, m.color.g, m.color.b, m.color.a = 0.3, 0.3, 1.0, 0.5
             m.lifetime.sec = 0
