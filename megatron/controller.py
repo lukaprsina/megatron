@@ -212,6 +212,10 @@ class MissionController(Node):
         self.approach_retried = False
         self.verify_start_time = None
 
+        # In-flight guard: True from send_goal_async() until _nav_goal_response fires.
+        # Prevents stale result_future/status from being read on the next tick.
+        self.nav_in_flight = False
+
         # Subscribers
         self.create_subscription(DockStatus, 'dock_status', self._dock_callback, qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self._amcl_callback, amcl_pose_qos)
@@ -356,11 +360,13 @@ class MissionController(Node):
 
         self.get_logger().info(f'Navigating to ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
         self.nav_rejected = False
+        self.nav_in_flight = True
         future = self.nav_client.send_goal_async(goal_msg, self._feedback_callback)
         future.add_done_callback(self._nav_goal_response)
         return True
 
     def _nav_goal_response(self, future):
+        self.nav_in_flight = False
         self.status = 0
         self.goal_handle = future.result()
 
@@ -385,6 +391,8 @@ class MissionController(Node):
             self.result_future = None
 
     def _is_nav_complete(self):
+        if self.nav_in_flight:
+            return False
         if self.result_future is None:
             return True
         return self.result_future.done() and not self.nav_rejected
