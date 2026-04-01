@@ -154,6 +154,7 @@ class MissionController(Node):
         self.declare_parameter('max_loops', 2)
         self.declare_parameter('waypoints_file', 'waypoints/test1.yaml')
         self.declare_parameter('verify_pause_sec', 1.0)
+        self.declare_parameter('max_approach_attempts', 3)
 
         self.dedup_distance = self.get_parameter('dedup_distance').value
         self.approach_distance = self.get_parameter('approach_distance').value
@@ -163,6 +164,7 @@ class MissionController(Node):
         self.total_rings = self.get_parameter('total_rings').value
         self.max_loops = self.get_parameter('max_loops').value
         self.verify_pause_sec = self.get_parameter('verify_pause_sec').value
+        self.max_approach_attempts = self.get_parameter('max_approach_attempts').value
 
         # Speech
         self.speaker = Speaker()
@@ -249,6 +251,11 @@ class MissionController(Node):
 
         for f in self.found_faces:
             if np.linalg.norm(pos - f['pos']) < self.dedup_distance:
+                # Already known — if approach previously failed, re-queue it
+                if not f.get('greeted', False) and self.state != State.DONE:
+                    self._requeue_if_not_pending('face', pos,
+                                                 _quaternion_to_normal_2d(msg.pose.orientation),
+                                                 None)
                 return
 
         nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
@@ -256,9 +263,9 @@ class MissionController(Node):
         self.get_logger().info(
             f'New face detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_faces) + 1}')
 
-        self.found_faces.append({'pos': pos, 'normal': (nx, ny)})
+        self.found_faces.append({'pos': pos, 'normal': (nx, ny), 'greeted': False})
 
-        if self.state == State.EXPLORING:
+        if self.state != State.DONE:
             self.pending_approaches.append({
                 'type': 'face',
                 'pos': pos,
@@ -277,6 +284,11 @@ class MissionController(Node):
 
         for r in self.found_rings:
             if np.linalg.norm(pos - r['pos']) < self.dedup_distance:
+                # Already known — if approach previously failed, re-queue it
+                if not r.get('greeted', False) and self.state != State.DONE:
+                    self._requeue_if_not_pending('ring', pos,
+                                                 _quaternion_to_normal_2d(msg.pose.orientation),
+                                                 color)
                 return
 
         nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
@@ -284,9 +296,9 @@ class MissionController(Node):
         self.get_logger().info(
             f'New ring ({color}) detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_rings) + 1}')
 
-        self.found_rings.append({'pos': pos, 'color': color, 'normal': (nx, ny)})
+        self.found_rings.append({'pos': pos, 'color': color, 'normal': (nx, ny), 'greeted': False})
 
-        if self.state == State.EXPLORING:
+        if self.state != State.DONE:
             self.pending_approaches.append({
                 'type': 'ring',
                 'pos': pos,
@@ -295,6 +307,26 @@ class MissionController(Node):
             })
 
     # ── Nav2 / dock callbacks ─────────────────────────────────────────
+
+    def _requeue_if_not_pending(self, obj_type, pos, normal, color):
+        """Re-add a known-but-ungreeted object to pending if not already queued."""
+        nx, ny = normal
+        # Check it's not already in the pending queue or currently being approached
+        for a in self.pending_approaches:
+            if a['type'] == obj_type and np.linalg.norm(pos - np.array(a['pos'])) < self.dedup_distance:
+                return
+        if (self.current_approach is not None
+                and self.current_approach['type'] == obj_type
+                and np.linalg.norm(pos - np.array(self.current_approach['pos'])) < self.dedup_distance):
+            return
+        self.get_logger().info(
+            f'Re-queuing ungreeted {obj_type} at ({pos[0]:.2f}, {pos[1]:.2f})')
+        self.pending_approaches.append({
+            'type': obj_type,
+            'pos': pos,
+            'normal': (nx, ny),
+            'color': color,
+        })
 
     def _dock_callback(self, msg: DockStatus):
         self.is_docked = msg.is_docked
@@ -562,19 +594,26 @@ class MissionController(Node):
             return
 
         if self._nav_aborted() or self.nav_rejected:
-            if not self.approach_retried:
-                # Retry farther out (avoid costmap obstacles)
+            approach = self.current_approach
+            attempts = approach.get('attempts', 0) + 1
+            approach['attempts'] = attempts
+
+            if attempts < self.max_approach_attempts:
+                # Retry a bit farther out (avoid costmap obstacles)
                 self.approach_retried = True
-                closer_dist = self.approach_distance + self.approach_retry_offset
+                retry_dist = self.approach_distance + self.approach_retry_offset * attempts
                 self.get_logger().warn(
-                    f'Approach aborted, retrying at {closer_dist:.2f}m')
-                approach = self.current_approach
+                    f'Approach aborted (attempt {attempts}/{self.max_approach_attempts}), '
+                    f'retrying at {retry_dist:.2f}m')
                 ax, ay, yaw = self._compute_approach_pose(
-                    approach['pos'], approach['normal'], closer_dist)
+                    approach['pos'], approach['normal'], retry_dist)
                 self._send_nav_goal(ax, ay, yaw)
             else:
-                # Give up on this approach
-                self.get_logger().warn('Approach failed after retry, resuming exploration.')
+                # All attempts exhausted — push back to end of queue to try later
+                self.get_logger().warn(
+                    f'Approach failed after {attempts} attempts, '
+                    f're-queuing for later.')
+                self.pending_approaches.append(approach)
                 self.current_approach = None
                 self.state = State.EXPLORING
                 self._send_next_waypoint()
@@ -597,6 +636,19 @@ class MissionController(Node):
             color = approach.get('color', 'unknown')
             self.get_logger().info(f'Verified ring — announcing color: {color}!')
             self._say(f'I see a {color} ring')
+
+        # Mark this object as successfully greeted
+        target_pos = np.array(approach['pos'])
+        if approach['type'] == 'face':
+            for f in self.found_faces:
+                if np.linalg.norm(target_pos - f['pos']) < self.dedup_distance:
+                    f['greeted'] = True
+                    break
+        elif approach['type'] == 'ring':
+            for r in self.found_rings:
+                if np.linalg.norm(target_pos - r['pos']) < self.dedup_distance:
+                    r['greeted'] = True
+                    break
 
         self.current_approach = None
 
