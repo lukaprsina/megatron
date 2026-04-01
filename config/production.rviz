@@ -806,6 +806,7 @@ Visualization Manager:
       Name: Ring Markers
       Namespaces:
         ring_labels: true
+        ring_normals: true
         rings: true
       Topic:
         Depth: 5
@@ -860,25 +861,18 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /task1_rviz_image
       Value: true
-    - Alpha: 1
-      Axes Length: 1
-      Axes Radius: 0.10000000149011612
-      Class: rviz_default_plugins/Pose
-      Color: 255; 25; 0
+    - Class: rviz_default_plugins/Marker
       Enabled: true
-      Head Length: 0.30000001192092896
-      Head Radius: 0.10000000149011612
-      Name: Rings2
-      Shaft Length: 1
-      Shaft Radius: 0.05000000074505806
-      Shape: Arrow
+      Name: Approaching Object
+      Namespaces:
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /detected_rings
+        Value: /approaching_object
       Value: true
   Enabled: true
   Global Options:
@@ -927,7 +921,7 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 100.99360656738281
+      Scale: 159.5457000732422
       Target Frame: <Fixed Frame>
       Value: TopDownOrtho (rviz_default_plugins)
       X: 0.20796695351600647

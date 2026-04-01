@@ -49,11 +49,11 @@ class Speaker:
             return
 
         try:
-            self._process = subprocess.Popen(
+            """ self._process = subprocess.Popen(
                 [self._espeak, "-s", "150", f"Attention please. {text}"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-            )
+            ) """
             self._logger.info(f"Started espeak-ng process for text: {text[:100]}")
         except Exception as e:
             # Log unexpected errors when trying to start TTS
