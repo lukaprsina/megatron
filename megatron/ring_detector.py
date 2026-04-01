@@ -347,14 +347,29 @@ class RingDetectorNode(Node):
             return
 
         # ---- Stage 1: adaptive threshold -> binary ----
+        # ---- Stage 1: adaptive threshold + saturation mask -> binary ----
+        
+        # 1. Existing grayscale adaptive threshold (background white, rings/edges black)
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-        thresh = cv2.adaptiveThreshold(
+        thresh_gray = cv2.adaptiveThreshold(
             gray, 255,
             cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,
             self.thresh_block_size, self.thresh_c,
         )
-        self._publish_debug(self.debug_binary_pub, thresh, mono=True)
 
+        # 2. Global saturation threshold
+        hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+        s_channel = hsv[:, :, 1]
+        
+        # INVERTED THRESHOLD: Vivid things become BLACK (0), dull things become WHITE (255)
+        # S-values in Gazebo for these rings are usually very high, 60 is a safe threshold
+        _, thresh_color_inv = cv2.threshold(s_channel, 130, 255, cv2.THRESH_BINARY_INV)
+
+        # 3. Combine with AND! 
+        # If a pixel is black (0) in EITHER image, it becomes black in the final image.
+        thresh = cv2.bitwise_and(thresh_gray, thresh_color_inv)
+        
+        self._publish_debug(self.debug_binary_pub, thresh, mono=True)
         # ---- Stage 2: contour extraction -> ellipse fitting & scoring ----
         contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
