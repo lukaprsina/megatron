@@ -510,7 +510,15 @@ class RingDetectorNode(Node):
             # Depth discontinuity: additive signal for hanging rings
             has_depth_gap = _check_depth_discontinuity(
                 pc2_msg, outer, inner, cv_image.shape, self.min_depth_gap)
+            # has_depth_gap = _check_depth_discontinuity(
+            #     pc2_msg, outer, inner, cv_image.shape, self.min_depth_gap)
 
+            if not has_depth_gap:
+                # Hole is at same depth as ring band → wall-mounted, reject
+                cv2.putText(debug_color_img, 'wall', (cx_px + 8, cy_px + 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 80, 200), 1)
+                continue
+            
             # ---- 3D projection via annular mask + PointCloud2 ----
             annular_mask = _build_annular_mask((h, w), outer, inner)
             points_3d = extract_3d_points_from_pc2(annular_mask, pc2_msg)

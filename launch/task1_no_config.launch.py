@@ -18,7 +18,7 @@ def generate_launch_description():
         DeclareLaunchArgument('world', default_value='task1_yellow_demo',
                               description='Gazebo world name'),
         DeclareLaunchArgument('map', default_value=PathJoinSubstitution(
-            [pkg_megatron, 'maps', 'task1.yaml']),
+            [pkg_megatron, 'maps', 'task1_orig.yaml']),
             description='Map YAML file'),
         DeclareLaunchArgument('rviz', default_value='true',
                               choices=['true', 'false']),
