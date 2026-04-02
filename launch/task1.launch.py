@@ -14,10 +14,10 @@ def generate_launch_description():
 
     # Arguments
     args = [
-        DeclareLaunchArgument('world', default_value='task1_yellow_demo',
+        DeclareLaunchArgument('world', default_value='task1',
                               description='Gazebo world name'),
         DeclareLaunchArgument('map', default_value=PathJoinSubstitution(
-            [pkg_megatron, 'maps', 'task1.yaml']),
+            [pkg_megatron, 'maps', 'task1_orig.yaml']),
             description='Map YAML file'),
         DeclareLaunchArgument('launch_rviz', default_value='true',
                               choices=['true', 'false']),
@@ -89,7 +89,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', 'test1.yaml']),
+            'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', 'task.yaml']),
 
         }],
     )
