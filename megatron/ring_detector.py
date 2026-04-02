@@ -517,6 +517,8 @@ class RingDetectorNode(Node):
                 # Hole is at same depth as ring band → wall-mounted, reject
                 cv2.putText(debug_color_img, 'wall', (cx_px + 8, cy_px + 12),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 80, 200), 1)
+                self.get_logger().info(
+                    f'[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} but failed depth gap check (likely wall-mounted), skipping.')
                 continue
             
             # ---- 3D projection via annular mask + PointCloud2 ----
