@@ -21,8 +21,9 @@ from rclpy.qos import (
 
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
+from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Quaternion
 from nav2_msgs.action import Spin, NavigateToPose
+from nav_msgs.msg import OccupancyGrid # new 
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -154,7 +155,6 @@ class MissionController(Node):
         self.declare_parameter('max_loops', 2)
         self.declare_parameter('waypoints_file', 'waypoints/test1.yaml')
         self.declare_parameter('verify_pause_sec', 1.0)
-        self.declare_parameter('max_approach_attempts', 3)
 
         self.dedup_distance = self.get_parameter('dedup_distance').value
         self.approach_distance = self.get_parameter('approach_distance').value
@@ -164,7 +164,6 @@ class MissionController(Node):
         self.total_rings = self.get_parameter('total_rings').value
         self.max_loops = self.get_parameter('max_loops').value
         self.verify_pause_sec = self.get_parameter('verify_pause_sec').value
-        self.max_approach_attempts = self.get_parameter('max_approach_attempts').value
 
         # Speech
         self.speaker = Speaker()
@@ -184,9 +183,12 @@ class MissionController(Node):
         self.waypoint_index = 0
         self.loop_count = 0
         self.start_time = None
+        
+        # new 
+        #self.current_goal = None  # (x, y, yaw) of the current navigation goal, for costmap checking
 
         # Nav2 lifecycle check
-        self.nodes = ['amcl', 'bt_navigator']
+        self.nodes = ['amcl', 'bt_navigator', 'global_costmap/global_costmap']
         self.states = {n: 'Unknown' for n in self.nodes}
         self.nav2_ready = False
         self.last_nav2_check = 0.0
@@ -211,22 +213,27 @@ class MissionController(Node):
 
         # Approach tracking
         self.current_approach = None  # the dict from pending_approaches being executed
-        self.approach_retried = False
         self.verify_start_time = None
 
         # In-flight guard: True from send_goal_async() until _nav_goal_response fires.
         # Prevents stale result_future/status from being read on the next tick.
         self.nav_in_flight = False
 
+        # Spin-at-waypoint guard: True while a spin action is in flight so that
+        # the SUCCEEDED status from the spin doesn't double-increment waypoint_index.
+        self.spinning = False
+
         # Subscribers
         self.create_subscription(DockStatus, 'dock_status', self._dock_callback, qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self._amcl_callback, amcl_pose_qos)
         self.create_subscription(PoseStamped, '/detected_faces', self._face_callback, 10)
         self.create_subscription(PoseStamped, '/detected_rings', self._ring_callback, 10)
+        self.create_subscription(OccupancyGrid, '/global_costmap/costmap', self._costmap_callback, 10)
 
         # Publishers
         self.goal_marker_pub = self.create_publisher(MarkerArray, '/goal_markers', 10)
         self.mission_status_pub = self.create_publisher(String, '/mission_status', 10)
+        self.approaching_object_pub = self.create_publisher(Marker, '/approaching_object', 10)
 
         # Action clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -386,6 +393,20 @@ class MissionController(Node):
         goal_msg.pose.pose.position.y = y
         goal_msg.pose.pose.orientation = self._yaw_to_quaternion(yaw)
 
+        if not self._cost_at_goal_ok(x,y):
+            self.status = GoalStatus.STATUS_ABORTED
+            
+            if self.state == State.APPROACHING_OBJECT:
+                self.nav_rejected = True  # trigger approach retry logic
+            
+            self.get_logger().info(
+                f'flight: {self.nav_in_flight} | '
+                f'result_future: {self.result_future.done()} | ' if self.result_future is not None else 'result_future: None | '
+                f'nav_rejected: {self.nav_rejected} | '
+                f'nav_complete: {self._is_nav_complete()}'
+            )       
+            return False
+        
         if not self.nav_client.wait_for_server(timeout_sec=1.0):
             self.get_logger().warn('NavigateToPose server not available')
             return False
@@ -459,21 +480,73 @@ class MissionController(Node):
         self.result_future.add_done_callback(self._nav_result)
 
     # ── Approach pose computation (surface normal based) ──────────────
+    def world_to_map(self, x, y, map):
+        mx = int((x - map.info.origin.position.x) / map.info.resolution)
+        my = int((y - map.info.origin.position.y) / map.info.resolution)
+        return mx, my
 
+    def _costmap_callback(self, msg: OccupancyGrid):
+        self.costmap = msg
+    
+    def _cost_at_goal_ok(self, x, y)-> bool:
+
+        #if self.current_goal is None:
+        #    return False
+        
+        mx, my = self.world_to_map(x, y, self.costmap)
+        cost = -2
+  
+
+        if 0 <= mx < self.costmap.info.width and 0 <= my < self.costmap.info.height:
+            cost = self.costmap.data[ my * self.costmap.info.width + mx ]
+        else:
+            cost = 255
+
+        self.get_logger().info(f'11! Costmap cost at current goal ({x:.2f}, {y:.2f}): >>>>{cost}<<<<')
+        if cost >= 50 or cost < 0:
+            self.get_logger().warn(f'Cancel Nav Approach pose ({x:.2f}, {y:.2f}) is in a high-cost area (cost={cost}), will retry farther out.')
+            return False
+            #self._cancel_nav()
+            #self.nav_rejected = True  # trigger approach retry logic
+        return True
+    
     def _compute_approach_pose(self, pos, normal, distance=None):
-        """Compute approach point along the surface normal.
+        """Compute single approach point along the surface normal (first candidate)."""
+        return self._approach_candidates(pos, normal, distance)[0]
 
-        The normal points away from the wall/surface. The approach point
-        is at pos + normal * distance, and the robot faces back toward pos.
+    def _approach_candidates(self, pos, normal, distance=None):
+        """Return 8 (ax, ay, yaw) approach candidates fanning out at 45-degree intervals.
+
+        Starts from the surface normal direction (correct front approach), then
+        fans out to adjacent angles so that corner-trapped straight-on approaches
+        are quickly superseded by clear-path alternatives on successive Nav2 aborts.
+        All candidates place the robot at `approach_distance` from the object,
+        facing toward it.
         """
         if distance is None:
             distance = self.approach_distance
         nx, ny = normal
-        ax = float(pos[0]) + nx * distance
-        ay = float(pos[1]) + ny * distance
-        # Face toward the object
-        yaw = math.atan2(-ny, -nx)
-        return ax, ay, yaw
+        base_angle = math.atan2(ny, nx)
+        px, py = float(pos[0]), float(pos[1])
+
+        # Fan out from the normal direction in order of angular preference
+        offsets = [
+            0,
+            math.pi / 4,        -math.pi / 4,
+            math.pi / 2,        -math.pi / 2,
+            3 * math.pi / 4,    -3 * math.pi / 4,
+            math.pi,
+        ]
+        candidates = []
+        for offset in offsets:
+            angle = base_angle + offset
+            ax = px + math.cos(angle) * distance
+            ay = py + math.sin(angle) * distance
+            # Face back toward the object from the approach point
+            yaw = math.atan2(-math.sin(angle), -math.cos(angle))
+            candidates.append((ax, ay, yaw))
+
+        return candidates
 
     # ── Completion check ──────────────────────────────────────────────
 
@@ -547,9 +620,10 @@ class MissionController(Node):
             approach = self.pending_approaches.pop(0)
             self._cancel_nav()
             self.current_approach = approach
-            self.approach_retried = False
-            ax, ay, yaw = self._compute_approach_pose(approach['pos'], approach['normal'])
+            candidates = self._approach_candidates(approach['pos'], approach['normal'])
+            ax, ay, yaw = candidates[0]
             self.state = State.APPROACHING_OBJECT
+            self._publish_approaching_object(ax, ay, attempt=0, total=len(candidates))
             self._send_nav_goal(ax, ay, yaw)
             return
 
@@ -559,14 +633,18 @@ class MissionController(Node):
                 self._finish()
                 return
 
-            if self._nav_aborted():
+            if self._nav_aborted() and not self.spinning:
                 # Waypoint aborted — skip to next
                 self.get_logger().warn(
                     f'Waypoint {self.waypoint_index} navigation aborted, skipping.')
                 self.waypoint_index += 1
 
-            if self._nav_succeeded():
+            if self._nav_succeeded() and not self.spinning:
                 self.waypoint_index += 1
+
+            # Spin complete — advance to next waypoint
+            if self.spinning:
+                self.spinning = False
 
             # Check for loop completion
             if self.waypoint_index >= len(self.waypoints):
@@ -578,13 +656,14 @@ class MissionController(Node):
                     self._finish()
                     return
 
-            if self.spin_at_waypoints:
+            if self.spin_at_waypoints and not self.spinning:
+                self.spinning = True
                 self._send_spin()
             else:
                 self._send_next_waypoint()
 
     def _handle_approaching(self):
-        if not self._is_nav_complete():
+        if not self._is_nav_complete() and not self.nav_rejected:
             return
 
         if self._nav_succeeded():
@@ -598,22 +677,33 @@ class MissionController(Node):
             attempts = approach.get('attempts', 0) + 1
             approach['attempts'] = attempts
 
-            if attempts < self.max_approach_attempts:
-                # Retry a bit farther out (avoid costmap obstacles)
-                self.approach_retried = True
-                retry_dist = self.approach_distance + self.approach_retry_offset * attempts
+            candidates = self._approach_candidates(approach['pos'], approach['normal'])
+            if attempts < len(candidates):
+                ax, ay, yaw = candidates[attempts]
                 self.get_logger().warn(
-                    f'Approach aborted (attempt {attempts}/{self.max_approach_attempts}), '
-                    f'retrying at {retry_dist:.2f}m')
-                ax, ay, yaw = self._compute_approach_pose(
-                    approach['pos'], approach['normal'], retry_dist)
+                    f'Approach aborted (attempt {attempts}/{len(candidates)}), '
+                    f'trying candidate {attempts}: ({ax:.2f}, {ay:.2f})')
+                self._publish_approaching_object(ax, ay, attempt=attempts, total=len(candidates))
+                self._send_nav_goal(ax, ay, yaw)
+            elif attempts < 10* len(candidates):
+                cycle = int(attempts // len(candidates))
+                t_attempts = attempts - len(candidates) * cycle
+                new_distance = self.approach_distance + 0.05 * cycle  # increase distance every full cycle
+                candidates = self._approach_candidates(approach['pos'], approach['normal'], distance=new_distance)
+                ax, ay, yaw = candidates[t_attempts]
+                self.get_logger().warn(
+                    f'Approach aborted (attempt {attempts}/{len(candidates)}), '
+                    f'trying candidate {attempts}: ({ax:.2f}, {ay:.2f})')
+                self._publish_approaching_object(ax, ay, attempt=attempts, total=len(candidates))
                 self._send_nav_goal(ax, ay, yaw)
             else:
-                # All attempts exhausted — push back to end of queue to try later
+                # No forget about it 
+                # All candidates exhausted — push back to end of queue to try later
                 self.get_logger().warn(
-                    f'Approach failed after {attempts} attempts, '
-                    f're-queuing for later.')
-                self.pending_approaches.append(approach)
+                    f'Approach failed after {attempts} attempts, re-queuing for later.')
+                self._publish_approaching_object(0.0, 0.0, none=True)
+                approach.pop('attempts', None)  # reset so all candidates are tried again
+                #self.pending_approaches.append(approach)
                 self.current_approach = None
                 self.state = State.EXPLORING
                 self._send_next_waypoint()
@@ -651,6 +741,7 @@ class MissionController(Node):
                     break
 
         self.current_approach = None
+        self._publish_approaching_object(0.0, 0.0, none=True)
 
         if self._all_found():
             self._finish()
@@ -668,6 +759,7 @@ class MissionController(Node):
         self._publish_goal_markers()
 
     def _finish(self):
+        return False
         elapsed = 0.0
         if self.start_time is not None:
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
@@ -679,6 +771,69 @@ class MissionController(Node):
         self._say('Mission complete!')
 
     # ── Visualization ─────────────────────────────────────────────────
+
+    def _publish_approaching_object(self, ax, ay, attempt=0, total=8, none=False):
+        """
+            Publish a downward arrow + label at the current Nav2 approach goal position.
+
+            ax, ay  — goal position in map frame
+            attempt — 0-indexed candidate number being tried (shown in label)
+            total   — total candidates available (shown in label)
+            none    — if True, delete both markers
+        """
+        now = self.get_clock().now().to_msg()
+
+        if none:
+            for mid in (0, 1):
+                m = Marker()
+                m.header.frame_id = 'map'
+                m.header.stamp = now
+                m.ns = 'approaching_object'
+                m.id = mid
+                m.action = Marker.DELETE
+                self.approaching_object_pub.publish(m)
+            return
+
+        # Downward arrow pinned to exact goal position
+        arrow = Marker()
+        arrow.header.frame_id = 'map'
+        arrow.header.stamp = now
+        arrow.ns = 'approaching_object'
+        arrow.id = 0
+        arrow.type = Marker.ARROW
+        arrow.action = Marker.ADD
+        arrow.points = [Point(x=float(ax), y=float(ay), z=0.8),
+                        Point(x=float(ax), y=float(ay), z=0.05)]
+        arrow.scale.x = 0.06   # shaft diameter
+        arrow.scale.y = 0.12   # head diameter
+        arrow.scale.z = 0.0
+        arrow.color.r = 1.0
+        arrow.color.g = 0.55
+        arrow.color.b = 0.0
+        arrow.color.a = 1.0
+        arrow.lifetime.sec = 0
+        self.approaching_object_pub.publish(arrow)
+
+        # Text label above the arrow
+        label = Marker()
+        label.header.frame_id = 'map'
+        label.header.stamp = now
+        label.ns = 'approaching_object'
+        label.id = 1
+        label.type = Marker.TEXT_VIEW_FACING
+        label.action = Marker.ADD
+        label.pose.position.x = float(ax)
+        label.pose.position.y = float(ay)
+        label.pose.position.z = 1.05
+        label.pose.orientation.w = 1.0
+        label.scale.z = 0.15
+        label.color.r = 1.0
+        label.color.g = 0.55
+        label.color.b = 0.0
+        label.color.a = 1.0
+        label.text = f'GOAL {attempt + 1}/{total}'
+        label.lifetime.sec = 0
+        self.approaching_object_pub.publish(label)
 
     def _publish_goal_markers(self):
         marker_array = MarkerArray()
