@@ -7,6 +7,7 @@ confirmed detections as PoseStamped with color packed in frame_id ("map|{color}"
 """
 
 import math
+import random as rnd
 from typing import Optional
 
 import rclpy
@@ -97,20 +98,30 @@ def classify_ring_color(
 
 def _check_hole(image_gray: np.ndarray,
                 outer_ellipse: tuple, inner_ellipse: tuple,
-                min_brightness_diff: float = 20.0) -> bool:
+                min_brightness_diff: float = 20.0, logger = None) -> bool:
     h, w = image_gray.shape[:2]
     band_mask = _build_annular_mask((h, w), outer_ellipse, inner_ellipse)
     inner_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.ellipse(inner_mask, inner_ellipse, (255,), -1)
+    
+    # band_pixels = cv2.mean(image_gray, mask=band_mask)[0]
+    # inner_pixels = cv2.mean(image_gray, mask=inner_mask)[0]
 
-    band_pixels = cv2.mean(image_gray, mask=band_mask)[0]
-    inner_pixels = cv2.mean(image_gray, mask=inner_mask)[0]
+    # if cv2.countNonZero(band_mask) == 0 or cv2.countNonZero(inner_mask) == 0:
+    #     return False
 
-    if cv2.countNonZero(band_mask) == 0 or cv2.countNonZero(inner_mask) == 0:
+    # creates median
+    band_vals = image_gray[band_mask > 0]
+    inner_vals = image_gray[inner_mask > 0]
+    if band_vals.size == 0 or inner_vals.size == 0:
         return False
 
-    return abs(band_pixels - inner_pixels) >= min_brightness_diff
-
+    band_median = float(np.median(band_vals))
+    inner_median = float(np.median(inner_vals))
+    if logger:
+        logger.info(f'[DBG] Hole check: band median={band_median:.1f}, inner median={inner_median:.1f}, diff={abs(band_median - inner_median):.1f}')
+    return abs(band_median - inner_median) >= min_brightness_diff
+    
 
 def _check_band_uniformity(image_bgr: np.ndarray,
                            outer_ellipse: tuple, inner_ellipse: tuple,
@@ -157,7 +168,7 @@ def _check_depth_discontinuity(pc2_msg: PointCloud2,
 
     # If most inner points are invalid/missing → open air behind the ring
     inner_pixel_count = int(cv2.countNonZero(inner_mask))
-    if inner_pixel_count > 0 and len(inner_pts) < inner_pixel_count * 0.3:
+    if inner_pixel_count > 0 and len(inner_pts) < inner_pixel_count * 0.6:
         return True
 
     if len(inner_pts) < 3:
@@ -235,25 +246,37 @@ class RingDetectorNode(Node):
         self.declare_parameter('confirmation_count', 3)
         self.declare_parameter('dedup_distance', 0.5)
         self.declare_parameter('min_inference_period', 0.2)
+        
         # Adaptive threshold
         self.declare_parameter('thresh_block_size', 15)
         self.declare_parameter('thresh_c', 25)
         # Ellipse filtering
-        self.declare_parameter('min_contour_points', 20)
+        #self.declare_parameter('min_contour_points', 20)
         self.declare_parameter('max_axis', 200.0)
-        self.declare_parameter('min_axis', 6.0)
+        #self.declare_parameter('min_axis', 6.0)
         self.declare_parameter('max_aspect_ratio', 1.8)
+
+        self.declare_parameter('min_contour_points', 8)
+        self.declare_parameter('min_axis', 3.0)
+        self.declare_parameter('min_pair_score', 0.30)
+        
         # Pair matching
         self.declare_parameter('center_thr', 15.0)
-        self.declare_parameter('min_pair_score', 0.40)
+        # self.declare_parameter('min_pair_score', 0.40)
         # Color classification
         self.declare_parameter('min_color_confidence', 0.15)
+        self.declare_parameter('min_color_pixels', 6)
         # Hole check
-        self.declare_parameter('min_brightness_diff', 20.0)
+        # self.declare_parameter('min_brightness_diff', 20.0)
+        self.declare_parameter('min_brightness_diff', 8.0)
+        
         # Band uniformity (low = solid color ring, high = textured face/wall)
         self.declare_parameter('max_band_std', 35.0)
         # Depth discontinuity (hanging rings have gap behind hole)
         self.declare_parameter('min_depth_gap', 0.15)
+        self.declare_parameter('min_ring_points_3d', 3)
+
+            
 
         self.confirmation_count = self.get_parameter('confirmation_count').value
         self.dedup_distance = self.get_parameter('dedup_distance').value
@@ -267,9 +290,11 @@ class RingDetectorNode(Node):
         self.center_thr = self.get_parameter('center_thr').value
         self.min_pair_score = self.get_parameter('min_pair_score').value
         self.min_color_confidence = self.get_parameter('min_color_confidence').value
+        self.min_color_pixels = self.get_parameter('min_color_pixels').value
         self.min_brightness_diff = self.get_parameter('min_brightness_diff').value
         self.max_band_std = self.get_parameter('max_band_std').value
         self.min_depth_gap = self.get_parameter('min_depth_gap').value
+        self.min_ring_points_3d = self.get_parameter('min_ring_points_3d').value
 
         # Enforce odd block size >= 3
         if self.thresh_block_size % 2 == 0:
@@ -368,6 +393,14 @@ class RingDetectorNode(Node):
         # 3. Combine with AND! 
         # If a pixel is black (0) in EITHER image, it becomes black in the final image.
         thresh = cv2.bitwise_and(thresh_gray, thresh_color_inv)
+
+        # Reconnect thin breaks in ring bands caused by small occluders.
+        fg = cv2.bitwise_not(thresh)
+        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
+        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k_close, iterations=2)
+        # k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        # fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k_open, iterations=1)
+        thresh = cv2.bitwise_not(fg)
         
         self._publish_debug(self.debug_binary_pub, thresh, mono=True)
         # ---- Stage 2: contour extraction -> ellipse fitting & scoring ----
@@ -395,13 +428,15 @@ class RingDetectorNode(Node):
             score = _ellipse_score(cnt, ellipse)
             ellipses.append((ellipse, cnt, score))
 
-            color_bgr = _score_to_bgr(score)
+            #color_bgr = _score_to_bgr(score)
+            color_bgr = (rnd.randint(0, 255), rnd.randint(0, 255), rnd.randint(0, 255))
             cv2.ellipse(debug_ellipses_img, ellipse, color_bgr, 1)
             cv2.circle(debug_ellipses_img, (int(ex), int(ey)), 2, color_bgr, -1)
             cv2.putText(debug_ellipses_img, f'{score:.2f}',
                         (int(ex) + 5, int(ey) - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.32, color_bgr, 1)
 
+            
         self._publish_debug(self.debug_ellipses_pub, debug_ellipses_img)
 
         # ---- Stage 3: concentric pair matching ----
@@ -458,25 +493,27 @@ class RingDetectorNode(Node):
 
         for outer, inner, ps, (cx_px, cy_px) in ring_candidates:
             # Hole check
-            has_hole = _check_hole(gray, outer, inner, self.min_brightness_diff)
-            if not has_hole:
-                cv2.ellipse(debug_color_img, outer, (0, 0, 180), 1)
-                cv2.ellipse(debug_color_img, inner, (0, 0, 180), 1)
-                cv2.putText(debug_color_img, 'solid',
-                            (cx_px + 8, cy_px),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 180), 1)
-                continue
+            # has_hole = _check_hole(gray, outer, inner, self.min_brightness_diff, logger=self.get_logger())
+            # if not has_hole:
+            #     cv2.ellipse(debug_color_img, outer, (0, 0, 180), 1)
+            #     cv2.ellipse(debug_color_img, inner, (0, 0, 180), 1)
+            #     cv2.putText(debug_color_img, 'solid',
+            #                 (cx_px - 8, cy_px),
+            #                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 180), 1)
+            #     continue
 
             # Band uniformity: reject high-variance regions (faces, textures)
-            if not _check_band_uniformity(cv_image, outer, inner, self.max_band_std):
-                cv2.ellipse(debug_color_img, outer, (0, 128, 180), 1)
-                cv2.ellipse(debug_color_img, inner, (0, 128, 180), 1)
-                cv2.putText(debug_color_img, 'nonuniform',
-                            (cx_px + 8, cy_px),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 128, 180), 1)
-                continue
+            # if not _check_band_uniformity(cv_image, outer, inner, self.max_band_std):
+            #     cv2.ellipse(debug_color_img, outer, (0, 128, 180), 1)
+            #     cv2.ellipse(debug_color_img, inner, (0, 128, 180), 1)
+            #     cv2.putText(debug_color_img, 'nonuniform',
+            #                 (cx_px + 8, cy_px),
+            #                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 128, 180), 1)
+            #     self.get_logger().info(f'[DBG] Candidate at ({cx_px}, {cy_px}) failed band uniformity check (likely face/texture), skipping.')
+            #     continue
 
-            color_name, confidence = classify_ring_color(cv_image, outer, inner)
+            color_name, confidence = classify_ring_color(
+                cv_image, outer, inner, min_pixels=self.min_color_pixels)
 
             if color_name is None or confidence < self.min_color_confidence:
                 cv2.ellipse(debug_color_img, outer, (128, 128, 128), 1)
@@ -484,6 +521,7 @@ class RingDetectorNode(Node):
                 cv2.putText(debug_color_img, f'? ({confidence:.2f})',
                             (cx_px + 8, cy_px),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
+               # self.get_logger().info(f'[DBG] Candidate at ({cx_px}, {cy_px}) failed color classification.')
                 continue
 
             # Draw colored overlay on debug image
@@ -517,19 +555,24 @@ class RingDetectorNode(Node):
                 # Hole is at same depth as ring band → wall-mounted, reject
                 cv2.putText(debug_color_img, 'wall', (cx_px + 8, cy_px + 12),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 80, 200), 1)
-                self.get_logger().info(
-                    f'[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} but failed depth gap check (likely wall-mounted), skipping.')
+                # Yes this filters rings on walls
+                # self.get_logger().info(
+                #     f'[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} but failed depth gap check (likely wall-mounted), skipping.')
                 continue
-            
+
+            # self.get_logger().info(f"[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} with depth gap, proceeding to 3D projection and tracking.")
             # ---- 3D projection via annular mask + PointCloud2 ----
             annular_mask = _build_annular_mask((h, w), outer, inner)
             points_3d = extract_3d_points_from_pc2(annular_mask, pc2_msg)
-            if len(points_3d) < 5:
+            if len(points_3d) < self.min_ring_points_3d:
                 continue
-
+            # self.get_logger().info(f"[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name}, accepted")
+            
             result = compute_robust_surface(points_3d)
             if result is None:
                 continue
+            # self.get_logger().info(f"[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name}, accepted now for read :)")
+            
             centroid, normal = result
 
             # Transform to map frame

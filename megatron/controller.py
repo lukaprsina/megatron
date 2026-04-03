@@ -147,7 +147,9 @@ class MissionController(Node):
 
         # Parameters
         self.declare_parameter('dedup_distance', 0.8)
-        self.declare_parameter('approach_distance', 0.55)
+        #self.declare_parameter('approach_distance', 0.55)
+        self.declare_parameter('face_approach_distance', 0.55)
+        self.declare_parameter('ring_approach_distance', 1.3)
         self.declare_parameter('approach_retry_offset', 0.1)
         self.declare_parameter('spin_at_waypoints', False)
         self.declare_parameter('total_faces', 3)
@@ -157,7 +159,8 @@ class MissionController(Node):
         self.declare_parameter('verify_pause_sec', 1.0)
 
         self.dedup_distance = self.get_parameter('dedup_distance').value
-        self.approach_distance = self.get_parameter('approach_distance').value
+        self.face_approach_distance = self.get_parameter('face_approach_distance').value
+        self.ring_approach_distance = self.get_parameter('ring_approach_distance').value
         self.approach_retry_offset = self.get_parameter('approach_retry_offset').value
         self.spin_at_waypoints = self.get_parameter('spin_at_waypoints').value
         self.total_faces = self.get_parameter('total_faces').value
@@ -510,11 +513,11 @@ class MissionController(Node):
             #self.nav_rejected = True  # trigger approach retry logic
         return True
     
-    def _compute_approach_pose(self, pos, normal, distance=None):
+    def _compute_approach_pose(self, pos, normal, type, distance=None):
         """Compute single approach point along the surface normal (first candidate)."""
-        return self._approach_candidates(pos, normal, distance)[0]
+        return self._approach_candidates(pos, normal, type, distance)[0]
 
-    def _approach_candidates(self, pos, normal, distance=None):
+    def _approach_candidates(self, pos, normal, type,  distance=None):
         """Return 8 (ax, ay, yaw) approach candidates fanning out at 45-degree intervals.
 
         Starts from the surface normal direction (correct front approach), then
@@ -524,7 +527,7 @@ class MissionController(Node):
         facing toward it.
         """
         if distance is None:
-            distance = self.approach_distance
+            distance = self.face_approach_distance if type == 'face' else self.ring_approach_distance
         nx, ny = normal
         base_angle = math.atan2(ny, nx)
         px, py = float(pos[0]), float(pos[1])
@@ -558,7 +561,7 @@ class MissionController(Node):
 
     def _tick(self):
         self._publish_mission_status()
-
+        
         if self.state == State.WAITING_FOR_NAV2:
             self._handle_waiting()
         elif self.state == State.UNDOCKING:
@@ -620,7 +623,7 @@ class MissionController(Node):
             approach = self.pending_approaches.pop(0)
             self._cancel_nav()
             self.current_approach = approach
-            candidates = self._approach_candidates(approach['pos'], approach['normal'])
+            candidates = self._approach_candidates(approach['pos'], approach['normal'], approach['type'])
             ax, ay, yaw = candidates[0]
             self.state = State.APPROACHING_OBJECT
             self._publish_approaching_object(ax, ay, attempt=0, total=len(candidates))
@@ -677,7 +680,7 @@ class MissionController(Node):
             attempts = approach.get('attempts', 0) + 1
             approach['attempts'] = attempts
 
-            candidates = self._approach_candidates(approach['pos'], approach['normal'])
+            candidates = self._approach_candidates(approach['pos'], approach['normal'], approach['type'],)
             if attempts < len(candidates):
                 ax, ay, yaw = candidates[attempts]
                 self.get_logger().warn(
@@ -688,8 +691,9 @@ class MissionController(Node):
             elif attempts < 10* len(candidates):
                 cycle = int(attempts // len(candidates))
                 t_attempts = attempts - len(candidates) * cycle
-                new_distance = self.approach_distance + 0.05 * cycle  # increase distance every full cycle
-                candidates = self._approach_candidates(approach['pos'], approach['normal'], distance=new_distance)
+                type_distance = self.face_approach_distance if approach['type'] == 'face' else self.ring_approach_distance
+                new_distance = type_distance + 0.05 * cycle  # increase distance every full cycle
+                candidates = self._approach_candidates(approach['pos'], approach['normal'], approach['type'], distance=new_distance)
                 ax, ay, yaw = candidates[t_attempts]
                 self.get_logger().warn(
                     f'Approach aborted (attempt {attempts}/{len(candidates)}), '
