@@ -373,7 +373,6 @@ class RingDetectorNode(Node):
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=2.0)
             return
 
-        # ---- Stage 1: adaptive threshold -> binary ----
         # ---- Stage 1: adaptive threshold + saturation mask -> binary ----
         
         # 1. Existing grayscale adaptive threshold (background white, rings/edges black)

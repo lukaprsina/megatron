@@ -89,7 +89,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', 'ring_check.yaml']),
+            'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', 'task.yaml']),
 
         }],
     )
@@ -109,7 +109,7 @@ def generate_launch_description():
     ld = LaunchDescription(args)
     ld.add_action(sim_nav)
     ld.add_action(rviz)
-    #ld.add_action(face_detector)
+    ld.add_action(face_detector)
     ld.add_action(ring_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
