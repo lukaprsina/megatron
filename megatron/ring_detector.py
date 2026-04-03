@@ -242,6 +242,8 @@ class RingDetectorNode(Node):
     def __init__(self):
         super().__init__('ring_detector')
 
+        # Commented out are the old parameter values
+
         # ---- Parameters ----
         self.declare_parameter('confirmation_count', 3)
         self.declare_parameter('dedup_distance', 0.5)
@@ -251,24 +253,24 @@ class RingDetectorNode(Node):
         self.declare_parameter('thresh_block_size', 15)
         self.declare_parameter('thresh_c', 25)
         # Ellipse filtering
-        #self.declare_parameter('min_contour_points', 20)
+        self.declare_parameter('min_contour_points', 8)
         self.declare_parameter('max_axis', 200.0)
-        #self.declare_parameter('min_axis', 6.0)
+        self.declare_parameter('min_axis', 3.0)
         self.declare_parameter('max_aspect_ratio', 1.8)
 
-        self.declare_parameter('min_contour_points', 8)
-        self.declare_parameter('min_axis', 3.0)
-        self.declare_parameter('min_pair_score', 0.30)
-        
+        #self.declare_parameter('min_contour_points', 20)
+        #self.declare_parameter('min_axis', 6.0)
+
         # Pair matching
         self.declare_parameter('center_thr', 15.0)
         # self.declare_parameter('min_pair_score', 0.40)
+        self.declare_parameter('min_pair_score', 0.30)
         # Color classification
         self.declare_parameter('min_color_confidence', 0.15)
         self.declare_parameter('min_color_pixels', 6)
         # Hole check
-        # self.declare_parameter('min_brightness_diff', 20.0)
         self.declare_parameter('min_brightness_diff', 8.0)
+        # self.declare_parameter('min_brightness_diff', 20.0)
         
         # Band uniformity (low = solid color ring, high = textured face/wall)
         self.declare_parameter('max_band_std', 35.0)
@@ -395,11 +397,13 @@ class RingDetectorNode(Node):
         thresh = cv2.bitwise_and(thresh_gray, thresh_color_inv)
 
         # Reconnect thin breaks in ring bands caused by small occluders.
+        # !!!!!!!!!!!!!!!1 This is needed for the situations where there is a stick inside the ring or infront so that it doesn't break the ring     
         fg = cv2.bitwise_not(thresh)
         k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
         fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k_close, iterations=2)
         # k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         # fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k_open, iterations=1)
+        
         thresh = cv2.bitwise_not(fg)
         
         self._publish_debug(self.debug_binary_pub, thresh, mono=True)
@@ -492,6 +496,10 @@ class RingDetectorNode(Node):
         output_img = cv_image.copy()
 
         for outer, inner, ps, (cx_px, cy_px) in ring_candidates:
+            #Skipped these two because they failed for the green one
+            # Hole check: main_brightness_diff should have been less than 2 for the green ring to work or at least 8
+            # Band uniformity: it just failed for green one i dont know why  
+            
             # Hole check
             # has_hole = _check_hole(gray, outer, inner, self.min_brightness_diff, logger=self.get_logger())
             # if not has_hole:
@@ -521,7 +529,6 @@ class RingDetectorNode(Node):
                 cv2.putText(debug_color_img, f'? ({confidence:.2f})',
                             (cx_px + 8, cy_px),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
-               # self.get_logger().info(f'[DBG] Candidate at ({cx_px}, {cy_px}) failed color classification.')
                 continue
 
             # Draw colored overlay on debug image
@@ -545,12 +552,12 @@ class RingDetectorNode(Node):
             cv2.putText(output_img, color_name, (cx_px + 10, cy_px),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
+        
+            #!!!!!!!!!!!!!!! This is the main checking function for cheking if this ring is 3d  if there is something behind the ring we are fucked !!!!!!!!!!!!!!
             # Depth discontinuity: additive signal for hanging rings
             has_depth_gap = _check_depth_discontinuity(
                 pc2_msg, outer, inner, cv_image.shape, self.min_depth_gap)
-            # has_depth_gap = _check_depth_discontinuity(
-            #     pc2_msg, outer, inner, cv_image.shape, self.min_depth_gap)
-
+        
             if not has_depth_gap:
                 # Hole is at same depth as ring band → wall-mounted, reject
                 cv2.putText(debug_color_img, 'wall', (cx_px + 8, cy_px + 12),
@@ -560,18 +567,15 @@ class RingDetectorNode(Node):
                 #     f'[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} but failed depth gap check (likely wall-mounted), skipping.')
                 continue
 
-            # self.get_logger().info(f"[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} with depth gap, proceeding to 3D projection and tracking.")
             # ---- 3D projection via annular mask + PointCloud2 ----
             annular_mask = _build_annular_mask((h, w), outer, inner)
             points_3d = extract_3d_points_from_pc2(annular_mask, pc2_msg)
             if len(points_3d) < self.min_ring_points_3d:
                 continue
-            # self.get_logger().info(f"[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name}, accepted")
             
             result = compute_robust_surface(points_3d)
             if result is None:
                 continue
-            # self.get_logger().info(f"[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name}, accepted now for read :)")
             
             centroid, normal = result
 
