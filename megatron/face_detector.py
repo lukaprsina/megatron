@@ -60,10 +60,10 @@ class FaceDetectorNode(Node):
 
         # Synced RGB + PointCloud2 via message_filters
         self.rgb_sub = message_filters.Subscriber(
-            self, Image, '/oakd/rgb/preview/image_raw',
+            self, Image, 'rgb/image_raw',
             qos_profile=qos_profile_sensor_data)
         self.pc2_sub = message_filters.Subscriber(
-            self, PointCloud2, '/oakd/rgb/preview/depth/points',
+            self, PointCloud2, '/depth/points',
             qos_profile=qos_profile_sensor_data)
         self.sync = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.pc2_sub], queue_size=10, slop=0.15)

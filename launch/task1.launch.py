@@ -63,6 +63,12 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('launch_rviz')),
     )
 
+    # Camera topic remaps: expose a generic interface and map it to OAK-D topics in simulation
+    camera_remaps = [
+        ('/rgb/image_raw', '/oakd/rgb/preview/image_raw'),
+        ('/depth/points', '/oakd/rgb/preview/depth/points'),
+    ]
+
     # Face detector
     face_detector = Node(
         package='megatron',
@@ -70,6 +76,7 @@ def generate_launch_description():
         name='face_detector',
         output='screen',
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+        remappings=camera_remaps,
     )
 
     # Ring detector
@@ -79,6 +86,7 @@ def generate_launch_description():
         name='ring_detector',
         output='screen',
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+        remappings=camera_remaps,
     )
 
     # Mission controller
