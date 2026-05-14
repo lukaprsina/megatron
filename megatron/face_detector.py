@@ -14,6 +14,7 @@ import message_filters
 import numpy as np
 import cv2
 import tf2_ros
+from collections import Counter
 
 from sensor_msgs.msg import Image, PointCloud2
 from geometry_msgs.msg import PoseStamped, Quaternion
@@ -43,6 +44,15 @@ class FaceDetectorNode(Node):
         self.declare_parameter('dedup_distance', 0.5)
         self.declare_parameter('min_inference_period', 0.2)
         self.declare_parameter('roi_shrink', 0.3)
+        self.declare_parameter('sync_queue_size', 30)
+        self.declare_parameter('sync_slop', 0.5)
+
+        # Debugging
+        self.declare_parameter('debug_rejections', True)
+        self.declare_parameter('debug_rejection_overlay', True)
+        self.declare_parameter('debug_log_summary', True)
+        self.declare_parameter('debug_log_each_rejection', False)
+        self.declare_parameter('debug_max_rejection_logs_per_frame', 5)
 
         self.device = self.get_parameter('device').value
         self.confidence_threshold = self.get_parameter('confidence_threshold').value
@@ -50,6 +60,16 @@ class FaceDetectorNode(Node):
         self.dedup_distance = self.get_parameter('dedup_distance').value
         self.min_inference_period = self.get_parameter('min_inference_period').value
         self.roi_shrink = self.get_parameter('roi_shrink').value
+        self.sync_queue_size = int(self.get_parameter('sync_queue_size').value)
+        self.sync_slop = float(self.get_parameter('sync_slop').value)
+
+        self.debug_rejections = bool(self.get_parameter('debug_rejections').value)
+        self.debug_rejection_overlay = bool(self.get_parameter('debug_rejection_overlay').value)
+        self.debug_log_summary = bool(self.get_parameter('debug_log_summary').value)
+        self.debug_log_each_rejection = bool(self.get_parameter('debug_log_each_rejection').value)
+        self.debug_max_rejection_logs_per_frame = int(
+            self.get_parameter('debug_max_rejection_logs_per_frame').value
+        )
 
         self.bridge = CvBridge()
         self.model = YOLO('yolov8n.pt')
@@ -60,13 +80,13 @@ class FaceDetectorNode(Node):
 
         # Synced RGB + PointCloud2 via message_filters
         self.rgb_sub = message_filters.Subscriber(
-            self, Image, 'rgb/image_raw',
+            self, Image, '/rgb/image_raw',
             qos_profile=qos_profile_sensor_data)
         self.pc2_sub = message_filters.Subscriber(
             self, PointCloud2, '/depth/points',
             qos_profile=qos_profile_sensor_data)
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.pc2_sub], queue_size=10, slop=0.15)
+            [self.rgb_sub, self.pc2_sub], queue_size=self.sync_queue_size, slop=self.sync_slop)
         self.sync.registerCallback(self._synced_callback)
 
         # Publishers
@@ -82,7 +102,9 @@ class FaceDetectorNode(Node):
         # Rate limiting
         self.last_inference_time = 0.0
 
-        self.get_logger().info('Face detector initialized (PointCloud2 mode).')
+        self.get_logger().info(
+            f'Face detector initialized (PointCloud2 mode). '
+            f'sync_queue_size={self.sync_queue_size}, sync_slop={self.sync_slop:.3f}s')
 
     # ------------------------------------------------------------------
     # Synced RGB + PointCloud2 callback
@@ -109,6 +131,10 @@ class FaceDetectorNode(Node):
             cv_image, imgsz=(256, 320), show=False, verbose=False,
             classes=[0], device=self.device, conf=self.confidence_threshold)
 
+        # Debug counters per synced callback
+        rejection_counts: Counter = Counter()
+        rejection_logs: list[str] = []
+
         # Get TF: PC2 frame → map
         frame_id = pc2_msg.header.frame_id
         if not frame_id:
@@ -117,9 +143,17 @@ class FaceDetectorNode(Node):
             tf_stamped = self.tf_buffer.lookup_transform('map', frame_id, Time())
         except Exception as e:
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=2.0)
-            return
+            tf_stamped = None
+
+        if tf_stamped is None:
+            rejection_counts['tf_missing'] += 1
 
         # Process each detection
+        num_boxes_total = 0
+        num_boxes_with_valid_roi = 0
+        num_boxes_with_points = 0
+        num_boxes_with_surface = 0
+        
         for r in results:
             if r.boxes is None:
                 continue
@@ -129,8 +163,8 @@ class FaceDetectorNode(Node):
                 bbox = box.xyxy[0]
                 x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
 
-                # Draw bounding box on display image
-                cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                num_boxes_total += 1
+                rejection_reason = None
 
                 # Shrink ROI toward center to avoid background pixels
                 bw, bh = x2 - x1, y2 - y1
@@ -142,45 +176,102 @@ class FaceDetectorNode(Node):
                 ry2 = min(h, y2 - sy)
 
                 if rx2 <= rx1 or ry2 <= ry1:
-                    continue
+                    rejection_reason = 'roi_invalid'
+
+                if rejection_reason is None:
+                    num_boxes_with_valid_roi += 1
 
                 # Create mask for the shrunk ROI
                 mask = np.zeros((h, w), dtype=np.uint8)
                 mask[ry1:ry2, rx1:rx2] = 255
 
                 # Project to 3D via PointCloud2
-                points_3d = extract_3d_points_from_pc2(mask, pc2_msg)
-                if len(points_3d) < 5:
-                    continue
+                points_3d = np.empty((0, 3), dtype=np.float64)
+                if rejection_reason is None:
+                    points_3d = extract_3d_points_from_pc2(mask, pc2_msg, log=self.get_logger())
+                    if len(points_3d) < 5:
+                        rejection_reason = f'not_enough_points(n={len(points_3d)})'
+                    else:
+                        num_boxes_with_points += 1
 
                 # Fit surface
-                result = compute_robust_surface(points_3d)
-                if result is None:
-                    continue
-                centroid, normal = result
+                centroid = None
+                normal = None
+                if rejection_reason is None:
+                    result = compute_robust_surface(points_3d)
+                    if result is None:
+                        rejection_reason = 'surface_fit_failed'
+                    else:
+                        centroid, normal = result
+                        num_boxes_with_surface += 1
 
                 # Transform to map frame
-                map_point, map_normal = transform_point_and_normal(
-                    centroid, normal, tf_stamped)
+                if rejection_reason is None and tf_stamped is None:
+                    rejection_reason = 'tf_missing'
 
-                cam_dist = float(np.linalg.norm(centroid))
+                if rejection_reason is None:
+                    map_point, map_normal = transform_point_and_normal(
+                        centroid, normal, tf_stamped)
 
-                # Feed to tracker
-                status, track = self.track_manager.add_observation(
-                    map_point, map_normal, cam_dist,
-                    rgb_msg.header.stamp)
+                    cam_dist = float(np.linalg.norm(centroid))
 
-                if status == 'confirmed':
-                    self._publish_detection(track, rgb_msg.header.stamp)
+                    # Feed to tracker
+                    status, track = self.track_manager.add_observation(
+                        map_point, map_normal, cam_dist,
+                        rgb_msg.header.stamp)
 
-                # Draw center point on display
-                cx = (rx1 + rx2) // 2
-                cy = (ry1 + ry2) // 2
-                cv2.circle(cv_image, (cx, cy), 4, (0, 0, 255), -1)
+                    if status == 'confirmed':
+                        self._publish_detection(track, rgb_msg.header.stamp)
+
+                    # Draw bounding box + center point for accepted contenders
+                    cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cx = (rx1 + rx2) // 2
+                    cy = (ry1 + ry2) // 2
+                    cv2.circle(cv_image, (cx, cy), 4, (0, 0, 255), -1)
+
+                else:
+                    # Rejected contender
+                    rejection_counts[rejection_reason] += 1
+
+                    if self.debug_rejections and self.debug_log_each_rejection:
+                        if len(rejection_logs) < self.debug_max_rejection_logs_per_frame:
+                            rejection_logs.append(
+                                f'reject {rejection_reason}: frame={frame_id} bbox=({x1},{y1})-({x2},{y2})'
+                            )
+
+                    if self.debug_rejections and self.debug_rejection_overlay:
+                        cv2.rectangle(cv_image, (x1, y1), (x2, y2), (128, 128, 128), 2)
+                        label = rejection_reason
+                        cv2.putText(
+                            cv_image,
+                            label,
+                            (x1, max(15, y1 - 5)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.4,
+                            (128, 128, 128),
+                            1,
+                            cv2.LINE_AA,
+                        )
+
+        # Debug summary once per callback (throttled)
+        if self.debug_rejections and self.debug_log_summary:
+            summary = (
+                f'candidates={num_boxes_total}, '
+                f'valid_roi={num_boxes_with_valid_roi}, '
+                f'with_points={num_boxes_with_points}, '
+                f'with_surface={num_boxes_with_surface}, '
+                f'tf_ok={tf_stamped is not None}, '
+                f'rejects={dict(rejection_counts)}'
+            )
+            self.get_logger().info(summary, throttle_duration_sec=1.0)
+            for msg in rejection_logs:
+                self.get_logger().info(msg, throttle_duration_sec=1.0)
 
         # Publish annotated image
         try:
-            self.image_pub.publish(self.bridge.cv2_to_imgmsg(cv_image, 'bgr8'))
+            out_msg = self.bridge.cv2_to_imgmsg(cv_image, 'bgr8')
+            out_msg.header = rgb_msg.header
+            self.image_pub.publish(out_msg)
         except CvBridgeError:
             pass
 
