@@ -146,6 +146,7 @@ class MissionController(Node):
 
         # Parameters
         self.declare_parameter('dedup_distance', 0.8)
+        self.declare_parameter('free_will', False)
         #self.declare_parameter('approach_distance', 0.55)
         self.declare_parameter('face_approach_distance', 0.55)
         self.declare_parameter('ring_approach_distance', 1.3)
@@ -157,6 +158,7 @@ class MissionController(Node):
         self.declare_parameter('verify_pause_sec', 1.0)
 
         self.dedup_distance = self.get_parameter('dedup_distance').value
+        self.free_will = bool(self.get_parameter('free_will').value)
         self.face_approach_distance = self.get_parameter('face_approach_distance').value
         self.ring_approach_distance = self.get_parameter('ring_approach_distance').value
         self.approach_retry_offset = self.get_parameter('approach_retry_offset').value
@@ -530,8 +532,12 @@ class MissionController(Node):
 
     def _tick(self):
         self._publish_mission_status()
-        
-        return
+
+        # freeWill mode: passive controller.
+        # Do not undock, do not send waypoint goals, do not approach detections.
+        if self.free_will:
+            return
+
         if self.state == State.WAITING_FOR_NAV2:
             self._handle_waiting()
         elif self.state == State.UNDOCKING:
@@ -563,7 +569,8 @@ class MissionController(Node):
             self._do_undock()
         else:
             self.state = State.EXPLORING
-            self._send_next_waypoint()
+            if not self.free_will:
+                self._send_next_waypoint()
 
     def _do_undock(self):
         if not self.undock_client.wait_for_server(timeout_sec=1.0):
@@ -585,7 +592,8 @@ class MissionController(Node):
     def _undock_done(self, future):
         self.get_logger().info('Undocked successfully.')
         self.state = State.EXPLORING
-        self._send_next_waypoint()
+        if not self.free_will:
+            self._send_next_waypoint()
 
     def _handle_exploring(self):
         # Check if a detection needs approach
@@ -598,6 +606,11 @@ class MissionController(Node):
             self.state = State.APPROACHING_OBJECT
             self._publish_approaching_object(ax, ay, attempt=0, total=len(candidates))
             self._send_nav_goal(ax, ay, yaw)
+            return
+
+        # freeWill mode: never send autonomous waypoint goals.
+        # The controller stays idle until detections queue an approach.
+        if self.free_will:
             return
 
         # Check if current navigation is done
