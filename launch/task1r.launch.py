@@ -29,6 +29,11 @@ def generate_launch_description():
             default_value=PathJoinSubstitution([pkg_megatron, 'config', 'nav2.yaml']),
             description='Nav2 parameters file',
         ),
+        DeclareLaunchArgument(
+            'localization_config',
+            default_value=PathJoinSubstitution([pkg_megatron, 'config', 'localization.yaml']),
+            description='Localization parameters file (AMCL/map_server)',
+        ),
         DeclareLaunchArgument('launch_rviz', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument(
             'visualization',
@@ -64,6 +69,7 @@ def generate_launch_description():
             ('namespace', LaunchConfiguration('namespace')),
             ('use_sim_time', LaunchConfiguration('use_sim_time')),
             ('map', LaunchConfiguration('map')),
+            ('params', LaunchConfiguration('localization_config')),
         ],
     )
 
@@ -150,8 +156,8 @@ def generate_launch_description():
     ld.add_action(localization)
     ld.add_action(nav2)
     ld.add_action(rviz)
-    ld.add_action(face_detector)
-    ld.add_action(ring_detector)
-    ld.add_action(controller)
-    ld.add_action(visualizer)
+    #ld.add_action(face_detector)
+    #ld.add_action(ring_detector)
+    #ld.add_action(controller)
+    #ld.add_action(visualizer)
     return ld
