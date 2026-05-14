@@ -20,9 +20,8 @@ from rclpy.qos import (
 )
 
 from action_msgs.msg import GoalStatus
-from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Quaternion
-from nav2_msgs.action import Spin, NavigateToPose
+from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid # new 
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
@@ -151,7 +150,6 @@ class MissionController(Node):
         self.declare_parameter('face_approach_distance', 0.55)
         self.declare_parameter('ring_approach_distance', 1.3)
         self.declare_parameter('approach_retry_offset', 0.1)
-        self.declare_parameter('spin_at_waypoints', False)
         self.declare_parameter('total_faces', 3)
         self.declare_parameter('total_rings', 4)
         self.declare_parameter('max_loops', 2)
@@ -162,7 +160,6 @@ class MissionController(Node):
         self.face_approach_distance = self.get_parameter('face_approach_distance').value
         self.ring_approach_distance = self.get_parameter('ring_approach_distance').value
         self.approach_retry_offset = self.get_parameter('approach_retry_offset').value
-        self.spin_at_waypoints = self.get_parameter('spin_at_waypoints').value
         self.total_faces = self.get_parameter('total_faces').value
         self.total_rings = self.get_parameter('total_rings').value
         self.max_loops = self.get_parameter('max_loops').value
@@ -207,7 +204,7 @@ class MissionController(Node):
             self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints from {wp_file}')
         except Exception as e:
             self.get_logger().error(f'Failed to load waypoints from {wp_file}: {e}')
-            raise
+            raise Exception("Cant load waypoints")
 
         # Detection state
         self.found_faces: list[dict] = []   # [{'pos': np.array, 'normal': (nx,ny)}]
@@ -221,10 +218,6 @@ class MissionController(Node):
         # In-flight guard: True from send_goal_async() until _nav_goal_response fires.
         # Prevents stale result_future/status from being read on the next tick.
         self.nav_in_flight = False
-
-        # Spin-at-waypoint guard: True while a spin action is in flight so that
-        # the SUCCEEDED status from the spin doesn't double-increment waypoint_index.
-        self.spinning = False
 
         # Subscribers
         self.create_subscription(DockStatus, 'dock_status', self._dock_callback, qos_profile_sensor_data)
@@ -240,7 +233,6 @@ class MissionController(Node):
 
         # Action clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
-        self.spin_client = ActionClient(self, Spin, 'spin')
         self.undock_client = ActionClient(self, Undock, 'undock')
 
         # Nav2 lifecycle clients
@@ -249,7 +241,7 @@ class MissionController(Node):
         }
 
         # Timers
-        self.timer = self.create_timer(0.1, self._tick)              # 10 Hz state machine
+        self.timer = self.create_timer(0.5, self._tick)              # 10 Hz state machine
         self.speech_timer = self.create_timer(0.5, self._speech_tick) # 2 Hz speech queue
 
         self.get_logger().info('Mission controller initialized.')
@@ -459,29 +451,6 @@ class MissionController(Node):
     def _nav_aborted(self):
         return self.status == GoalStatus.STATUS_ABORTED
 
-    def _send_spin(self, angle=math.pi * 2, time_allowance=15):
-        if not self.spin_client.wait_for_server(timeout_sec=1.0):
-            self.get_logger().warn('Spin server not available')
-            return False
-
-        goal = Spin.Goal()
-        goal.target_yaw = angle
-        goal.time_allowance = Duration(sec=time_allowance)
-
-        self.get_logger().info('Spinning 360°...')
-        future = self.spin_client.send_goal_async(goal, self._feedback_callback)
-        future.add_done_callback(self._spin_goal_response)
-        return True
-
-    def _spin_goal_response(self, future):
-        self.goal_handle = future.result()
-        if not self.goal_handle.accepted:
-            self.get_logger().warn('Spin request rejected')
-            self.result_future = None
-            return
-        self.result_future = self.goal_handle.get_result_async()
-        self.result_future.add_done_callback(self._nav_result)
-
     # ── Approach pose computation (surface normal based) ──────────────
     def world_to_map(self, x, y, map):
         mx = int((x - map.info.origin.position.x) / map.info.resolution)
@@ -562,6 +531,7 @@ class MissionController(Node):
     def _tick(self):
         self._publish_mission_status()
         
+        return
         if self.state == State.WAITING_FOR_NAV2:
             self._handle_waiting()
         elif self.state == State.UNDOCKING:
@@ -636,18 +606,14 @@ class MissionController(Node):
                 self._finish()
                 return
 
-            if self._nav_aborted() and not self.spinning:
+            if self._nav_aborted():
                 # Waypoint aborted — skip to next
                 self.get_logger().warn(
                     f'Waypoint {self.waypoint_index} navigation aborted, skipping.')
                 self.waypoint_index += 1
 
-            if self._nav_succeeded() and not self.spinning:
+            if self._nav_succeeded():
                 self.waypoint_index += 1
-
-            # Spin complete — advance to next waypoint
-            if self.spinning:
-                self.spinning = False
 
             # Check for loop completion
             if self.waypoint_index >= len(self.waypoints):
@@ -659,11 +625,7 @@ class MissionController(Node):
                     self._finish()
                     return
 
-            if self.spin_at_waypoints and not self.spinning:
-                self.spinning = True
-                self._send_spin()
-            else:
-                self._send_next_waypoint()
+            self._send_next_waypoint()
 
     def _handle_approaching(self):
         if not self._is_nav_complete() and not self.nav_rejected:
