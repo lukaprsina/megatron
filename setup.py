@@ -39,6 +39,7 @@ setup(
             'ring_detector = megatron.ring_detector:main',
             'controller = megatron.controller:main',
             'perception_visualizer = megatron.perception_visualizer:main',
+            'pc2_image_overlay = megatron.pc2_image_overlay:main',
         ],
     },
 )

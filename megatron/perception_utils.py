@@ -84,6 +84,7 @@ def extract_3d_points_from_pc2(
     mask: np.ndarray,
     pc2_msg,
     max_range: float = 5.0,
+    log = None
 ) -> np.ndarray:
     """Extract 3D points from an organized PointCloud2 at mask pixels.
 
@@ -107,6 +108,8 @@ def extract_3d_points_from_pc2(
     w = pc2_msg.width
     if h <= 1:
         # Unorganized cloud — cannot use pixel-level masks
+
+        if log is not None: log.info("Returned because h <=1")
         return np.empty((0, 3), dtype=np.float64)
 
     pts = pc2_lib.read_points_numpy(pc2_msg, field_names=['x', 'y', 'z'])
@@ -114,6 +117,7 @@ def extract_3d_points_from_pc2(
 
     vs, us = np.nonzero(mask)
     if len(vs) == 0:
+        if log is not None: log.info("Returned because len(vs) == 0")
         return np.empty((0, 3), dtype=np.float64)
 
     # Clamp indices in case RGB and PC2 dimensions differ slightly

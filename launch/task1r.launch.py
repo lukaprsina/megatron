@@ -42,6 +42,12 @@ def generate_launch_description():
             description='Start Megatron perception visualizer',
         ),
         DeclareLaunchArgument(
+            'pc2_overlay',
+            default_value='false',
+            choices=['true', 'false'],
+            description='Overlay PointCloud2 points on the RGB image for debugging',
+        ),
+        DeclareLaunchArgument(
             'show_debug_window',
             default_value='false',
             choices=['true', 'false'],
@@ -56,6 +62,12 @@ def generate_launch_description():
             'rviz_config',
             default_value=PathJoinSubstitution([pkg_megatron, 'config', 'production.rviz']),
             description='RViz config file',
+        ),
+        DeclareLaunchArgument(
+            'free_will',
+            default_value='false',
+            choices=['true', 'false'],
+            description='freeWill mode: do not autonomously follow waypoints',
         ),
     ]
 
@@ -104,6 +116,12 @@ def generate_launch_description():
         ('/depth/points', '/gemini/depth_registered/points'),
     ]
 
+    pc2_overlay_remaps = [
+        ('/rgb/image_raw', '/gemini/color/image_raw'),
+        ('/rgb/camera_info', '/gemini/color/camera_info'),
+        ('/depth/points', '/gemini/depth_registered/points'),
+    ]
+
     # Face detector
     face_detector = Node(
         package='megatron',
@@ -124,6 +142,16 @@ def generate_launch_description():
         remappings=camera_remaps,
     )
 
+    pc2_image_overlay = Node(
+        package='megatron',
+        executable='pc2_image_overlay',
+        name='pc2_image_overlay',
+        output='screen',
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+        remappings=pc2_overlay_remaps,
+        condition=IfCondition(LaunchConfiguration('pc2_overlay')),
+    )
+
     # Mission controller
     controller = Node(
         package='megatron',
@@ -133,6 +161,7 @@ def generate_launch_description():
         parameters=[
             {
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'free_will': LaunchConfiguration('free_will'),
                 'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', 'test1.yaml']),
             }
         ],
@@ -156,8 +185,9 @@ def generate_launch_description():
     ld.add_action(localization)
     ld.add_action(nav2)
     ld.add_action(rviz)
-    #ld.add_action(face_detector)
+    ld.add_action(face_detector)
     #ld.add_action(ring_detector)
-    #ld.add_action(controller)
-    #ld.add_action(visualizer)
+    ld.add_action(pc2_image_overlay)
+    ld.add_action(controller)
+    ld.add_action(visualizer)
     return ld
