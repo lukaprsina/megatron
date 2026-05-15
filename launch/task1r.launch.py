@@ -43,13 +43,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'pc2_overlay',
-            default_value='false',
+            default_value='true',
             choices=['true', 'false'],
             description='Overlay PointCloud2 points on the RGB image for debugging',
         ),
         DeclareLaunchArgument(
             'show_debug_window',
-            default_value='false',
+            default_value='true',
             choices=['true', 'false'],
             description='Show the combined perception panel in an OpenCV window',
         ),
@@ -65,10 +65,35 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'free_will',
-            default_value='false',
+            default_value='true',
             choices=['true', 'false'],
             description='freeWill mode: do not autonomously follow waypoints',
         ),
+
+        # If the Gemini driver publishes PointCloud2 with frame_id=gemini_color_optical_frame
+        # but that frame is missing in TF, RViz and perception nodes cannot transform it into `map`.
+        DeclareLaunchArgument(
+            'publish_gemini_tf',
+            default_value='true',
+            choices=['true', 'false'],
+            description='Publish a static TF for Gemini camera optical frame',
+        ),
+        DeclareLaunchArgument(
+            'gemini_tf_parent_frame',
+            default_value='base_link',
+            description='Parent frame for Gemini static TF (must exist in /tf)',
+        ),
+        DeclareLaunchArgument(
+            'gemini_tf_child_frame',
+            default_value='gemini_color_optical_frame',
+            description='Child frame for Gemini static TF (matches PointCloud2 header.frame_id)',
+        ),
+        DeclareLaunchArgument('gemini_tf_x', default_value='-0.03705974'),
+        DeclareLaunchArgument('gemini_tf_y', default_value='0.0'),
+        DeclareLaunchArgument('gemini_tf_z', default_value='0.12168622'),
+        DeclareLaunchArgument('gemini_tf_roll', default_value='-1.57079632679'),
+        DeclareLaunchArgument('gemini_tf_pitch', default_value='0.0'),
+        DeclareLaunchArgument('gemini_tf_yaw', default_value='-1.57079632679'),
     ]
 
     # Real robot: run localization + Nav2 on the workstation,
@@ -152,6 +177,25 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('pc2_overlay')),
     )
 
+    # Publish a static TF for Gemini optical frame if the robot doesn't provide it.
+    gemini_static_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='gemini_static_tf',
+        output='screen',
+        arguments=[
+            '--x', LaunchConfiguration('gemini_tf_x'),
+            '--y', LaunchConfiguration('gemini_tf_y'),
+            '--z', LaunchConfiguration('gemini_tf_z'),
+            '--roll', LaunchConfiguration('gemini_tf_roll'),
+            '--pitch', LaunchConfiguration('gemini_tf_pitch'),
+            '--yaw', LaunchConfiguration('gemini_tf_yaw'),
+            '--frame-id', LaunchConfiguration('gemini_tf_parent_frame'),
+            '--child-frame-id', LaunchConfiguration('gemini_tf_child_frame'),
+        ],
+        condition=IfCondition(LaunchConfiguration('publish_gemini_tf')),
+    )
+
     # Mission controller
     controller = Node(
         package='megatron',
@@ -161,7 +205,6 @@ def generate_launch_description():
         parameters=[
             {
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'free_will': LaunchConfiguration('free_will'),
                 'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', 'test1.yaml']),
             }
         ],
@@ -185,9 +228,8 @@ def generate_launch_description():
     ld.add_action(localization)
     ld.add_action(nav2)
     ld.add_action(rviz)
-    ld.add_action(face_detector)
+    #ld.add_action(face_detector)
     #ld.add_action(ring_detector)
-    ld.add_action(pc2_image_overlay)
-    ld.add_action(controller)
+    #ld.add_action(controller)
     ld.add_action(visualizer)
     return ld
