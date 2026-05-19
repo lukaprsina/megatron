@@ -20,7 +20,7 @@ import numpy as np
 import cv2
 import tf2_ros
 
-from sensor_msgs.msg import Image, PointCloud2
+from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PoseStamped, Quaternion
 from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge, CvBridgeError

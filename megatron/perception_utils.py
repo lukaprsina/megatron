@@ -43,7 +43,7 @@ class DepthCameraGeometry:
         self.cy = k[5]
         self._ready = True
 
-    def extract_3d_points(self, mask: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    def extract_3d_points(self, mask: np.ndarray, depth: np.ndarray, logger = None) -> np.ndarray:
         """Project masked depth pixels to 3D points in the camera optical frame.
 
         Parameters
@@ -56,10 +56,14 @@ class DepthCameraGeometry:
         (N, 3) float64 array of [X, Y, Z] in camera optical frame, or empty (0, 3).
         """
         if not self._ready:
+            if logger is not None:
+                logger.warning('DepthCameraGeometry not ready — cannot extract 3D points.')
             return np.empty((0, 3), dtype=np.float64)
 
         vs, us = np.nonzero(mask)
         if len(vs) == 0:
+            if logger is not None:
+                logger.info('Mask has no valid pixels — skipping 3D extraction.')
             return np.empty((0, 3), dtype=np.float64)
 
         z = depth[vs, us].astype(np.float64)
@@ -68,69 +72,14 @@ class DepthCameraGeometry:
         valid = (z > 0.0) & (z < self.max_range) & np.isfinite(z)
         vs, us, z = vs[valid], us[valid], z[valid]
         if len(z) == 0:
+            if logger is not None:
+                logger.info('No valid depth pixels after filtering — skipping 3D extraction.')
             return np.empty((0, 3), dtype=np.float64)
 
         x = (us.astype(np.float64) - self.cx) * z / self.fx
         y = (vs.astype(np.float64) - self.cy) * z / self.fy
 
         return np.column_stack([x, y, z])
-
-
-# ---------------------------------------------------------------------------
-# PointCloud2 → 3D point extraction (organized cloud)
-# ---------------------------------------------------------------------------
-
-def extract_3d_points_from_pc2(
-    mask: np.ndarray,
-    pc2_msg,
-    max_range: float = 5.0,
-    log = None
-) -> np.ndarray:
-    """Extract 3D points from an organized PointCloud2 at mask pixels.
-
-    The PointCloud2 must be organized (height > 1, same H×W as the image).
-    Points in the PC2 are already in the sensor's coordinate frame and have
-    correct geometry — no pinhole math required.
-
-    Parameters
-    ----------
-    mask    : (H, W) uint8 array — nonzero where we want 3D points
-    pc2_msg : sensor_msgs/PointCloud2 (organized, height == image height)
-    max_range : discard points further than this from the camera origin
-
-    Returns
-    -------
-    (N, 3) float64 array or empty (0, 3).
-    """
-    from sensor_msgs_py import point_cloud2 as pc2_lib
-
-    h = pc2_msg.height
-    w = pc2_msg.width
-    if h <= 1:
-        # Unorganized cloud — cannot use pixel-level masks
-
-        if log is not None: log.info("Returned because h <=1")
-        return np.empty((0, 3), dtype=np.float64)
-
-    pts = pc2_lib.read_points_numpy(pc2_msg, field_names=['x', 'y', 'z'])
-    pts = pts.reshape((h, w, 3)).astype(np.float64)
-
-    vs, us = np.nonzero(mask)
-    if len(vs) == 0:
-        if log is not None: log.info("Returned because len(vs) == 0")
-        return np.empty((0, 3), dtype=np.float64)
-
-    # Clamp indices in case RGB and PC2 dimensions differ slightly
-    vs_c = np.clip(vs, 0, h - 1)
-    us_c = np.clip(us, 0, w - 1)
-    points = pts[vs_c, us_c, :]
-
-    finite = np.isfinite(points).all(axis=1)
-    nonzero = ~np.all(points == 0.0, axis=1)
-    in_range = np.linalg.norm(points, axis=1) < max_range
-    valid = finite & nonzero & in_range
-
-    return points[valid]
 
 
 # ---------------------------------------------------------------------------

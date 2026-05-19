@@ -137,11 +137,13 @@ def generate_launch_description():
 
     # Camera topic remaps: sim uses OAK-D, real robot uses Gemini (see tutorial Check 4)
     camera_remaps = [
+        ('/depth/image_raw', '/gemini/depth/image_raw'),
         ('/rgb/image_raw', '/gemini/color/image_raw'),
-        ('/depth/points', '/gemini/depth_registered/points'),
+        ('/depth/camera_info', '/gemini/depth/camera_info'),
     ]
 
     pc2_overlay_remaps = [
+        ('/depth/image_raw', '/gemini/depth/image_raw'),
         ('/rgb/image_raw', '/gemini/color/image_raw'),
         ('/rgb/camera_info', '/gemini/color/camera_info'),
         ('/depth/points', '/gemini/depth_registered/points'),
@@ -222,14 +224,15 @@ def generate_launch_description():
             }
         ],
         condition=IfCondition(LaunchConfiguration('visualization')),
+        remappings=camera_remaps,
     )
 
     ld = LaunchDescription(args)
     ld.add_action(localization)
     ld.add_action(nav2)
     ld.add_action(rviz)
-    #ld.add_action(face_detector)
+    ld.add_action(face_detector)
     #ld.add_action(ring_detector)
-    #ld.add_action(controller)
+    ld.add_action(controller)
     ld.add_action(visualizer)
     return ld

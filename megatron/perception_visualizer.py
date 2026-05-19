@@ -87,6 +87,7 @@ class PerceptionVisualizer(Node):
         # Main detector images
         self.face_image: Optional[np.ndarray] = None
         self.ring_image: Optional[np.ndarray] = None
+        self.depth_image: Optional[np.ndarray] = None
         self.face_count = 0
         self.ring_count = 0
         self.last_ring_color = '—'
@@ -102,7 +103,7 @@ class PerceptionVisualizer(Node):
         self.create_subscription(
             Image, '/face_detections_image', self._face_image_cb, qos_profile_sensor_data)
         self.create_subscription(
-            Image, '/ring_detections_image', self._ring_image_cb, qos_profile_sensor_data)
+            Image, '/depth/image_raw', self._depth_image_cb, qos_profile_sensor_data)
         self.create_subscription(PoseStamped, '/detected_faces', self._face_pose_cb, 10)
         self.create_subscription(PoseStamped, '/detected_rings', self._ring_pose_cb, 10)
         self.create_subscription(String, '/mission_status', self._mission_status_cb, 10)
@@ -125,6 +126,31 @@ class PerceptionVisualizer(Node):
 
     def _face_image_cb(self, msg: Image) -> None:
         self.face_image = self._to_bgr(msg)
+
+    def _depth_image_cb(self, msg: Image) -> None:
+        self.get_logger().info('Received depth image for visualization.')
+        try:
+            depth_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            h, w = depth_img.shape[:2]
+            cx, cy = w // 2, h // 2
+            
+            if len(depth_img.shape) == 3:
+                depth_img = depth_img[:, :, 0]
+                
+            dist = float(depth_img[cy, cx])
+                
+            if depth_img.dtype == np.float32 or depth_img.dtype == np.float64:
+                vis_img = np.clip(depth_img / 5.0 * 255.0, 0, 255).astype(np.uint8)
+            else:
+                vis_img = np.clip(depth_img / 5000.0 * 255.0, 0, 255).astype(np.uint8)
+                dist = dist / 1000.0
+                
+            vis_img_bgr = cv2.cvtColor(vis_img, cv2.COLOR_GRAY2BGR)
+            cv2.circle(vis_img_bgr, (cx, cy), 5, (0, 0, 255), -1)
+            cv2.putText(vis_img_bgr, f"{dist:.2f}m", (cx + 10, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            self.depth_image = vis_img_bgr
+        except CvBridgeError as exc:
+            self.get_logger().warn(f'Depth image conversion failed: {exc}')
 
     def _ring_image_cb(self, msg: Image) -> None:
         self.ring_image = self._to_bgr(msg)
@@ -207,9 +233,9 @@ class PerceptionVisualizer(Node):
         pw, ph = 480, self.panel_height
         face_panel = _fit_image(self.face_image, pw, ph)
         _overlay_label(face_panel, 'Faces')
-        ring_panel = _fit_image(self.ring_image, pw, ph)
-        _overlay_label(ring_panel, 'Rings')
-        return np.hstack([face_panel, ring_panel])
+        depth_panel = _fit_image(self.depth_image, pw, ph)
+        _overlay_label(depth_panel, 'Depth Debug')
+        return np.hstack([face_panel, depth_panel])
 
     def _build_debug_row(self) -> np.ndarray:
         cw, ch = 240, self.panel_height // 2

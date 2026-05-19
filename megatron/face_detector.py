@@ -16,7 +16,7 @@ import cv2
 import tf2_ros
 from collections import Counter
 
-from sensor_msgs.msg import Image, PointCloud2
+from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PoseStamped, Quaternion
 from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge, CvBridgeError
@@ -26,7 +26,7 @@ from ultralytics import YOLO
 from megatron.perception_utils import (
     IncrementalTrackManager,
     compute_robust_surface,
-    extract_3d_points_from_pc2,
+    DepthCameraGeometry,
     normal_to_quaternion,
     transform_point_and_normal,
 )
@@ -39,10 +39,10 @@ class FaceDetectorNode(Node):
 
         # Parameters
         self.declare_parameter('device', '')
-        self.declare_parameter('confidence_threshold', 0.5)
+        self.declare_parameter('confidence_threshold', 0.7)
         self.declare_parameter('confirmation_count', 3)
         self.declare_parameter('dedup_distance', 0.5)
-        self.declare_parameter('min_inference_period', 0.2)
+        self.declare_parameter('min_inference_period', 0.5)
         self.declare_parameter('roi_shrink', 0.3)
         self.declare_parameter('sync_queue_size', 30)
         self.declare_parameter('sync_slop', 0.5)
@@ -72,27 +72,35 @@ class FaceDetectorNode(Node):
         )
 
         self.bridge = CvBridge()
-        self.model = YOLO('yolov8n.pt')
+        self.model = YOLO('yolov8n-face.pt')
 
         # TF2
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # Synced RGB + PointCloud2 via message_filters
+        # Synced RGB + Depth via message_filters
         self.rgb_sub = message_filters.Subscriber(
             self, Image, '/rgb/image_raw',
             qos_profile=qos_profile_sensor_data)
-        self.pc2_sub = message_filters.Subscriber(
-            self, PointCloud2, '/depth/points',
+        self.depth_sub = message_filters.Subscriber(
+            self, Image, '/depth/image_raw',
             qos_profile=qos_profile_sensor_data)
+        
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.pc2_sub], queue_size=self.sync_queue_size, slop=self.sync_slop)
+            [self.rgb_sub, self.depth_sub], queue_size=self.sync_queue_size, slop=self.sync_slop)
+        
         self.sync.registerCallback(self._synced_callback)
+
+        self.info_sub = self.create_subscription(
+            CameraInfo, '/depth/camera_info', self._camera_info_callback, 1)
+
+        self.depth_geom = DepthCameraGeometry()
 
         # Publishers
         self.face_pub = self.create_publisher(PoseStamped, '/detected_faces', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/face_markers', 10)
         self.image_pub = self.create_publisher(Image, '/face_detections_image', 10)
+        self.depth_pub = self.create_publisher(Image, '/face_detections_depth', 10)
 
         # Tracker
         self.track_manager = IncrementalTrackManager(
@@ -103,40 +111,45 @@ class FaceDetectorNode(Node):
         self.last_inference_time = 0.0
 
         self.get_logger().info(
-            f'Face detector initialized (PointCloud2 mode). '
+            f'Face detector initialized (DepthImage mode). '
             f'sync_queue_size={self.sync_queue_size}, sync_slop={self.sync_slop:.3f}s')
 
+    def _camera_info_callback(self, msg: CameraInfo):
+        if not self.depth_geom.ready:
+            self.depth_geom.update_intrinsics(msg)
+            self.get_logger().info('Camera intrinsics received.')
+
     # ------------------------------------------------------------------
-    # Synced RGB + PointCloud2 callback
+    # Synced RGB + Depth callback
     # ------------------------------------------------------------------
 
-    def _synced_callback(self, rgb_msg: Image, pc2_msg: PointCloud2):
+    def _synced_callback(self, rgb_msg: Image, depth_msg: Image):
+        if not self.depth_geom.ready:
+            self.get_logger().warn('Camera intrinsics not ready — skipping synced callback.')
+            return
+
+        self.get_logger().info('Received synced RGB + Depth frames.')
         # Rate limit
         now = self.get_clock().now().nanoseconds / 1e9
         if now - self.last_inference_time < self.min_inference_period:
             return
         self.last_inference_time = now
 
-        # Convert RGB image
+        # Convert RGB image and Depth image
         try:
             cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
+            depth_image_raw = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
+            if depth_image_raw.dtype == np.uint16:
+                # Convert 16UC1 (millimeters) to 32FC1 (meters)
+                depth_image = depth_image_raw.astype(np.float32) / 1000.0
+            else:
+                depth_image = depth_image_raw
         except CvBridgeError as e:
             self.get_logger().error(f'Image conversion failed: {e}')
             return
 
-        h, w = cv_image.shape[:2]
-
-        # Run YOLO
-        results = self.model.predict(
-            cv_image, imgsz=(256, 320), show=False, verbose=False,
-            classes=[0], device=self.device, conf=self.confidence_threshold)
-
-        # Debug counters per synced callback
-        rejection_counts: Counter = Counter()
-        rejection_logs: list[str] = []
-
-        # Get TF: PC2 frame → map
-        frame_id = pc2_msg.header.frame_id
+        # Get TF: Depth frame → map
+        frame_id = depth_msg.header.frame_id
         if not frame_id:
             frame_id = 'oakd_rgb_camera_optical_frame'
         try:
@@ -147,6 +160,18 @@ class FaceDetectorNode(Node):
 
         if tf_stamped is None:
             rejection_counts['tf_missing'] += 1
+
+        h, w = cv_image.shape[:2]
+        # Run YOLO
+        #No need to filter by class for face model
+        results = self.model.predict(
+            cv_image, imgsz=(256, 320), show=False, verbose=False,
+            classes=[0], device=self.device, conf=self.confidence_threshold)
+
+        # Debug counters per synced callback
+        rejection_counts: Counter = Counter()
+        rejection_logs: list[str] = []
+
 
         # Process each detection
         num_boxes_total = 0
@@ -185,10 +210,10 @@ class FaceDetectorNode(Node):
                 mask = np.zeros((h, w), dtype=np.uint8)
                 mask[ry1:ry2, rx1:rx2] = 255
 
-                # Project to 3D via PointCloud2
+                # Project to 3D via DepthImage
                 points_3d = np.empty((0, 3), dtype=np.float64)
                 if rejection_reason is None:
-                    points_3d = extract_3d_points_from_pc2(mask, pc2_msg, log=self.get_logger())
+                    points_3d = self.depth_geom.extract_3d_points(mask, depth_image,logger=self.get_logger())
                     if len(points_3d) < 5:
                         rejection_reason = f'not_enough_points(n={len(points_3d)})'
                     else:
@@ -272,6 +297,7 @@ class FaceDetectorNode(Node):
             out_msg = self.bridge.cv2_to_imgmsg(cv_image, 'bgr8')
             out_msg.header = rgb_msg.header
             self.image_pub.publish(out_msg)
+            self.depth_pub.publish(depth_msg)  # For debugging: raw depth image
         except CvBridgeError:
             pass
 
