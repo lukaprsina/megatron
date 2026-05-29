@@ -8,6 +8,7 @@ Provides:
 """
 
 import math
+from typing import Optional
 
 import numpy as np
 from geometry_msgs.msg import PointStamped, Vector3Stamped
@@ -26,7 +27,10 @@ class DepthCameraGeometry:
     """
 
     def __init__(self, max_range: float = 5.0):
-        self.fx = self.fy = self.cx = self.cy = None
+        self.fx: Optional[float] = None
+        self.fy: Optional[float] = None
+        self.cx: Optional[float] = None
+        self.cy: Optional[float] = None
         self.max_range = max_range
         self._ready = False
 
@@ -56,6 +60,9 @@ class DepthCameraGeometry:
         (N, 3) float64 array of [X, Y, Z] in camera optical frame, or empty (0, 3).
         """
         if not self._ready:
+            return np.empty((0, 3), dtype=np.float64)
+
+        if self.cx is None or self.cy is None or self.fx is None or self.fy is None:
             return np.empty((0, 3), dtype=np.float64)
 
         vs, us = np.nonzero(mask)

@@ -151,7 +151,7 @@ class MissionController(Node):
         #self.declare_parameter('approach_distance', 0.55)
         self.declare_parameter('face_approach_distance', 0.55)
         self.declare_parameter('ring_approach_distance', 1.3)
-        self.declare_parameter('approach_retry_offset', 0.1)
+        self.declare_parameter('approach_retry_offset', 0.5)
         self.declare_parameter('spin_at_waypoints', False)
         self.declare_parameter('total_faces', 3)
         self.declare_parameter('total_rings', 4)
@@ -183,7 +183,7 @@ class MissionController(Node):
         self.spin_goal_handle = None
         self.spin_result_future = None
         self.feedback = None
-        self.status = None
+        self.nav_status = None
         self.nav_rejected = False
         self.initial_pose_received = False
         self.is_docked = None
@@ -430,7 +430,7 @@ class MissionController(Node):
         goal_msg.pose.pose.orientation = self._yaw_to_quaternion(yaw)
 
         if not self._cost_at_goal_ok(x,y):
-            self.status = GoalStatus.STATUS_ABORTED
+            self.nav_status = GoalStatus.STATUS_ABORTED
             
             if self.state == State.APPROACHING_OBJECT:
                 self.nav_rejected = True  # trigger approach retry logic
@@ -458,7 +458,7 @@ class MissionController(Node):
 
     def _nav_goal_response(self, future):
         self.nav_in_flight = False
-        self.status = 0
+        self.nav_status = 0
         self.nav_goal_handle = future.result()
 
         if not self.nav_goal_handle.accepted:
@@ -473,7 +473,7 @@ class MissionController(Node):
 
     def _nav_result(self, future):
         result = future.result()
-        self.status = result.status if result else GoalStatus.STATUS_ABORTED
+        self.nav_status = result.status if result else GoalStatus.STATUS_ABORTED
 
     def _cancel_nav(self):
         if self.nav_goal_handle is not None:
@@ -486,6 +486,8 @@ class MissionController(Node):
             self.spin_goal_handle.cancel_goal_async()
             self.spin_goal_handle = None
             self.spin_result_future = None
+        # Ensure spinning flag is cleared so the state machine can progress
+        self.spinning = False
 
     def _is_nav_complete(self):
         if self.nav_in_flight:
@@ -497,10 +499,10 @@ class MissionController(Node):
         return self.nav_result_future.done() and not self.nav_rejected
 
     def _nav_succeeded(self):
-        return self.status == GoalStatus.STATUS_SUCCEEDED
+        return self.nav_status == GoalStatus.STATUS_SUCCEEDED
 
     def _nav_aborted(self):
-        return self.status == GoalStatus.STATUS_ABORTED
+        return self.nav_status == GoalStatus.STATUS_ABORTED
 
     def _send_spin(self, angle=math.pi * 2, time_allowance=15):
         if not self.spin_client.wait_for_server(timeout_sec=1.0):
@@ -512,6 +514,7 @@ class MissionController(Node):
         goal.time_allowance = Duration(sec=time_allowance)
 
         self.get_logger().info('Spinning 360°...')
+        self.spin_result_future = None  # clear so completion check doesn't fire on old future
         future = self.spin_client.send_goal_async(goal, self._feedback_callback)
         future.add_done_callback(self._spin_goal_response)
         return True
@@ -521,13 +524,14 @@ class MissionController(Node):
         if not self.spin_goal_handle.accepted:
             self.get_logger().warn('Spin request rejected')
             self.spin_result_future = None
+            self.spinning = False
             return
         self.spin_result_future = self.spin_goal_handle.get_result_async()
         self.spin_result_future.add_done_callback(self._spin_result)
 
     def _spin_result(self, future):
         result = future.result()
-        self.status = result.status if result else GoalStatus.STATUS_ABORTED
+        self.spin_status = result.status if result else GoalStatus.STATUS_ABORTED
 
     # ── Approach pose computation (surface normal based) ──────────────
     def world_to_map(self, x, y, map):
@@ -610,6 +614,8 @@ class MissionController(Node):
         max_age_ns = self.detection_max_age * 1e9
 
         def is_stale(entry):
+            if entry.get('greeted', False):
+                return False
             last_seen = entry.get('last_seen')
             if last_seen is None:
                 return False
@@ -702,24 +708,20 @@ class MissionController(Node):
             self._send_nav_goal(ax, ay, yaw)
             return
 
-        # Check if current navigation is done
-        if self._is_nav_complete():
+        # Check if current navigation is done (skip during spin — spin has its own
+        # completion check below to avoid re-entering this block on every tick).
+        if self._is_nav_complete() and not self.spinning:
             if self._all_found():
                 self._finish()
                 return
 
-            if self._nav_aborted() and not self.spinning:
-                # Waypoint aborted — skip to next
+            if self._nav_aborted():
                 self.get_logger().warn(
                     f'Waypoint {self.waypoint_index} navigation aborted, skipping.')
                 self.waypoint_index += 1
 
-            if self._nav_succeeded() and not self.spinning:
+            if self._nav_succeeded():
                 self.waypoint_index += 1
-
-            # Spin complete — advance to next waypoint
-            if self.spinning:
-                self.spinning = False
 
             # Check for loop completion
             if self.waypoint_index >= len(self.waypoints):
@@ -731,14 +733,28 @@ class MissionController(Node):
                     self._finish()
                     return
 
-            if self.spin_at_waypoints and not self.spinning:
+            if self.spin_at_waypoints:
                 self.spinning = True
                 self._send_spin()
             else:
                 self._send_next_waypoint()
+            return
+
+        # Spin completion — stop spinning and continue exploration
+        if self.spinning and self.spin_result_future is not None and self.spin_result_future.done():
+            self.spinning = False
+            # After a completed spin, resume waypoint navigation
+            self._send_next_waypoint()
+            return
 
     def _handle_approaching(self):
         if not self._is_nav_complete() and not self.nav_rejected:
+            return
+
+        approach = self.current_approach
+        if approach is None:
+            self.state = State.EXPLORING
+            self._send_next_waypoint()
             return
 
         if self._nav_succeeded():
@@ -748,7 +764,6 @@ class MissionController(Node):
             return
 
         if self._nav_aborted() or self.nav_rejected:
-            approach = self.current_approach
             attempts = approach.get('attempts', 0) + 1
             approach['attempts'] = attempts
 
@@ -764,7 +779,7 @@ class MissionController(Node):
                 cycle = int(attempts // len(candidates))
                 t_attempts = attempts - len(candidates) * cycle
                 type_distance = self.face_approach_distance if approach['type'] == 'face' else self.ring_approach_distance
-                new_distance = type_distance + 0.05 * cycle  # increase distance every full cycle
+                new_distance = type_distance + self.approach_retry_offset * cycle  # increase distance every full cycle
                 candidates = self._approach_candidates(approach['pos'], approach['normal'], approach['type'], distance=new_distance)
                 ax, ay, yaw = candidates[t_attempts]
                 self.get_logger().warn(
@@ -775,7 +790,7 @@ class MissionController(Node):
             else:
                 # All candidates exhausted — give up on this approach.
                 self.get_logger().warn(
-                    f'Approach failed after {attempts} attempts, re-queuing for later.')
+                    f'Approach failed after {attempts} attempts, giving up.')
                 self._publish_approaching_object(0.0, 0.0, none=True)
                 approach.pop('attempts', None)  # reset so all candidates are tried again
                 #self.pending_approaches.append(approach)
@@ -784,6 +799,8 @@ class MissionController(Node):
                 self._send_next_waypoint()
 
     def _handle_verifying(self):
+        if self.verify_start_time is None:
+            return
         elapsed = (self.get_clock().now() - self.verify_start_time).nanoseconds / 1e9
         if elapsed < self.verify_pause_sec:
             return
