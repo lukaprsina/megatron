@@ -12,10 +12,10 @@ from rclpy.qos import qos_profile_sensor_data
 from cv_bridge import CvBridge, CvBridgeError
 
 from geometry_msgs.msg import PoseStamped
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 from typing import Optional as _Optional
-
+from megatron.compression_utils import Decoder
 
 # ---------------------------------------------------------------------------
 # Shared UI helpers
@@ -65,6 +65,8 @@ class PerceptionVisualizer(Node):
     """Compose detector outputs into a single demo-friendly visualization."""
 
     WINDOW_NAME = 'Faces and Rings Camera'
+    DEPTH_WINDOW_NAME = 'Gemini Depth'
+    COLOR_WINDOW_NAME = "Gemini Image"
 
     def __init__(self) -> None:
         super().__init__('perception_visualizer')
@@ -83,11 +85,13 @@ class PerceptionVisualizer(Node):
             self.panel_height = 360
 
         self.bridge = CvBridge()
-
+        self.decoder = Decoder()
         # Main detector images
         self.face_image: Optional[np.ndarray] = None
         self.ring_image: Optional[np.ndarray] = None
         self.depth_image: Optional[np.ndarray] = None
+        self.depth_raw_image: Optional[np.ndarray] = None
+        self.color_raw_image: Optional[np.ndarray] = None
         self.face_count = 0
         self.ring_count = 0
         self.last_ring_color = '—'
@@ -103,7 +107,9 @@ class PerceptionVisualizer(Node):
         self.create_subscription(
             Image, '/face_detections_image', self._face_image_cb, qos_profile_sensor_data)
         self.create_subscription(
-            Image, '/depth/image_raw', self._depth_image_cb, qos_profile_sensor_data)
+            CompressedImage, '/gemini/color/image_raw/compressed', self._color_image_cb, qos_profile_sensor_data)
+        self.create_subscription(
+            CompressedImage, '/gemini/depth/image_raw/compressedDepth', self._depth_image_cb, qos_profile_sensor_data)
         self.create_subscription(PoseStamped, '/detected_faces', self._face_pose_cb, 10)
         self.create_subscription(PoseStamped, '/detected_rings', self._ring_pose_cb, 10)
         self.create_subscription(String, '/mission_status', self._mission_status_cb, 10)
@@ -127,14 +133,52 @@ class PerceptionVisualizer(Node):
     def _face_image_cb(self, msg: Image) -> None:
         self.face_image = self._to_bgr(msg)
 
-    def _depth_image_cb(self, msg: Image) -> None:
-        self.get_logger().info('Received depth image for visualization.')
+    def _color_image_cb(self, msg: CompressedImage) -> None:
+        self.color_raw_image = self.decoder.decode_img(msg)
+    
+    def _depth_image_cb(self, msg: CompressedImage) -> None:
+        self.depth_raw_image = self.decoder.decode_depth(msg)
+
+
+    def _compressed_color_image_cb(self, msg: CompressedImage) -> None:
+        # self.get_logger().info('Received Color image for visualization.')
         try:
-            depth_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            # depth_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            # h, w = depth_img.shape[:2]
+            # cx, cy = w // 2, h // 2
+            
+            # if len(depth_img.shape) == 3:
+            #     depth_img = depth_img[:, :, 0]
+                
+            # dist = float(depth_img[cy, cx])
+                
+            # if depth_img.dtype == np.float32 or depth_img.dtype == np.float64:
+            #     vis_img = np.clip(depth_img / 5.0 * 255.0, 0, 255).astype(np.uint8)
+            # else:
+            #     vis_img = np.clip(depth_img / 5000.0 * 255.0, 0, 255).astype(np.uint8)
+            #     dist = dist / 1000.0
+                
+            # vis_img_bgr = cv2.cvtColor(vis_img, cv2.COLOR_GRAY2BGR)
+            # cv2.circle(vis_img_bgr, (cx, cy), 5, (0, 0, 255), -1)
+            # cv2.putText(vis_img_bgr, f"{dist:.2f}m", (cx + 10, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            # self.depth_image = vis_img_bgr
+            self.color_raw_image = self._to_bgr_compressed(msg)
+            self.depth_image = self._to_bgr_compressed(msg)
+        except CvBridgeError as exc:
+            self.get_logger().warn(f'Color image conversion failed: {exc}')
+
+    def _compressed_depth_cb(self, msg: CompressedImage) -> None:
+        depth_img = self._to_depth_compressed(msg)
+        if depth_img is None:
+            return
+        # self.get_logger().info(f" type: {type(depth_img)}, {depth_img.shape}")
+        try:
+            # depth_img = self.bridge.imgmsg_to_cv2(depth_img, desired_encoding='passthrough')
             h, w = depth_img.shape[:2]
             cx, cy = w // 2, h // 2
             
             if len(depth_img.shape) == 3:
+                self.get_logger().info(f"Depth image shape: {len(depth_img.shape)} -> {depth_img.shape}")
                 depth_img = depth_img[:, :, 0]
                 
             dist = float(depth_img[cy, cx])
@@ -148,9 +192,16 @@ class PerceptionVisualizer(Node):
             vis_img_bgr = cv2.cvtColor(vis_img, cv2.COLOR_GRAY2BGR)
             cv2.circle(vis_img_bgr, (cx, cy), 5, (0, 0, 255), -1)
             cv2.putText(vis_img_bgr, f"{dist:.2f}m", (cx + 10, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            self.depth_image = vis_img_bgr
+            # self.depth_image = vis_img_bgr
+            # self.depth_image = self._to_bgr_compressed(msg)
+            self.depth_raw_image = vis_img_bgr
         except CvBridgeError as exc:
-            self.get_logger().warn(f'Depth image conversion failed: {exc}')
+            self.get_logger().warn(f'Depth calculation failed: {exc}')
+            # if not isinstance(depth, np.ndarray) or depth.ndim < 2:
+            #     self.get_logger().warn('Compressed depth decode returned invalid image shape.')
+            #     return
+            self.depth_raw_image = depth_img
+            # self.depth_vis_image = self._depth_to_vis(depth)
 
     def _ring_image_cb(self, msg: Image) -> None:
         self.ring_image = self._to_bgr(msg)
@@ -191,13 +242,93 @@ class PerceptionVisualizer(Node):
         except CvBridgeError as exc:
             self.get_logger().warn(f'Image conversion failed: {exc}')
             return None
-
+        
+    def _to_passthrough(self, msg:Image) -> Optional[np.ndarray]:
+        try:
+            return np.ascontiguousarray(
+                self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough'))
+        except CvBridgeError as exc:
+            self.get_logger().warn(f'Image conversion failed passthrough: {exc}')
+            return None
     def _to_any(self, msg: Image) -> Optional[np.ndarray]:
         try:
             return np.ascontiguousarray(self.bridge.imgmsg_to_cv2(msg))
         except CvBridgeError as exc:
             self.get_logger().warn(f'Image conversion failed: {exc}')
             return None
+
+    def _to_bgr_compressed(self, msg: CompressedImage) -> Optional[np.ndarray]:
+        try:
+            return np.ascontiguousarray(
+                self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+                )
+        except CvBridgeError as exc:
+            self.get_logger().warn(f'Compressed image conversion failed: {exc}')
+            return None
+
+    def _to_depth_compressed(self, msg: CompressedImage) -> Optional[np.ndarray]:
+        try:
+            decoded = None
+            if 'compressedDepth' in msg.format:
+            # 1. Strip the 12-byte ROS compressedDepth header
+                depth_header_size = 12
+                raw_data = msg.data[depth_header_size:]
+                
+                # 2. Decode the raw PNG data using NumPy and OpenCV
+                np_arr = np.frombuffer(raw_data, np.uint8)
+                decoded = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+            else:
+                # It's a standard compressed color image (JPEG/PNG), cv_bridge handles it fine
+                decoded = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='passthrough')
+
+            if decoded is None: 
+                self.get_logger().warn('1 -> Compressed depth decode returned None.')
+                self.get_logger().info(f"Format: {msg.format}, Data length: {len(msg.data)}")
+                return None
+            # cv_bridge handles compressedDepth when image_transport plugins are present.
+            # decoded = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            # if decoded is None:
+            #     return None
+            # disp_depth = cv2.normalize(decoded, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+            # return disp_depth
+            return decoded
+            # return np.ascontiguousarray(decoded)
+        except CvBridgeError:
+            self.get_logger().error("1 -> Failed to decompress image")
+            return None
+            # self.get_logger().warn("Using fallback mode for decoding compressed depth")
+            # # Fallback: decode PNG payload directly for compressedDepth transport.
+            # data = np.frombuffer(msg.data, dtype=np.uint8)
+            # depth = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+            # if depth is None:
+            #     self.get_logger().warn('Compressed depth decode failed.')
+            #     return None
+            # return np.ascontiguousarray(depth)
+
+    def _depth_to_vis(self, depth: np.ndarray) -> np.ndarray:
+        if depth is None or not isinstance(depth, np.ndarray) or depth.ndim == 0:
+            return np.full((240, 320), 0, dtype=np.uint8)
+
+        if depth.ndim == 3:
+            depth = depth[:, :, 0]
+
+        valid = depth > 0
+        if not np.any(valid):
+            return np.full((depth.shape[0], depth.shape[1]), 0, dtype=np.uint8)
+
+        if depth.dtype in (np.float32, np.float64):
+            depth_m = depth.astype(np.float32)
+        elif depth.dtype == np.uint16:
+            depth_m = depth.astype(np.float32) / 1000.0
+        else:
+            depth_m = depth.astype(np.float32)
+
+        max_m = np.percentile(depth_m[valid], 98.0)
+        max_m = max(max_m, 0.5)
+        scaled = np.clip((depth_m / max_m) * 255.0, 0, 255).astype(np.uint8)
+        gray = 255 - scaled
+        gray[~valid] = 0
+        return gray
 
     # --- Timer callback ----------------------------------------------------
 
@@ -216,6 +347,13 @@ class PerceptionVisualizer(Node):
 
         if self.show_window:
             cv2.imshow(self.WINDOW_NAME, debug_canvas)
+            # if self.depth_vis_image is not None:
+            #     cv2.imshow(self.DEPTH_WINDOW_NAME, self.depth_vis_image)
+            if self.depth_raw_image is not None:
+                cv2.imshow(self.DEPTH_WINDOW_NAME, self.depth_raw_image)
+            if self.color_raw_image is not None:
+                cv2.imshow(self.COLOR_WINDOW_NAME, self.color_raw_image)
+            
             cv2.waitKey(1)
 
     # --- Canvas construction -----------------------------------------------
