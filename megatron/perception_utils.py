@@ -333,3 +333,32 @@ class IncrementalTrackManager:
 
     def get_unconfirmed_tracks(self):
         return [t for t in self._tracks if not t['confirmed'] and len(t['observations']) > 0]
+
+    def prune_stale(self, max_age_sec, now_stamp):
+        """Remove tracks whose most recent observation is older than max_age_sec.
+
+        Args:
+            max_age_sec: age threshold in seconds
+            now_stamp: current stamp as builtin_interfaces/Time or float seconds
+        """
+        if isinstance(now_stamp, (int, float)):
+            now_sec = float(now_stamp)
+        else:
+            now_sec = now_stamp.sec + now_stamp.nanosec * 1e-9
+
+        to_remove = []
+        for i, track in enumerate(self._tracks):
+            if not track['observations']:
+                to_remove.append(i)
+                continue
+            last = track['observations'][-1]
+            last_stamp = last['stamp']
+            if isinstance(last_stamp, (int, float)):
+                last_sec = float(last_stamp)
+            else:
+                last_sec = last_stamp.sec + last_stamp.nanosec * 1e-9
+            if now_sec - last_sec > max_age_sec:
+                to_remove.append(i)
+
+        for i in reversed(to_remove):
+            self._tracks.pop(i)

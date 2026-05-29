@@ -8,7 +8,7 @@ confirmed detections as PoseStamped with color packed in frame_id ("map|{color}"
 
 import math
 import random as rnd
-from typing import Optional
+from typing import Optional, cast
 
 import rclpy
 from rclpy.node import Node
@@ -249,6 +249,7 @@ class RingDetectorNode(Node):
         self.declare_parameter('confirmation_count', 3)
         self.declare_parameter('dedup_distance', 0.5)
         self.declare_parameter('min_inference_period', 0.2)
+        self.declare_parameter('track_max_age', 30.0)
         
         # Adaptive threshold
         self.declare_parameter('thresh_block_size', 15)
@@ -281,23 +282,24 @@ class RingDetectorNode(Node):
 
             
 
-        self.confirmation_count = self.get_parameter('confirmation_count').value
-        self.dedup_distance = self.get_parameter('dedup_distance').value
-        self.min_inference_period = self.get_parameter('min_inference_period').value
-        self.thresh_block_size = self.get_parameter('thresh_block_size').value
-        self.thresh_c = self.get_parameter('thresh_c').value
-        self.min_contour_points = self.get_parameter('min_contour_points').value
-        self.max_axis = self.get_parameter('max_axis').value
-        self.min_axis = self.get_parameter('min_axis').value
-        self.max_aspect_ratio = self.get_parameter('max_aspect_ratio').value
-        self.center_thr = self.get_parameter('center_thr').value
-        self.min_pair_score = self.get_parameter('min_pair_score').value
-        self.min_color_confidence = self.get_parameter('min_color_confidence').value
-        self.min_color_pixels = self.get_parameter('min_color_pixels').value
-        self.min_brightness_diff = self.get_parameter('min_brightness_diff').value
-        self.max_band_std = self.get_parameter('max_band_std').value
-        self.min_depth_gap = self.get_parameter('min_depth_gap').value
-        self.min_ring_points_3d = self.get_parameter('min_ring_points_3d').value
+        self.confirmation_count = cast(int, self.get_parameter('confirmation_count').value)
+        self.dedup_distance = cast(float, self.get_parameter('dedup_distance').value)
+        self.min_inference_period = cast(float, self.get_parameter('min_inference_period').value)
+        self.track_max_age = cast(float, self.get_parameter('track_max_age').value)
+        self.thresh_block_size = cast(int, self.get_parameter('thresh_block_size').value)
+        self.thresh_c = cast(int, self.get_parameter('thresh_c').value)
+        self.min_contour_points = cast(int, self.get_parameter('min_contour_points').value)
+        self.max_axis = cast(float, self.get_parameter('max_axis').value)
+        self.min_axis = cast(float, self.get_parameter('min_axis').value)
+        self.max_aspect_ratio = cast(float, self.get_parameter('max_aspect_ratio').value)
+        self.center_thr = cast(float, self.get_parameter('center_thr').value)
+        self.min_pair_score = cast(float, self.get_parameter('min_pair_score').value)
+        self.min_color_confidence = cast(float, self.get_parameter('min_color_confidence').value)
+        self.min_color_pixels = cast(int, self.get_parameter('min_color_pixels').value)
+        self.min_brightness_diff = cast(float, self.get_parameter('min_brightness_diff').value)
+        self.max_band_std = cast(float, self.get_parameter('max_band_std').value)
+        self.min_depth_gap = cast(float, self.get_parameter('min_depth_gap').value)
+        self.min_ring_points_3d = cast(int, self.get_parameter('min_ring_points_3d').value)
 
         # Enforce odd block size >= 3
         if self.thresh_block_size % 2 == 0:
@@ -616,6 +618,8 @@ class RingDetectorNode(Node):
 
         # Publish debug 4 — color
         self._publish_debug(self.debug_color_pub, debug_color_img)
+
+        self.track_manager.prune_stale(self.track_max_age, rgb_msg.header.stamp)
 
         # Publish main detections image
         try:

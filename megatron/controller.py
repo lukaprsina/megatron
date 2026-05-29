@@ -11,6 +11,7 @@ Approach pose is computed along the surface normal (in free space, facing the ob
 
 import math
 from enum import Enum, auto
+from typing import cast
 
 import rclpy
 from rclpy.node import Node
@@ -157,16 +158,18 @@ class MissionController(Node):
         self.declare_parameter('max_loops', 2)
         self.declare_parameter('waypoints_file', 'waypoints/test1.yaml')
         self.declare_parameter('verify_pause_sec', 1.0)
+        self.declare_parameter('detection_max_age', 120.0)
 
-        self.dedup_distance = self.get_parameter('dedup_distance').value
-        self.face_approach_distance = self.get_parameter('face_approach_distance').value
-        self.ring_approach_distance = self.get_parameter('ring_approach_distance').value
-        self.approach_retry_offset = self.get_parameter('approach_retry_offset').value
-        self.spin_at_waypoints = self.get_parameter('spin_at_waypoints').value
-        self.total_faces = self.get_parameter('total_faces').value
-        self.total_rings = self.get_parameter('total_rings').value
-        self.max_loops = self.get_parameter('max_loops').value
-        self.verify_pause_sec = self.get_parameter('verify_pause_sec').value
+        self.dedup_distance = cast(float, self.get_parameter('dedup_distance').value)
+        self.face_approach_distance = cast(float, self.get_parameter('face_approach_distance').value)
+        self.ring_approach_distance = cast(float, self.get_parameter('ring_approach_distance').value)
+        self.approach_retry_offset = cast(float, self.get_parameter('approach_retry_offset').value)
+        self.spin_at_waypoints = cast(bool, self.get_parameter('spin_at_waypoints').value)
+        self.total_faces = cast(int, self.get_parameter('total_faces').value)
+        self.total_rings = cast(int, self.get_parameter('total_rings').value)
+        self.max_loops = cast(int, self.get_parameter('max_loops').value)
+        self.verify_pause_sec = cast(float, self.get_parameter('verify_pause_sec').value)
+        self.detection_max_age = cast(float, self.get_parameter('detection_max_age').value)
 
         # Speech
         self.speaker = Speaker()
@@ -175,8 +178,10 @@ class MissionController(Node):
 
         # Navigation state
         self.state = State.WAITING_FOR_NAV2
-        self.goal_handle = None
-        self.result_future = None
+        self.nav_goal_handle = None
+        self.nav_result_future = None
+        self.spin_goal_handle = None
+        self.spin_result_future = None
         self.feedback = None
         self.status = None
         self.nav_rejected = False
@@ -198,7 +203,7 @@ class MissionController(Node):
 
         # Load waypoints
         try:
-            wp_file = self.get_parameter('waypoints_file').value
+            wp_file = cast(str, self.get_parameter('waypoints_file').value)
         except Exception:
             wp_file = 'waypoints/test1.yaml'
 
@@ -271,20 +276,24 @@ class MissionController(Node):
     def _face_callback(self, msg: PoseStamped):
         pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
         nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
+        now = self.get_clock().now()
 
         for f in self.found_faces:
             if np.linalg.norm(pos - f['pos']) < self.dedup_distance:
-                # Update position/normal with refined estimate from tracker
                 f['pos'] = pos
                 f['normal'] = (nx, ny)
-                if not f.get('greeted', False) and self.state != State.DONE:
-                    self._requeue_if_not_pending('face', pos, (nx, ny), None)
+                f['last_seen'] = now
+                if self.state != State.DONE:
+                    self._requeue_if_not_pending('face', f)
                 return
 
         self.get_logger().info(
             f'New face detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_faces) + 1}')
 
-        self.found_faces.append({'pos': pos, 'normal': (nx, ny), 'greeted': False})
+        self.found_faces.append({
+            'pos': pos, 'normal': (nx, ny), 'greeted': False,
+            'last_seen': now,
+        })
 
         if self.state != State.DONE:
             self.pending_approaches.append({
@@ -297,27 +306,30 @@ class MissionController(Node):
     def _ring_callback(self, msg: PoseStamped):
         pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
 
-        # Parse color from frame_id
         frame_id = msg.header.frame_id
         color = 'unknown'
         if '|' in frame_id:
             color = frame_id.split('|', 1)[1]
 
         nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
+        now = self.get_clock().now()
 
         for r in self.found_rings:
             if np.linalg.norm(pos - r['pos']) < self.dedup_distance:
-                # Update position/normal with refined estimate from tracker
                 r['pos'] = pos
                 r['normal'] = (nx, ny)
-                if not r.get('greeted', False) and self.state != State.DONE:
-                    self._requeue_if_not_pending('ring', pos, (nx, ny), color)
+                r['last_seen'] = now
+                if self.state != State.DONE:
+                    self._requeue_if_not_pending('ring', r)
                 return
 
         self.get_logger().info(
             f'New ring ({color}) detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_rings) + 1}')
 
-        self.found_rings.append({'pos': pos, 'color': color, 'normal': (nx, ny), 'greeted': False})
+        self.found_rings.append({
+            'pos': pos, 'color': color, 'normal': (nx, ny), 'greeted': False,
+            'last_seen': now,
+        })
 
         if self.state != State.DONE:
             self.pending_approaches.append({
@@ -329,10 +341,20 @@ class MissionController(Node):
 
     # ── Nav2 / dock callbacks ─────────────────────────────────────────
 
-    def _requeue_if_not_pending(self, obj_type, pos, normal, color):
-        """Re-add a known-but-ungreeted object to pending if not already queued."""
-        nx, ny = normal
-        # Check it's not already in the pending queue or currently being approached
+    def _requeue_if_not_pending(self, obj_type, track):
+        """Re-add a known-but-ungreeted object to pending if not already queued.
+
+        Args:
+            obj_type: 'face' or 'ring'
+            track: dict from found_faces or found_rings
+        """
+        if track.get('greeted', False):
+            return
+
+        pos = track['pos']
+        nx, ny = track['normal']
+        color = track.get('color')
+
         for a in self.pending_approaches:
             if a['type'] == obj_type and np.linalg.norm(pos - np.array(a['pos'])) < self.dedup_distance:
                 return
@@ -413,7 +435,7 @@ class MissionController(Node):
             if self.state == State.APPROACHING_OBJECT:
                 self.nav_rejected = True  # trigger approach retry logic
             
-            rf_done = f'{self.result_future.done()}' if self.result_future is not None else 'None'
+            rf_done = f'{self.nav_result_future.done()}' if self.nav_result_future is not None else 'None'
             self.get_logger().info(
                 f'flight: {self.nav_in_flight} | '
                 f'result_future: {rf_done} | '
@@ -437,36 +459,42 @@ class MissionController(Node):
     def _nav_goal_response(self, future):
         self.nav_in_flight = False
         self.status = 0
-        self.goal_handle = future.result()
+        self.nav_goal_handle = future.result()
 
-        if not self.goal_handle.accepted:
+        if not self.nav_goal_handle.accepted:
             self.get_logger().warn('Navigation goal rejected')
             self.nav_rejected = True
-            self.result_future = None
+            self.nav_result_future = None
             return
 
         self.nav_rejected = False
-        self.result_future = self.goal_handle.get_result_async()
-        self.result_future.add_done_callback(self._nav_result)
+        self.nav_result_future = self.nav_goal_handle.get_result_async()
+        self.nav_result_future.add_done_callback(self._nav_result)
 
     def _nav_result(self, future):
         result = future.result()
         self.status = result.status if result else GoalStatus.STATUS_ABORTED
 
     def _cancel_nav(self):
-        if self.goal_handle is not None:
-            self.goal_handle.cancel_goal_async()
-            self.goal_handle = None
-            self.result_future = None
+        if self.nav_goal_handle is not None:
+            self.nav_goal_handle.cancel_goal_async()
+            self.nav_goal_handle = None
+            self.nav_result_future = None
+
+    def _cancel_spin(self):
+        if self.spin_goal_handle is not None:
+            self.spin_goal_handle.cancel_goal_async()
+            self.spin_goal_handle = None
+            self.spin_result_future = None
 
     def _is_nav_complete(self):
         if self.nav_in_flight:
             return False
         if not self._nav_ever_sent:
             return False
-        if self.result_future is None:
+        if self.nav_result_future is None:
             return False
-        return self.result_future.done() and not self.nav_rejected
+        return self.nav_result_future.done() and not self.nav_rejected
 
     def _nav_succeeded(self):
         return self.status == GoalStatus.STATUS_SUCCEEDED
@@ -489,13 +517,17 @@ class MissionController(Node):
         return True
 
     def _spin_goal_response(self, future):
-        self.goal_handle = future.result()
-        if not self.goal_handle.accepted:
+        self.spin_goal_handle = future.result()
+        if not self.spin_goal_handle.accepted:
             self.get_logger().warn('Spin request rejected')
-            self.result_future = None
+            self.spin_result_future = None
             return
-        self.result_future = self.goal_handle.get_result_async()
-        self.result_future.add_done_callback(self._nav_result)
+        self.spin_result_future = self.spin_goal_handle.get_result_async()
+        self.spin_result_future.add_done_callback(self._spin_result)
+
+    def _spin_result(self, future):
+        result = future.result()
+        self.status = result.status if result else GoalStatus.STATUS_ABORTED
 
     # ── Approach pose computation (surface normal based) ──────────────
     def world_to_map(self, x, y, map):
@@ -571,9 +603,34 @@ class MissionController(Node):
         return (len(self.found_faces) >= self.total_faces and
                 len(self.found_rings) >= self.total_rings)
 
+    def _prune_stale_detections(self):
+        if self.start_time is None:
+            return
+        now = self.get_clock().now()
+        max_age_ns = self.detection_max_age * 1e9
+
+        def is_stale(entry):
+            last_seen = entry.get('last_seen')
+            if last_seen is None:
+                return False
+            return (now - last_seen).nanoseconds > max_age_ns
+
+        old_faces = len(self.found_faces)
+        self.found_faces = [f for f in self.found_faces if not is_stale(f)]
+        removed_faces = old_faces - len(self.found_faces)
+
+        old_rings = len(self.found_rings)
+        self.found_rings = [r for r in self.found_rings if not is_stale(r)]
+        removed_rings = old_rings - len(self.found_rings)
+
+        if removed_faces or removed_rings:
+            self.get_logger().info(
+                f'Pruned {removed_faces} stale face(s) and {removed_rings} stale ring(s)')
+
     # ── Main state machine tick ───────────────────────────────────────
 
     def _tick(self):
+        self._prune_stale_detections()
         self._publish_mission_status()
         
         if self.state == State.WAITING_FOR_NAV2:
@@ -636,6 +693,7 @@ class MissionController(Node):
         if self.pending_approaches:
             approach = self.pending_approaches.pop(0)
             self._cancel_nav()
+            self._cancel_spin()
             self.current_approach = approach
             candidates = self._approach_candidates(approach['pos'], approach['normal'], approach['type'])
             ax, ay, yaw = candidates[0]
@@ -781,6 +839,7 @@ class MissionController(Node):
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
         self.state = State.DONE
         self._cancel_nav()
+        self._cancel_spin()
         self.get_logger().info(
             f'Mission complete! Found {len(self.found_faces)} faces and '
             f'{len(self.found_rings)} rings in {elapsed:.1f}s')

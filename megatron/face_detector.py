@@ -5,6 +5,8 @@ inference, projects face ROIs to 3D via pinhole model, fits surface normals,
 and publishes confirmed detections as PoseStamped (with normal as orientation).
 """
 
+from typing import cast
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -43,13 +45,15 @@ class FaceDetectorNode(Node):
         self.declare_parameter('dedup_distance', 0.5)
         self.declare_parameter('min_inference_period', 0.2)
         self.declare_parameter('roi_shrink', 0.3)
+        self.declare_parameter('track_max_age', 30.0)
 
-        self.device = self.get_parameter('device').value
-        self.confidence_threshold = self.get_parameter('confidence_threshold').value
-        self.confirmation_count = self.get_parameter('confirmation_count').value
-        self.dedup_distance = self.get_parameter('dedup_distance').value
-        self.min_inference_period = self.get_parameter('min_inference_period').value
-        self.roi_shrink = self.get_parameter('roi_shrink').value
+        self.device = cast(str, self.get_parameter('device').value)
+        self.confidence_threshold = cast(float, self.get_parameter('confidence_threshold').value)
+        self.confirmation_count = cast(int, self.get_parameter('confirmation_count').value)
+        self.dedup_distance = cast(float, self.get_parameter('dedup_distance').value)
+        self.min_inference_period = cast(float, self.get_parameter('min_inference_period').value)
+        self.roi_shrink = cast(float, self.get_parameter('roi_shrink').value)
+        self.track_max_age = cast(float, self.get_parameter('track_max_age').value)
 
         self.bridge = CvBridge()
         self.model = YOLO('yolov8n-face.pt')
@@ -192,6 +196,8 @@ class FaceDetectorNode(Node):
                 cx = (rx1 + rx2) // 2
                 cy = (ry1 + ry2) // 2
                 cv2.circle(cv_image, (cx, cy), 4, (0, 0, 255), -1)
+
+        self.track_manager.prune_stale(self.track_max_age, rgb_msg.header.stamp)
 
         # Publish annotated image
         try:
