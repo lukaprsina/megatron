@@ -107,6 +107,8 @@ class PerceptionVisualizer(Node):
         self.create_subscription(
             Image, '/face_detections_image', self._face_image_cb, qos_profile_sensor_data)
         self.create_subscription(
+            Image, '/ring_detections_image', self._ring_image_cb, qos_profile_sensor_data)
+        self.create_subscription(
             CompressedImage, '/gemini/color/image_raw/compressed', self._color_image_cb, qos_profile_sensor_data)
         self.create_subscription(
             CompressedImage, '/gemini/depth/image_raw/compressedDepth', self._depth_image_cb, qos_profile_sensor_data)
@@ -270,8 +272,8 @@ class PerceptionVisualizer(Node):
         pw, ph = 480, self.panel_height
         face_panel = _fit_image(self.face_image, pw, ph)
         _overlay_label(face_panel, 'Faces')
-        depth_panel = _fit_image(self.depth_image, pw, ph)
-        _overlay_label(depth_panel, 'Depth Debug')
+        depth_panel = _fit_image(self.ring_image, pw, ph)
+        _overlay_label(depth_panel, 'Rings')
         return np.hstack([face_panel, depth_panel])
 
     def _build_debug_row(self) -> np.ndarray:

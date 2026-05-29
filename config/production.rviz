@@ -886,12 +886,8 @@ Visualization Manager:
         Approaching Object: true
         Bumper Hit: true
         Controller:
-          Local Costmap: true
-          Local Plan: true
-          Polygon: true
-          Trajectories: true
+          "": true
           Value: true
-          VoxelGrid: true
         Depth image compressed: true
         DepthCloud: true
         Detected Faces: true
@@ -899,12 +895,8 @@ Visualization Manager:
         Face Markers: true
         Faces and Rings Camera: true
         Global Planner:
-          Downsampled Costmap: true
-          Global Costmap: true
-          Path: true
-          Polygon: true
+          "": true
           Value: true
-          VoxelGrid: true
         Goal Markers: true
         Goal Pose: true
         Grid: true
@@ -916,8 +908,7 @@ Visualization Manager:
         MarkerArray: true
         PoseWithCovariance: true
         Realsense:
-          RealsenseCamera: true
-          RealsenseDepthImage: true
+          "": true
           Value: true
         Ring Markers: true
         RobotModel: true
@@ -943,24 +934,16 @@ Visualization Manager:
         Bumper Hit: true
         Camera: true
         Controller:
-          Local Costmap: true
-          Local Plan: true
-          Polygon: true
-          Trajectories: true
+          "": true
           Value: true
-          VoxelGrid: true
         DepthCloud: true
         Detected Faces: true
         Detected Rings: true
         Face Markers: true
         Faces and Rings Camera: true
         Global Planner:
-          Downsampled Costmap: true
-          Global Costmap: true
-          Path: true
-          Polygon: true
+          "": true
           Value: true
-          VoxelGrid: true
         Goal Markers: true
         Goal Pose: true
         Grid: true
@@ -972,8 +955,7 @@ Visualization Manager:
         MarkerArray: true
         PoseWithCovariance: true
         Realsense:
-          RealsenseCamera: true
-          RealsenseDepthImage: true
+          "": true
           Value: true
         Ring Markers: true
         RobotModel: true

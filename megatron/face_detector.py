@@ -81,10 +81,12 @@ class FaceDetectorNode(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # Synced RGB + Depth via message_filters
-        self.rgb_sub = self.create_subscription(
-            CompressedImage, '/gemini/color/image_raw/compressed', qos_profile_sensor_data)
-        self.depth_sub = self.create_subscription(
-            CompressedImage, '/gemini/depth/image_raw/compressedDepth', qos_profile_sensor_data)
+        self.rgb_sub = message_filters.Subscriber(
+            self, CompressedImage, '/gemini/color/image_raw/compressed', 
+            qos_profile=qos_profile_sensor_data)
+        self.depth_sub = message_filters.Subscriber(
+            self, CompressedImage, '/gemini/depth/image_raw/compressedDepth', 
+            qos_profile=qos_profile_sensor_data)
         
         # self.rgb_sub = message_filters.Subscriber(
         #     self, Image, '/rgb/image_raw',
@@ -154,6 +156,10 @@ class FaceDetectorNode(Node):
         except CvBridgeError as e:
             self.get_logger().error(f'Image conversion failed: {e}')
             return
+        
+        # Debug counters per synced callback
+        rejection_counts: Counter = Counter()
+        rejection_logs: list[str] = []
 
         # Get TF: Depth frame → map
         frame_id = depth_msg.header.frame_id
@@ -175,10 +181,7 @@ class FaceDetectorNode(Node):
             cv_image, imgsz=(256, 320), show=False, verbose=False,
             classes=[0], device=self.device, conf=self.confidence_threshold)
 
-        # Debug counters per synced callback
-        rejection_counts: Counter = Counter()
-        rejection_logs: list[str] = []
-
+        
 
         # Process each detection
         num_boxes_total = 0
@@ -304,8 +307,9 @@ class FaceDetectorNode(Node):
             out_msg = self.bridge.cv2_to_imgmsg(cv_image, 'bgr8')
             out_msg.header = rgb_msg.header
             self.image_pub.publish(out_msg)
-            self.depth_pub.publish(depth_msg)  # For debugging: raw depth image
+            # self.depth_pub.publish(depth_msg)  # For debugging: raw depth image
         except CvBridgeError:
+            self.get_logger().error("CV Bridge error right before uploading image")
             pass
 
     # ------------------------------------------------------------------

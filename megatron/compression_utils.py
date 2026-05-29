@@ -56,9 +56,11 @@ class Decoder():
             return None
     def _to_bgr_compressed(self, msg: CompressedImage) -> Optional[np.ndarray]:
         try:
-            return np.ascontiguousarray(
-                self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
-                )
+            # return np.ascontiguousarray(
+            #     self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            #     )
+
+            return self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except CvBridgeError as exc:
             self.get_logger().warn(f'Compressed image conversion failed: {exc}')
             return None
