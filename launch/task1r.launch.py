@@ -137,16 +137,10 @@ def generate_launch_description():
 
     # Camera topic remaps: sim uses OAK-D, real robot uses Gemini (see tutorial Check 4)
     camera_remaps = [
-        ('/depth/image_raw', '/gemini/depth/image_raw'),
-        ('/rgb/image_raw', '/gemini/color/image_raw'),
+        ('/depth/image_raw', '/gemini/depth/image_raw/compressedDepth'),
+        ('/rgb/image_raw', '/gemini/color/image_raw/compressed'),
         ('/depth/camera_info', '/gemini/depth/camera_info'),
-    ]
-
-    pc2_overlay_remaps = [
-        ('/depth/image_raw', '/gemini/depth/image_raw'),
-        ('/rgb/image_raw', '/gemini/color/image_raw'),
         ('/rgb/camera_info', '/gemini/color/camera_info'),
-        ('/depth/points', '/gemini/depth_registered/points'),
     ]
 
     # Face detector
@@ -175,7 +169,7 @@ def generate_launch_description():
         name='pc2_image_overlay',
         output='screen',
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
-        remappings=pc2_overlay_remaps,
+        remappings=camera_remaps,
         condition=IfCondition(LaunchConfiguration('pc2_overlay')),
     )
 
