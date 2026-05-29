@@ -14,7 +14,6 @@ from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
-from typing import Optional as _Optional
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +90,8 @@ class PerceptionVisualizer(Node):
         self.ring_count = 0
         self.last_ring_color = '—'
         self.mission_status = 'WAITING_FOR_NAV2'
+        self._face_positions: set[tuple[float, float]] = set()
+        self._ring_positions: set[tuple[float, float]] = set()
 
         # Ring debug images (4 stages)
         self.ring_debug_binary: Optional[np.ndarray] = None
@@ -129,11 +130,15 @@ class PerceptionVisualizer(Node):
     def _ring_image_cb(self, msg: Image) -> None:
         self.ring_image = self._to_bgr(msg)
 
-    def _face_pose_cb(self, _: PoseStamped) -> None:
-        self.face_count += 1
+    def _face_pose_cb(self, msg: PoseStamped) -> None:
+        pos = (round(msg.pose.position.x, 2), round(msg.pose.position.y, 2))
+        self._face_positions.add(pos)
+        self.face_count = len(self._face_positions)
 
     def _ring_pose_cb(self, msg: PoseStamped) -> None:
-        self.ring_count += 1
+        pos = (round(msg.pose.position.x, 2), round(msg.pose.position.y, 2))
+        self._ring_positions.add(pos)
+        self.ring_count = len(self._ring_positions)
         # Parse color from frame_id ("map|color")
         frame_id = msg.header.frame_id
         if '|' in frame_id:

@@ -172,6 +172,21 @@ class FaceDetectorNode(Node):
 
                 if status == 'confirmed':
                     self._publish_detection(track, rgb_msg.header.stamp)
+                    pos, _ = self.track_manager.get_best_estimate(track)
+                    track['_last_published_pos'] = pos.copy()
+                    track['_update_count_since_publish'] = 0
+                elif status == 'updated':
+                    pos, _ = self.track_manager.get_best_estimate(track)
+                    last_pos = track.get('_last_published_pos')
+                    update_count = track.get('_update_count_since_publish', 0)
+                    if (last_pos is None
+                            or np.linalg.norm(pos - last_pos) > 0.05
+                            or update_count >= 5):
+                        self._publish_detection(track, rgb_msg.header.stamp)
+                        track['_last_published_pos'] = pos.copy()
+                        track['_update_count_since_publish'] = 0
+                    else:
+                        track['_update_count_since_publish'] = update_count + 1
 
                 # Draw center point on display
                 cx = (rx1 + rx2) // 2

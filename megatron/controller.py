@@ -226,6 +226,10 @@ class MissionController(Node):
         # the SUCCEEDED status from the spin doesn't double-increment waypoint_index.
         self.spinning = False
 
+        # True once send_goal_async() has fired at least once — prevents
+        # _is_nav_complete() returning True at startup before any nav exists.
+        self._nav_ever_sent = False
+
         self.costmap = None
 
         # Subscribers
@@ -253,7 +257,7 @@ class MissionController(Node):
 
         # Nav2 lifecycle clients
         self.nav2_lifecycle_clients = {
-            n: self.create_client(GetState, f'/{n}/get_state') for n in self.nodes
+            n: self.create_client(GetState, f'{n}/get_state') for n in self.nodes
         }
 
         # Timers
@@ -266,17 +270,16 @@ class MissionController(Node):
 
     def _face_callback(self, msg: PoseStamped):
         pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
 
         for f in self.found_faces:
             if np.linalg.norm(pos - f['pos']) < self.dedup_distance:
-                # Already known — if approach previously failed, re-queue it
+                # Update position/normal with refined estimate from tracker
+                f['pos'] = pos
+                f['normal'] = (nx, ny)
                 if not f.get('greeted', False) and self.state != State.DONE:
-                    self._requeue_if_not_pending('face', pos,
-                                                 _quaternion_to_normal_2d(msg.pose.orientation),
-                                                 None)
+                    self._requeue_if_not_pending('face', pos, (nx, ny), None)
                 return
-
-        nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
 
         self.get_logger().info(
             f'New face detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_faces) + 1}')
@@ -300,16 +303,16 @@ class MissionController(Node):
         if '|' in frame_id:
             color = frame_id.split('|', 1)[1]
 
+        nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
+
         for r in self.found_rings:
             if np.linalg.norm(pos - r['pos']) < self.dedup_distance:
-                # Already known — if approach previously failed, re-queue it
+                # Update position/normal with refined estimate from tracker
+                r['pos'] = pos
+                r['normal'] = (nx, ny)
                 if not r.get('greeted', False) and self.state != State.DONE:
-                    self._requeue_if_not_pending('ring', pos,
-                                                 _quaternion_to_normal_2d(msg.pose.orientation),
-                                                 color)
+                    self._requeue_if_not_pending('ring', pos, (nx, ny), color)
                 return
-
-        nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
 
         self.get_logger().info(
             f'New ring ({color}) detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_rings) + 1}')
@@ -410,12 +413,13 @@ class MissionController(Node):
             if self.state == State.APPROACHING_OBJECT:
                 self.nav_rejected = True  # trigger approach retry logic
             
+            rf_done = f'{self.result_future.done()}' if self.result_future is not None else 'None'
             self.get_logger().info(
                 f'flight: {self.nav_in_flight} | '
-                f'result_future: {self.result_future.done()} | ' if self.result_future is not None else 'result_future: None | '
+                f'result_future: {rf_done} | '
                 f'nav_rejected: {self.nav_rejected} | '
                 f'nav_complete: {self._is_nav_complete()}'
-            )       
+            )
             return False
         
         if not self.nav_client.wait_for_server(timeout_sec=1.0):
@@ -425,6 +429,7 @@ class MissionController(Node):
         self.get_logger().info(f'Navigating to ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
         self.nav_rejected = False
         self.nav_in_flight = True
+        self._nav_ever_sent = True
         future = self.nav_client.send_goal_async(goal_msg, self._feedback_callback)
         future.add_done_callback(self._nav_goal_response)
         return True
@@ -457,8 +462,10 @@ class MissionController(Node):
     def _is_nav_complete(self):
         if self.nav_in_flight:
             return False
+        if not self._nav_ever_sent:
+            return False
         if self.result_future is None:
-            return True
+            return False
         return self.result_future.done() and not self.nav_rejected
 
     def _nav_succeeded(self):
@@ -703,13 +710,12 @@ class MissionController(Node):
                 candidates = self._approach_candidates(approach['pos'], approach['normal'], approach['type'], distance=new_distance)
                 ax, ay, yaw = candidates[t_attempts]
                 self.get_logger().warn(
-                    f'Approach aborted (attempt {attempts}/{len(candidates)}), '
-                    f'trying candidate {attempts}: ({ax:.2f}, {ay:.2f})')
+                    f'Approach aborted (attempt {attempts}), '
+                    f'trying distance {new_distance:.2f}, candidate {t_attempts}: ({ax:.2f}, {ay:.2f})')
                 self._publish_approaching_object(ax, ay, attempt=attempts, total=len(candidates))
                 self._send_nav_goal(ax, ay, yaw)
             else:
-                # No forget about it 
-                # All candidates exhausted — push back to end of queue to try later
+                # All candidates exhausted — give up on this approach.
                 self.get_logger().warn(
                     f'Approach failed after {attempts} attempts, re-queuing for later.')
                 self._publish_approaching_object(0.0, 0.0, none=True)

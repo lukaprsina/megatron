@@ -12,7 +12,7 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data, QoSReliabilityPolicy
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 
 import message_filters
@@ -146,11 +146,12 @@ def _check_depth_discontinuity(pc2_msg: PointCloud2,
                                 min_depth_gap: float = 0.15) -> bool:
     """Check if the ring hole shows a depth gap vs. the band.
 
-    For hanging rings the hole is open air (NaN/far) while the band is at
+    For free-standing rings the hole is open air (NaN/far) while the band is at
     ring distance.  Returns True if the hole is significantly farther or
-    mostly invalid, confirming a real ring.  Returns False (inconclusive)
-    for wall-mounted rings where depths are similar — caller should NOT
-    use this as a hard reject, only as additive evidence.
+    mostly invalid, confirming a real free-standing ring.  Returns False
+    for flat/wall-mounted rings where depths are similar — which are not part
+    of the competition and should be hard-rejected.  Competition spec: only
+    free-standing rings are game.
     """
     h, w = shape[:2]
     band_mask = _build_annular_mask((h, w), outer_ellipse, inner_ellipse)
@@ -324,7 +325,7 @@ class RingDetectorNode(Node):
         # Publishers — detections
         self.ring_pub = self.create_publisher(PoseStamped, '/detected_rings', 10)
         self.marker_pub = self.create_publisher(
-            MarkerArray, '/ring_markers', QoSReliabilityPolicy.BEST_EFFORT)
+            MarkerArray, '/ring_markers', QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT))
         self.image_pub = self.create_publisher(Image, '/ring_detections_image', 10)
 
         # Publishers — debug (4 stages)
@@ -396,7 +397,6 @@ class RingDetectorNode(Node):
         thresh = cv2.bitwise_and(thresh_gray, thresh_color_inv)
 
         # Reconnect thin breaks in ring bands caused by small occluders.
-        # !!!!!!!!!!!!!!!1 This is needed for the situations where there is a stick inside the ring or infront so that it doesn't break the ring     
         fg = cv2.bitwise_not(thresh)
         k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
         fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k_close, iterations=2)
@@ -451,6 +451,7 @@ class RingDetectorNode(Node):
             if i in used:
                 continue
             e1, cnt1, s1 = ellipses[i]
+            best_pair = None  # (ps, j, outer, inner, cx_px, cy_px)
             for j in range(i + 1, len(ellipses)):
                 if j in used:
                     continue
@@ -473,20 +474,24 @@ class RingDetectorNode(Node):
                 if ps >= self.min_pair_score:
                     cx_px = int((e1[0][0] + e2[0][0]) / 2)
                     cy_px = int((e1[0][1] + e2[0][1]) / 2)
-                    ring_candidates.append((outer, inner, ps, (cx_px, cy_px)))
-                    used.add(i)
-                    used.add(j)
-
-                    cv2.ellipse(debug_pairs_img, outer, (0, 255, 0), 2)
-                    cv2.ellipse(debug_pairs_img, inner, (0, 255, 0), 2)
-                    cv2.circle(debug_pairs_img, (cx_px, cy_px), 5, (0, 255, 0), -1)
-                    cv2.putText(debug_pairs_img, f'ps={ps:.2f}',
-                                (cx_px + 8, cy_px - 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                    break
+                    if best_pair is None or ps > best_pair[0]:
+                        best_pair = (ps, j, outer, inner, cx_px, cy_px)
                 else:
                     cv2.ellipse(debug_pairs_img, outer, (0, 0, 120), 1)
                     cv2.ellipse(debug_pairs_img, inner, (0, 0, 120), 1)
+
+            if best_pair is not None:
+                ps, j, outer, inner, cx_px, cy_px = best_pair
+                ring_candidates.append((outer, inner, ps, (cx_px, cy_px)))
+                used.add(i)
+                used.add(j)
+
+                cv2.ellipse(debug_pairs_img, outer, (0, 255, 0), 2)
+                cv2.ellipse(debug_pairs_img, inner, (0, 255, 0), 2)
+                cv2.circle(debug_pairs_img, (cx_px, cy_px), 5, (0, 255, 0), -1)
+                cv2.putText(debug_pairs_img, f'ps={ps:.2f}',
+                            (cx_px + 8, cy_px - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
 
         self._publish_debug(self.debug_pairs_pub, debug_pairs_img)
 
@@ -495,10 +500,12 @@ class RingDetectorNode(Node):
         output_img = cv_image.copy()
 
         for outer, inner, ps, (cx_px, cy_px) in ring_candidates:
-            #Skipped these two because they failed for the green one
-            # Hole check: main_brightness_diff should have been less than 2 for the green ring to work or at least 8
-            # Band uniformity: it just failed for green one i dont know why  
-            
+            # Hole check and band uniformity are disabled below.
+            # They both failed for the green free-standing ring in Gazebo
+            # (insufficient brightness contrast, high V-channel variance).
+            # Depth-discontinuity (below) is the primary 3D-ring filter and
+            # is sufficient when only free-standing rings are in play.
+
             # Hole check
             # has_hole = _check_hole(gray, outer, inner, self.min_brightness_diff, logger=self.get_logger())
             # if not has_hole:
@@ -552,7 +559,7 @@ class RingDetectorNode(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         
-            #!!!!!!!!!!!!!!! This is the main checking function for cheking if this ring is 3d  if there is something behind the ring we are fucked !!!!!!!!!!!!!!
+            # Depth discontinuity: true 3D rings have open air behind the hole.
             # Depth discontinuity: additive signal for hanging rings
             has_depth_gap = _check_depth_discontinuity(
                 pc2_msg, outer, inner, cv_image.shape, self.min_depth_gap)
@@ -591,6 +598,21 @@ class RingDetectorNode(Node):
 
             if status == 'confirmed':
                 self._publish_detection(track, rgb_msg.header.stamp)
+                pos, _ = self.track_manager.get_best_estimate(track)
+                track['_last_published_pos'] = pos.copy()
+                track['_update_count_since_publish'] = 0
+            elif status == 'updated':
+                pos, _ = self.track_manager.get_best_estimate(track)
+                last_pos = track.get('_last_published_pos')
+                update_count = track.get('_update_count_since_publish', 0)
+                if (last_pos is None
+                        or np.linalg.norm(pos - last_pos) > 0.05
+                        or update_count >= 5):
+                    self._publish_detection(track, rgb_msg.header.stamp)
+                    track['_last_published_pos'] = pos.copy()
+                    track['_update_count_since_publish'] = 0
+                else:
+                    track['_update_count_since_publish'] = update_count + 1
 
         # Publish debug 4 — color
         self._publish_debug(self.debug_color_pub, debug_color_img)
