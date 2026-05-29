@@ -226,7 +226,7 @@ def generate_launch_description():
     ld.add_action(nav2)
     ld.add_action(rviz)
     ld.add_action(face_detector)
-    #ld.add_action(ring_detector)
+    ld.add_action(ring_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
     return ld

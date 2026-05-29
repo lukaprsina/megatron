@@ -1,8 +1,8 @@
-"""Ring detector with PointCloud2-based 3D projection and SVD surface fitting.
+"""Ring detector with depth-image-based 3D projection and SVD surface fitting.
 
-Subscribes to synced RGB + PointCloud2 via message_filters, detects concentric
-ellipse pairs (rings), classifies color via HSV, extracts 3D points from the
-annular region via the organized PointCloud2, fits surface normals, and publishes
+Subscribes to synced RGB + depth compressed images via message_filters, detects
+concentric ellipse pairs (rings), classifies color via HSV, extracts 3D points
+from the annular region via the depth image, fits surface normals, and publishes
 confirmed detections as PoseStamped with color packed in frame_id ("map|{color}").
 """
 
@@ -20,7 +20,7 @@ import numpy as np
 import cv2
 import tf2_ros
 
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, CompressedImage
 from geometry_msgs.msg import PoseStamped, Quaternion
 from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge, CvBridgeError
@@ -28,10 +28,11 @@ from cv_bridge import CvBridge, CvBridgeError
 from megatron.perception_utils import (
     IncrementalTrackManager,
     compute_robust_surface,
-    extract_3d_points_from_pc2,
+    DepthCameraGeometry,
     normal_to_quaternion,
     transform_point_and_normal,
 )
+from megatron.compression_utils import Decoder
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +141,8 @@ def _check_band_uniformity(image_bgr: np.ndarray,
     return float(np.std(pixels)) <= max_std
 
 
-def _check_depth_discontinuity(pc2_msg: PointCloud2,
+def _check_depth_discontinuity(depth_image: np.ndarray,
+                                depth_geom,
                                 outer_ellipse: tuple, inner_ellipse: tuple,
                                 shape: tuple,
                                 min_depth_gap: float = 0.15) -> bool:
@@ -157,8 +159,8 @@ def _check_depth_discontinuity(pc2_msg: PointCloud2,
     inner_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.ellipse(inner_mask, inner_ellipse, (255,), -1)
 
-    band_pts = extract_3d_points_from_pc2(band_mask, pc2_msg)
-    inner_pts = extract_3d_points_from_pc2(inner_mask, pc2_msg)
+    band_pts = depth_geom.extract_3d_points(band_mask, depth_image)
+    inner_pts = depth_geom.extract_3d_points(inner_mask, depth_image)
 
     if len(band_pts) < 3:
         return False
@@ -305,21 +307,26 @@ class RingDetectorNode(Node):
             self.thresh_block_size = 3
 
         self.bridge = CvBridge()
+        self.decoder = Decoder()
+        self.depth_geom = DepthCameraGeometry()
 
         # TF2
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # Synced RGB + PointCloud2 via message_filters
+        # Synced RGB + Depth compressed images via message_filters
         self.rgb_sub = message_filters.Subscriber(
-            self, Image, '/rgb/image_raw',
+            self, CompressedImage, '/gemini/color/image_raw/compressed',
             qos_profile=qos_profile_sensor_data)
-        self.pc2_sub = message_filters.Subscriber(
-            self, PointCloud2, '/depth/points',
+        self.depth_sub = message_filters.Subscriber(
+            self, CompressedImage, '/gemini/depth/image_raw/compressedDepth',
             qos_profile=qos_profile_sensor_data)
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.pc2_sub], queue_size=10, slop=0.15)
+            [self.rgb_sub, self.depth_sub], queue_size=10, slop=0.15)
         self.sync.registerCallback(self._synced_callback)
+
+        self.info_sub = self.create_subscription(
+            CameraInfo, '/depth/camera_info', self._camera_info_callback, 1)
 
         # Publishers — detections
         self.ring_pub = self.create_publisher(PoseStamped, '/detected_rings', 10)
@@ -341,30 +348,48 @@ class RingDetectorNode(Node):
         # Rate limiting
         self.last_inference_time = 0.0
 
-        self.get_logger().info('Ring detector initialized (PointCloud2 mode).')
+        self.get_logger().info('Ring detector initialized (DepthImage mode).')
 
     # ------------------------------------------------------------------
-    # Synced RGB + PointCloud2 callback
+    # _camera_info_callback
     # ------------------------------------------------------------------
 
-    def _synced_callback(self, rgb_msg: Image, pc2_msg: PointCloud2):
+    def _camera_info_callback(self, msg: CameraInfo):
+        if not self.depth_geom.ready:
+            self.depth_geom.update_intrinsics(msg)
+            self.get_logger().info('Camera intrinsics received.')
+
+    # ------------------------------------------------------------------
+    # Synced RGB + Depth callback
+    # ------------------------------------------------------------------
+
+    def _synced_callback(self, rgb_msg: CompressedImage, depth_msg: CompressedImage):
+        if not self.depth_geom.ready:
+            self.get_logger().warn('Camera intrinsics not ready — skipping synced callback.')
+            return
+
         # Rate limit
         now = self.get_clock().now().nanoseconds / 1e9
         if now - self.last_inference_time < self.min_inference_period:
             return
         self.last_inference_time = now
 
-        # Convert RGB image
+        # Convert RGB image and Depth image
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
+            cv_image = self.decoder.decode_img(rgb_msg)
+            depth_image_raw = self.decoder.decode_depth(depth_msg)
+            if depth_image_raw.dtype == np.uint16:
+                depth_image = depth_image_raw.astype(np.float32) / 1000.0
+            else:
+                depth_image = depth_image_raw
         except CvBridgeError as e:
             self.get_logger().error(f'Image conversion failed: {e}')
             return
 
         h, w = cv_image.shape[:2]
 
-        # Get TF: PC2 frame → map
-        frame_id = pc2_msg.header.frame_id
+        # Get TF: Depth frame → map
+        frame_id = depth_msg.header.frame_id
         if not frame_id:
             frame_id = 'oakd_rgb_camera_optical_frame'
         try:
@@ -555,7 +580,7 @@ class RingDetectorNode(Node):
             #!!!!!!!!!!!!!!! This is the main checking function for cheking if this ring is 3d  if there is something behind the ring we are fucked !!!!!!!!!!!!!!
             # Depth discontinuity: additive signal for hanging rings
             has_depth_gap = _check_depth_discontinuity(
-                pc2_msg, outer, inner, cv_image.shape, self.min_depth_gap)
+                depth_image, self.depth_geom, outer, inner, cv_image.shape, self.min_depth_gap)
         
             if not has_depth_gap:
                 # Hole is at same depth as ring band → wall-mounted, reject
@@ -566,9 +591,9 @@ class RingDetectorNode(Node):
                 #     f'[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} but failed depth gap check (likely wall-mounted), skipping.')
                 continue
 
-            # ---- 3D projection via annular mask + PointCloud2 ----
+            # ---- 3D projection via annular mask + depth image ----
             annular_mask = _build_annular_mask((h, w), outer, inner)
-            points_3d = extract_3d_points_from_pc2(annular_mask, pc2_msg)
+            points_3d = self.depth_geom.extract_3d_points(annular_mask, depth_image, logger=self.get_logger())
             if len(points_3d) < self.min_ring_points_3d:
                 continue
             
