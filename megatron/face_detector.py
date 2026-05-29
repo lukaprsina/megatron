@@ -16,7 +16,7 @@ import cv2
 import tf2_ros
 from collections import Counter
 
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, CompressedImage
 from geometry_msgs.msg import PoseStamped, Quaternion
 from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge, CvBridgeError
@@ -30,7 +30,7 @@ from megatron.perception_utils import (
     normal_to_quaternion,
     transform_point_and_normal,
 )
-
+from megatron.compression_utils import Decoder
 
 class FaceDetectorNode(Node):
 
@@ -72,6 +72,8 @@ class FaceDetectorNode(Node):
         )
 
         self.bridge = CvBridge()
+        self.decoder = Decoder()
+
         self.model = YOLO('yolov8n-face.pt')
 
         # TF2
@@ -79,12 +81,17 @@ class FaceDetectorNode(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # Synced RGB + Depth via message_filters
-        self.rgb_sub = message_filters.Subscriber(
-            self, Image, '/rgb/image_raw',
-            qos_profile=qos_profile_sensor_data)
-        self.depth_sub = message_filters.Subscriber(
-            self, Image, '/depth/image_raw',
-            qos_profile=qos_profile_sensor_data)
+        self.rgb_sub = self.create_subscription(
+            CompressedImage, '/gemini/color/image_raw/compressed', qos_profile_sensor_data)
+        self.depth_sub = self.create_subscription(
+            CompressedImage, '/gemini/depth/image_raw/compressedDepth', qos_profile_sensor_data)
+        
+        # self.rgb_sub = message_filters.Subscriber(
+        #     self, Image, '/rgb/image_raw',
+        #     qos_profile=qos_profile_sensor_data)
+        # self.depth_sub = message_filters.Subscriber(
+        #     self, Image, '/depth/image_raw',
+        #     qos_profile=qos_profile_sensor_data)
         
         self.sync = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub], queue_size=self.sync_queue_size, slop=self.sync_slop)
@@ -123,7 +130,7 @@ class FaceDetectorNode(Node):
     # Synced RGB + Depth callback
     # ------------------------------------------------------------------
 
-    def _synced_callback(self, rgb_msg: Image, depth_msg: Image):
+    def _synced_callback(self, rgb_msg: CompressedImage, depth_msg: CompressedImage):
         if not self.depth_geom.ready:
             self.get_logger().warn('Camera intrinsics not ready — skipping synced callback.')
             return
@@ -137,8 +144,8 @@ class FaceDetectorNode(Node):
 
         # Convert RGB image and Depth image
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
-            depth_image_raw = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
+            cv_image = self.decoder.decode_img(rgb_msg)
+            depth_image_raw = self.decoder.decode_depth(depth_msg)
             if depth_image_raw.dtype == np.uint16:
                 # Convert 16UC1 (millimeters) to 32FC1 (meters)
                 depth_image = depth_image_raw.astype(np.float32) / 1000.0

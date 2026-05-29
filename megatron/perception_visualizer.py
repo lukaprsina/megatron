@@ -234,22 +234,20 @@ class PerceptionVisualizer(Node):
     # --- Timer callback ----------------------------------------------------
 
     def _tick(self) -> None:
-        # #det_row = self._build_detection_row()
-        # #header = self._build_header(det_row.shape[1])
+        det_row = self._build_detection_row()
+        header = self._build_header(det_row.shape[1])
 
-        # #rviz_canvas = np.vstack([header, det_row])
-        # #debug_canvas = np.vstack([header, det_row, self._build_debug_row()])
+        rviz_canvas = np.vstack([header, det_row])
+        debug_canvas = np.vstack([header, det_row, self._build_debug_row()])
 
-        # try:
-        #     self.rviz_pub.publish(self.bridge.cv2_to_imgmsg(rviz_canvas, encoding='bgr8'))
-        #     # self.image_pub.publish(self.bridge.cv2_to_imgmsg(debug_canvas, encoding='bgr8'))
-        # except CvBridgeError as exc:
-        #     self.get_logger().warn(f'Failed to publish: {exc}')
+        try:
+            self.rviz_pub.publish(self.bridge.cv2_to_imgmsg(rviz_canvas, encoding='bgr8'))
+            # self.image_pub.publish(self.bridge.cv2_to_imgmsg(debug_canvas, encoding='bgr8'))
+        except CvBridgeError as exc:
+            self.get_logger().warn(f'Failed to publish: {exc}')
 
         if self.show_window:
-            #cv2.imshow(self.WINDOW_NAME, debug_canvas)
-            # if self.depth_vis_image is not None:
-            #     cv2.imshow(self.DEPTH_WINDOW_NAME, self.depth_vis_image)
+            cv2.imshow(self.WINDOW_NAME, debug_canvas)
             if self.depth_raw_image is not None:
                 cv2.imshow(self.DEPTH_WINDOW_NAME, self.depth_raw_image)
             if self.color_raw_image is not None:
