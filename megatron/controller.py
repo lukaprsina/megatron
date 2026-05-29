@@ -269,6 +269,8 @@ class MissionController(Node):
 
         self.found_faces.append({'pos': pos, 'normal': (nx, ny), 'greeted': False})
 
+        self._say('Hello!')
+
         if self.state != State.DONE:
             self.pending_approaches.append({
                 'type': 'face',
@@ -301,6 +303,8 @@ class MissionController(Node):
             f'New ring ({color}) detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_rings) + 1}')
 
         self.found_rings.append({'pos': pos, 'color': color, 'normal': (nx, ny), 'greeted': False})
+
+        self._say(f'I see a {color} ring')
 
         if self.state != State.DONE:
             self.pending_approaches.append({

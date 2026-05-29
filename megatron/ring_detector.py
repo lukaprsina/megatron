@@ -182,6 +182,41 @@ def _check_depth_discontinuity(depth_image: np.ndarray,
     return (inner_median - band_median) >= min_depth_gap
 
 
+def _check_ring_has_hole(depth_image: np.ndarray,
+                         depth_geom,
+                         outer_ellipse: tuple, inner_ellipse: tuple,
+                         shape: tuple,
+                         min_band_pts: int = 3,
+                         inner_valid_ratio: float = 0.3,
+                         logger = None) -> bool:
+    """Check that the center of a ring candidate is mostly empty (has a hole).
+
+    Verifies that the inner ellipse region has significantly fewer valid depth
+    points than the annular band — the hallmark of a real ring with a hole.
+    Returns True if the hole is confirmed.
+    """
+    h, w = shape[:2]
+    band_mask = _build_annular_mask((h, w), outer_ellipse, inner_ellipse)
+    inner_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.ellipse(inner_mask, inner_ellipse, (255,), -1)
+
+    band_pts = depth_geom.extract_3d_points(band_mask, depth_image)
+    if len(band_pts) < min_band_pts:
+        if logger is not None: logger().info("not engough points")
+        return False
+
+    inner_pixel_count = int(cv2.countNonZero(inner_mask))
+    if inner_pixel_count < 1:
+        if logger is not None: logger().info("not engough INNER points")
+        return False
+
+    inner_pts = depth_geom.extract_3d_points(inner_mask, depth_image)
+    ratio = len(inner_pts) / inner_pixel_count
+    if logger is not None: logger().info(f"ratio {ratio} vs {inner_valid_ratio} inner_valid_ratio")
+
+    return ratio > inner_valid_ratio
+
+
 # ---------------------------------------------------------------------------
 # Ellipse quality scoring
 # ---------------------------------------------------------------------------
@@ -252,12 +287,13 @@ class RingDetectorNode(Node):
         self.declare_parameter('min_inference_period', 0.2)
         
         # Adaptive threshold
-        self.declare_parameter('thresh_block_size', 15)
-        self.declare_parameter('thresh_c', 25)
+        self.declare_parameter('thresh_block_size', 10)
+        self.declare_parameter('thresh_c', 20)
+
         # Ellipse filtering
-        self.declare_parameter('min_contour_points', 8)
+        self.declare_parameter('min_contour_points', 20)
         self.declare_parameter('max_axis', 200.0)
-        self.declare_parameter('min_axis', 3.0)
+        self.declare_parameter('min_axis', 10.0)
         self.declare_parameter('max_aspect_ratio', 1.8)
 
         #self.declare_parameter('min_contour_points', 20)
@@ -278,6 +314,8 @@ class RingDetectorNode(Node):
         self.declare_parameter('max_band_std', 35.0)
         # Depth discontinuity (hanging rings have gap behind hole)
         self.declare_parameter('min_depth_gap', 0.15)
+        # Hole check (inner region must be mostly empty)
+        self.declare_parameter('inner_valid_ratio', 0.3)
         self.declare_parameter('min_ring_points_3d', 3)
 
             
@@ -298,6 +336,7 @@ class RingDetectorNode(Node):
         self.min_brightness_diff = self.get_parameter('min_brightness_diff').value
         self.max_band_std = self.get_parameter('max_band_std').value
         self.min_depth_gap = self.get_parameter('min_depth_gap').value
+        self.inner_valid_ratio = self.get_parameter('inner_valid_ratio').value
         self.min_ring_points_3d = self.get_parameter('min_ring_points_3d').value
 
         # Enforce odd block size >= 3
@@ -339,6 +378,9 @@ class RingDetectorNode(Node):
         self.debug_ellipses_pub = self.create_publisher(Image, '/ring_debug/ellipses', 10)
         self.debug_pairs_pub = self.create_publisher(Image, '/ring_debug/pairs', 10)
         self.debug_color_pub = self.create_publisher(Image, '/ring_debug/color', 10)
+        self.debug_CUSTOM_pub1 = self.create_publisher(Image, '/ring_debug/custom1', 10)
+        self.debug_CUSTOM_pub2 = self.create_publisher(Image, '/ring_debug/custom2', 10)
+        self.debug_CUSTOM_pub3 = self.create_publisher(Image, '/ring_debug/custom3', 10)
 
         # Track manager
         self.track_manager = IncrementalTrackManager(
@@ -407,26 +449,46 @@ class RingDetectorNode(Node):
             cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,
             self.thresh_block_size, self.thresh_c,
         )
+        thresh_graybgr = cv2.cvtColor(thresh_gray, cv2.COLOR_GRAY2BGR)
+
+        self.debug_CUSTOM_pub1.publish(self.bridge.cv2_to_imgmsg(thresh_graybgr, 'bgr8'))
 
         # 2. Global saturation threshold
         hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
-        s_channel = hsv[:, :, 1]
+        s_channel =  hsv[:, :, 1]
         
+        # Convert 1-channel gray to a 3-channel BGR gray image
+        # h_channel_bgr = cv2.cvtColor(hsv[:,:,0], cv2.COLOR_GRAY2BGR)
+        s_channel_bgr = cv2.cvtColor(s_channel, cv2.COLOR_GRAY2BGR)
+        # v_channel_bgr = cv2.cvtColor(hsv[:,:,2], cv2.COLOR_GRAY2BGR)
+
+        # Now it is safely 3 channels, so 'bgr8' works!
+        self.debug_CUSTOM_pub2.publish(self.bridge.cv2_to_imgmsg(s_channel_bgr, 'bgr8'))
+
         # INVERTED THRESHOLD: Vivid things become BLACK (0), dull things become WHITE (255)
         # S-values in Gazebo for these rings are usually very high, 60 is a safe threshold
-        _, thresh_color_inv = cv2.threshold(s_channel, 130, 255, cv2.THRESH_BINARY_INV)
+        _, thresh_color_inv = cv2.threshold(s_channel, 110, 255, cv2.THRESH_BINARY_INV)
+        thresh_color_invbgr = cv2.cvtColor(thresh_color_inv, cv2.COLOR_GRAY2BGR)
+
+        self.debug_CUSTOM_pub3.publish(self.bridge.cv2_to_imgmsg(thresh_color_invbgr, 'bgr8'))
 
         # 3. Combine with AND! 
         # If a pixel is black (0) in EITHER image, it becomes black in the final image.
         thresh = cv2.bitwise_and(thresh_gray, thresh_color_inv)
-
+        thresh = thresh_color_inv
+        #thresh = thresh_gray
         # Reconnect thin breaks in ring bands caused by small occluders.
         # !!!!!!!!!!!!!!!1 This is needed for the situations where there is a stick inside the ring or infront so that it doesn't break the ring     
         fg = cv2.bitwise_not(thresh)
+
+        k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
+        fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k_open, iterations=1)
+        
         k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
-        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k_close, iterations=2)
-        # k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        # fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k_open, iterations=1)
+        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k_close, iterations=3)
+        
+        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
+        fg = cv2.morphologyEx(fg, cv2.MORPH_DILATE, k_close, iterations=1)
         
         thresh = cv2.bitwise_not(fg)
         
@@ -576,22 +638,31 @@ class RingDetectorNode(Node):
             cv2.putText(output_img, color_name, (cx_px + 10, cy_px),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-        
-            #!!!!!!!!!!!!!!! This is the main checking function for cheking if this ring is 3d  if there is something behind the ring we are fucked !!!!!!!!!!!!!!
-            # Depth discontinuity: additive signal for hanging rings
-            has_depth_gap = _check_depth_discontinuity(
-                depth_image, self.depth_geom, outer, inner, cv_image.shape, self.min_depth_gap)
-        
-            if not has_depth_gap:
-                # Hole is at same depth as ring band → wall-mounted, reject
+            # ---- Hole check: inner region must be mostly empty (depth) ----
+            has_hole = _check_ring_has_hole(
+                depth_image, self.depth_geom, outer, inner, cv_image.shape, inner_valid_ratio=self.inner_valid_ratio, logger=self.get_logger)
+            if not has_hole:
                 cv2.putText(debug_color_img, 'wall', (cx_px + 8, cy_px + 12),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 80, 200), 1)
-                # Yes this filters rings on walls
-                # self.get_logger().info(
-                #     f'[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} but failed depth gap check (likely wall-mounted), skipping.')
+                self.get_logger().info("Ring doesnt have a hole")
                 continue
 
+            #!!!!!!!!!!!!!!! This is the main checking function for cheking if this ring is 3d  if there is something behind the ring we are fucked !!!!!!!!!!!!!!
+            # Depth discontinuity: additive signal for hanging rings
+            # has_depth_gap = _check_depth_discontinuity(
+            #     depth_image, self.depth_geom, outer, inner, cv_image.shape, self.min_depth_gap)
+        
+            # if not has_depth_gap:
+            #     # Hole is at same depth as ring band → wall-mounted, reject
+            #     cv2.putText(debug_color_img, 'wall', (cx_px + 8, cy_px + 12),
+            #                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 80, 200), 1)
+            #     # Yes this filters rings on walls
+            #     # self.get_logger().info(
+            #     #     f'[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} but failed depth gap check (likely wall-mounted), skipping.')
+            #     continue
+
             # ---- 3D projection via annular mask + depth image ----
+            self.get_logger().info("contender!!!")
             annular_mask = _build_annular_mask((h, w), outer, inner)
             points_3d = self.depth_geom.extract_3d_points(annular_mask, depth_image, logger=self.get_logger())
             if len(points_3d) < self.min_ring_points_3d:
