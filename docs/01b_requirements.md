@@ -1,6 +1,4 @@
-We are a team of three computer science students at university, working on a semester project involving TurtleBot4 and ROS2 Jazzy (Python only). We are starting Task 1, with Task 2 to follow after the competition. Search the web, evaluate options, and create an actionable plan. We have just under two weeks, but we can use LLM assistants. In general, do not blindly choose the quickest solutions, but also avoid unnecessary complexity. I have attached our professor's repository README files, which are mandatory reading; mostly prefer their tools and libraries, as we have already learned to use them.
-
-Requirements from the slides:
+## Requirements from the class slides:
 
 ```
 Setup:
