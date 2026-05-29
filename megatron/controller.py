@@ -226,12 +226,20 @@ class MissionController(Node):
         # the SUCCEEDED status from the spin doesn't double-increment waypoint_index.
         self.spinning = False
 
+        self.costmap = None
+
         # Subscribers
         self.create_subscription(DockStatus, 'dock_status', self._dock_callback, qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self._amcl_callback, amcl_pose_qos)
         self.create_subscription(PoseStamped, '/detected_faces', self._face_callback, 10)
         self.create_subscription(PoseStamped, '/detected_rings', self._ring_callback, 10)
-        self.create_subscription(OccupancyGrid, '/global_costmap/costmap', self._costmap_callback, 10)
+        costmap_qos = QoSProfile(
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+        )
+        self.create_subscription(OccupancyGrid, '/global_costmap/costmap',
+                                 self._costmap_callback, costmap_qos)
 
         # Publishers
         self.goal_marker_pub = self.create_publisher(MarkerArray, '/goal_markers', 10)
@@ -492,10 +500,9 @@ class MissionController(Node):
         self.costmap = msg
     
     def _cost_at_goal_ok(self, x, y)-> bool:
+        if self.costmap is None:
+            return True
 
-        #if self.current_goal is None:
-        #    return False
-        
         mx, my = self.world_to_map(x, y, self.costmap)
         cost = -2
   
@@ -763,7 +770,6 @@ class MissionController(Node):
         self._publish_goal_markers()
 
     def _finish(self):
-        return False
         elapsed = 0.0
         if self.start_time is not None:
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9

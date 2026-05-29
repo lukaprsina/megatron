@@ -52,7 +52,7 @@ class FaceDetectorNode(Node):
         self.roi_shrink = self.get_parameter('roi_shrink').value
 
         self.bridge = CvBridge()
-        self.model = YOLO('yolov8n.pt')
+        self.model = YOLO('yolov8n-face.pt')
 
         # TF2
         self.tf_buffer = tf2_ros.Buffer()
@@ -107,7 +107,7 @@ class FaceDetectorNode(Node):
         # Run YOLO
         results = self.model.predict(
             cv_image, imgsz=(256, 320), show=False, verbose=False,
-            classes=[0], device=self.device, conf=self.confidence_threshold)
+            device=self.device, conf=self.confidence_threshold)
 
         # Get TF: PC2 frame → map
         frame_id = pc2_msg.header.frame_id
