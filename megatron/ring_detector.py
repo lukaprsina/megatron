@@ -17,6 +17,12 @@ import rclpy
 import tf2_ros
 from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import PoseStamped, Quaternion
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, qos_profile_sensor_data
+from rclpy.time import Time
+from sensor_msgs.msg import Image, PointCloud2
+from visualization_msgs.msg import Marker, MarkerArray
+
 from megatron.perception_utils import (
     IncrementalTrackManager,
     compute_robust_surface,
@@ -24,11 +30,6 @@ from megatron.perception_utils import (
     normal_to_quaternion,
     transform_point_and_normal,
 )
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, qos_profile_sensor_data
-from rclpy.time import Time
-from sensor_msgs.msg import Image, PointCloud2
-from visualization_msgs.msg import Marker, MarkerArray
 
 # ---------------------------------------------------------------------------
 # HSV color ranges for ring classification

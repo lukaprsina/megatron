@@ -23,7 +23,6 @@ from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Qua
 from irobot_create_msgs.action import Undock
 from irobot_create_msgs.msg import DockStatus
 from lifecycle_msgs.srv import GetState
-from megatron.speech import Speaker
 from nav2_msgs.action import NavigateToPose, Spin
 from nav_msgs.msg import OccupancyGrid  # new
 from rclpy.action import ActionClient
@@ -38,6 +37,8 @@ from rclpy.qos import (
 from std_msgs.msg import String
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
 from visualization_msgs.msg import Marker, MarkerArray
+
+from megatron.speech import Speaker
 
 
 class State(Enum):
