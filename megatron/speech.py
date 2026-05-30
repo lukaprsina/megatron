@@ -1,6 +1,6 @@
+import logging
 import shutil
 import subprocess
-import logging
 
 
 class Speaker:

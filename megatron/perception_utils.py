@@ -8,12 +8,10 @@ Provides:
 """
 
 import math
-from typing import Optional
 
 import numpy as np
-from geometry_msgs.msg import PointStamped, Vector3Stamped
 import tf2_geometry_msgs as tfg
-
+from geometry_msgs.msg import PointStamped, Vector3Stamped
 
 # ---------------------------------------------------------------------------
 # Depth → 3D projection
@@ -27,10 +25,10 @@ class DepthCameraGeometry:
     """
 
     def __init__(self, max_range: float = 5.0):
-        self.fx: Optional[float] = None
-        self.fy: Optional[float] = None
-        self.cx: Optional[float] = None
-        self.cy: Optional[float] = None
+        self.fx: float | None = None
+        self.fy: float | None = None
+        self.cx: float | None = None
+        self.cy: float | None = None
         self.max_range = max_range
         self._ready = False
 

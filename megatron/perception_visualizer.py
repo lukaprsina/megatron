@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import cv2
 import numpy as np
-
 import rclpy
+from cv_bridge import CvBridge, CvBridgeError
+from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-
-from cv_bridge import CvBridge, CvBridgeError
-
-from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
-
 
 # ---------------------------------------------------------------------------
 # Shared UI helpers
@@ -38,7 +32,7 @@ def _overlay_label(image: np.ndarray, text: str, pos: tuple[int, int] = (4, 4),
                 font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
 
-def _fit_image(image: Optional[np.ndarray], target_w: int, target_h: int) -> np.ndarray:
+def _fit_image(image: np.ndarray | None, target_w: int, target_h: int) -> np.ndarray:
     """Resize an image to fit within target_w x target_h, preserving aspect ratio,
     centered on a dark background. Returns a BGR image."""
     canvas = np.full((target_h, target_w, 3), 18, dtype=np.uint8)
@@ -84,8 +78,8 @@ class PerceptionVisualizer(Node):
         self.bridge = CvBridge()
 
         # Main detector images
-        self.face_image: Optional[np.ndarray] = None
-        self.ring_image: Optional[np.ndarray] = None
+        self.face_image: np.ndarray | None = None
+        self.ring_image: np.ndarray | None = None
         self.face_count = 0
         self.ring_count = 0
         self.last_ring_color = '—'
@@ -94,10 +88,10 @@ class PerceptionVisualizer(Node):
         self._ring_positions: set[tuple[float, float]] = set()
 
         # Ring debug images (4 stages)
-        self.ring_debug_binary: Optional[np.ndarray] = None
-        self.ring_debug_ellipses: Optional[np.ndarray] = None
-        self.ring_debug_pairs: Optional[np.ndarray] = None
-        self.ring_debug_color: Optional[np.ndarray] = None
+        self.ring_debug_binary: np.ndarray | None = None
+        self.ring_debug_ellipses: np.ndarray | None = None
+        self.ring_debug_pairs: np.ndarray | None = None
+        self.ring_debug_color: np.ndarray | None = None
 
         # Subscriptions — main
         self.create_subscription(
@@ -163,7 +157,7 @@ class PerceptionVisualizer(Node):
 
     # --- Image conversion -------------------------------------------------
 
-    def _to_bgr(self, msg: Image) -> Optional[np.ndarray]:
+    def _to_bgr(self, msg: Image) -> np.ndarray | None:
         try:
             return np.ascontiguousarray(
                 self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8'))
@@ -171,7 +165,7 @@ class PerceptionVisualizer(Node):
             self.get_logger().warn(f'Image conversion failed: {exc}')
             return None
 
-    def _to_any(self, msg: Image) -> Optional[np.ndarray]:
+    def _to_any(self, msg: Image) -> np.ndarray | None:
         try:
             return np.ascontiguousarray(self.bridge.imgmsg_to_cv2(msg))
         except CvBridgeError as exc:

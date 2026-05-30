@@ -11,36 +11,33 @@ Approach pose is computed along the surface normal (in free space, facing the ob
 
 import math
 from enum import Enum, auto
+from pathlib import Path
 from typing import cast
 
+import numpy as np
 import rclpy
-from rclpy.node import Node
-from rclpy.qos import (
-    QoSDurabilityPolicy, QoSHistoryPolicy,
-    QoSProfile, QoSReliabilityPolicy, qos_profile_sensor_data,
-)
-
+import yaml
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Quaternion
-from nav2_msgs.action import Spin, NavigateToPose
-from nav_msgs.msg import OccupancyGrid # new 
-from std_msgs.msg import String
-from visualization_msgs.msg import Marker, MarkerArray
-
 from irobot_create_msgs.action import Undock
 from irobot_create_msgs.msg import DockStatus
-
-from rclpy.action import ActionClient
 from lifecycle_msgs.srv import GetState
-
-from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
-
 from megatron.speech import Speaker
-
-import numpy as np
-import yaml
-from pathlib import Path
+from nav2_msgs.action import NavigateToPose, Spin
+from nav_msgs.msg import OccupancyGrid  # new 
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+    qos_profile_sensor_data,
+)
+from std_msgs.msg import String
+from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
+from visualization_msgs.msg import Marker, MarkerArray
 
 
 class State(Enum):

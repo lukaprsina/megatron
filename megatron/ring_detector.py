@@ -8,23 +8,15 @@ confirmed detections as PoseStamped with color packed in frame_id ("map|{color}"
 
 import math
 import random as rnd
-from typing import Optional, cast
+from typing import cast
 
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, qos_profile_sensor_data
-from rclpy.time import Time
-
+import cv2
 import message_filters
 import numpy as np
-import cv2
+import rclpy
 import tf2_ros
-
-from sensor_msgs.msg import Image, PointCloud2
-from geometry_msgs.msg import PoseStamped, Quaternion
-from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge, CvBridgeError
-
+from geometry_msgs.msg import PoseStamped, Quaternion
 from megatron.perception_utils import (
     IncrementalTrackManager,
     compute_robust_surface,
@@ -32,7 +24,11 @@ from megatron.perception_utils import (
     normal_to_quaternion,
     transform_point_and_normal,
 )
-
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, qos_profile_sensor_data
+from rclpy.time import Time
+from sensor_msgs.msg import Image, PointCloud2
+from visualization_msgs.msg import Marker, MarkerArray
 
 # ---------------------------------------------------------------------------
 # HSV color ranges for ring classification
@@ -71,14 +67,14 @@ def classify_ring_color(
     inner_ellipse: tuple,
     color_ranges: dict = COLOR_RANGES,
     min_pixels: int = 10,
-) -> tuple[Optional[str], float]:
+) -> tuple[str | None, float]:
     mask = _build_annular_mask(image_bgr.shape, outer_ellipse, inner_ellipse)
     total_pixels = int(cv2.countNonZero(mask))
     if total_pixels < min_pixels:
         return None, 0.0
 
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    best_name: Optional[str] = None
+    best_name: str | None = None
     best_count = 0
 
     for name, ranges in color_ranges.items():
