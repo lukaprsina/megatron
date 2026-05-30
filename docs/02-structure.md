@@ -4,7 +4,7 @@ Files copied:
 
     factory.pgm + factory.yaml → src/megatron/maps/
     dis_tutorial7 → src/dis_tutorial7 (as buildable ROS 2 package)
-    COLCON_IGNORE in vendor/dis_tutorial7/ (to avoid duplicate package error)
+    COLCON_IGNORE in src/vendor/dis_tutorial7/ (to avoid duplicate package error)
     Task2 worlds already exist in dis_tutorial3's install, so world=task2 resolves correctly
 
 New launch files:
