@@ -12,6 +12,7 @@ import math
 import numpy as np
 import tf2_geometry_msgs as tfg
 from geometry_msgs.msg import PointStamped, Vector3Stamped
+from sensor_msgs_py import point_cloud2 as pc2_lib
 
 # ---------------------------------------------------------------------------
 # Depth → 3D projection
@@ -108,8 +109,6 @@ def extract_3d_points_from_pc2(
     -------
     (N, 3) float64 array or empty (0, 3).
     """
-    from sensor_msgs_py import point_cloud2 as pc2_lib
-
     h = pc2_msg.height
     w = pc2_msg.width
     if h <= 1:

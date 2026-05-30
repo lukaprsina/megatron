@@ -9,14 +9,10 @@ class Speaker:
     def __init__(self):
         self._espeak = shutil.which("espeak-ng")
         self._process = None
-        # Logger similar to rclpy Node logging used in other modules
         self._logger = logging.getLogger(__name__)
+        self._node_logger = None
         if self._espeak is None:
             self._logger.warning("espeak-ng not found on PATH; speech will be disabled")
-
-            # If running inside an rclpy Node, you can call set_node_logger(node)
-            # to forward logs to the node's logger (so messages appear with ROS2 formatting).
-            self._node_logger = None
 
     def set_node_logger(self, node) -> None:
         """Use an rclpy Node's logger for output formatting and ROS2 integration.
@@ -61,4 +57,4 @@ class Speaker:
             self._logger.info(f"Started espeak-ng process for text: {text[:100]}")
         except Exception as e:
             # Log unexpected errors when trying to start TTS
-            self._logger.error(f"Failed to start espeak-ng: {e}", exc_info=True)
+            self._logger.error(f"Failed to start espeak-ng: {e}")

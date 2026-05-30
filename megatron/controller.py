@@ -191,10 +191,11 @@ class MissionController(Node):
         self.state = State.WAITING_FOR_NAV2
         self.nav_goal_handle = None
         self.nav_result_future = None
+        self._nav_seq = 0
         self.spin_goal_handle = None
         self.spin_result_future = None
         self.feedback = None
-        self.nav_status = None
+        self.nav_status = GoalStatus.STATUS_UNKNOWN
         self.nav_rejected = False
         self.initial_pose_received = False
         self.is_docked = None
@@ -513,11 +514,15 @@ class MissionController(Node):
         self.nav_rejected = False
         self.nav_in_flight = True
         self._nav_ever_sent = True
+        self._nav_seq += 1
+        seq = self._nav_seq
         future = self.nav_client.send_goal_async(goal_msg, self._feedback_callback)
-        future.add_done_callback(self._nav_goal_response)
+        future.add_done_callback(lambda f, s=seq: self._nav_goal_response(f, s))
         return True
 
-    def _nav_goal_response(self, future):
+    def _nav_goal_response(self, future, seq):
+        if seq != self._nav_seq:
+            return
         self.nav_in_flight = False
         self.nav_status = 0
         self.nav_goal_handle = future.result()
@@ -537,6 +542,7 @@ class MissionController(Node):
         self.nav_status = result.status if result else GoalStatus.STATUS_ABORTED
 
     def _cancel_nav(self):
+        self._nav_seq += 1
         if self.nav_goal_handle is not None:
             self.nav_goal_handle.cancel_goal_async()
             self.nav_goal_handle = None
@@ -780,10 +786,19 @@ class MissionController(Node):
             candidates = self._approach_candidates(
                 approach["pos"], approach["normal"], approach["type"]
             )
-            ax, ay, yaw = candidates[0]
             self.state = State.APPROACHING_OBJECT
-            self._publish_approaching_object(ax, ay, attempt=0, total=len(candidates))
-            self._send_nav_goal(ax, ay, yaw)
+            sent = False
+            for i, (ax, ay, yaw) in enumerate(candidates):
+                self._publish_approaching_object(ax, ay, attempt=i, total=len(candidates))
+                if self._send_nav_goal(ax, ay, yaw):
+                    sent = True
+                    break
+            if not sent:
+                self.get_logger().warn("All approach candidates blocked by costmap, requeuing.")
+                self.pending_approaches.insert(0, approach)
+                self.current_approach = None
+                self.state = State.EXPLORING
+                self._send_next_waypoint()
             return
 
         # Check if current navigation is done (skip during spin — spin has its own
@@ -865,7 +880,8 @@ class MissionController(Node):
                 self._publish_approaching_object(
                     ax, ay, attempt=attempts, total=len(candidates)
                 )
-                self._send_nav_goal(ax, ay, yaw)
+                if not self._send_nav_goal(ax, ay, yaw):
+                    self.nav_rejected = True
             elif attempts < 10 * len(candidates):
                 cycle = int(attempts // len(candidates))
                 t_attempts = attempts - len(candidates) * cycle
@@ -877,21 +893,22 @@ class MissionController(Node):
                 new_distance = (
                     type_distance + self.approach_retry_offset * cycle
                 )  # increase distance every full cycle
-                candidates = self._approach_candidates(
+                retry_candidates = self._approach_candidates(
                     approach["pos"],
                     approach["normal"],
                     approach["type"],
                     distance=new_distance,
                 )
-                ax, ay, yaw = candidates[t_attempts]
+                ax, ay, yaw = retry_candidates[t_attempts]
                 self.get_logger().warn(
                     f"Approach aborted (attempt {attempts}), "
                     f"trying distance {new_distance:.2f}, candidate {t_attempts}: ({ax:.2f}, {ay:.2f})"
                 )
                 self._publish_approaching_object(
-                    ax, ay, attempt=attempts, total=len(candidates)
+                    ax, ay, attempt=attempts, total=len(retry_candidates)
                 )
-                self._send_nav_goal(ax, ay, yaw)
+                if not self._send_nav_goal(ax, ay, yaw):
+                    self.nav_rejected = True
             else:
                 # All candidates exhausted — give up on this approach.
                 self.get_logger().warn(
@@ -955,7 +972,17 @@ class MissionController(Node):
 
         self.get_logger().info(f"Heading to waypoint {self.waypoint_index}")
         x, y, yaw = self.waypoints[self.waypoint_index]
-        self._send_nav_goal(x, y, yaw)
+        if not self._send_nav_goal(x, y, yaw):
+            self.get_logger().warn(f"Waypoint {self.waypoint_index} blocked by costmap, skipping.")
+            self.waypoint_index += 1
+            if self.waypoint_index >= len(self.waypoints):
+                self.waypoint_index = 0
+                self.loop_count += 1
+                if self.loop_count >= self.max_loops:
+                    self._finish()
+                    return
+            self._send_next_waypoint()
+            return
         self._publish_goal_markers()
 
     def _finish(self):
