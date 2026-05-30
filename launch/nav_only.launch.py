@@ -8,82 +8,102 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    pkg_dis_tutorial3 = get_package_share_directory('dis_tutorial3')
-    pkg_megatron = get_package_share_directory('megatron')
+    pkg_dis_tutorial3 = get_package_share_directory("dis_tutorial3")
+    pkg_megatron = get_package_share_directory("megatron")
 
     # Arguments
     args = [
-        DeclareLaunchArgument('world', default_value='task1_yellow_demo',
-                              description='Gazebo world name'),
-        DeclareLaunchArgument('map', default_value=PathJoinSubstitution(
-            [pkg_megatron, 'maps', 'task1.yaml']),
-            description='Map YAML file'),
-        DeclareLaunchArgument('rviz', default_value='true',
-                              choices=['true', 'false']),
-        DeclareLaunchArgument('visualization', default_value='true',
-                      choices=['true', 'false'],
-                      description='Start Megatron perception visualizer'),
-        DeclareLaunchArgument('show_debug_window', default_value='false',
-                      choices=['true', 'false'],
-                      description='Show the combined perception panel in an OpenCV window'),
-        DeclareLaunchArgument('use_sim_time', default_value='true',
-                              choices=['true', 'false']),
-        DeclareLaunchArgument('rviz_config', default_value=PathJoinSubstitution(
-            [pkg_megatron, 'config', 'task1.rviz']),
-            description='RViz config file'),
-        DeclareLaunchArgument('waypoints', default_value="test1.yaml",
-                              description='Waypoints YAML file'),
+        DeclareLaunchArgument(
+            "world", default_value="task1_yellow_demo", description="Gazebo world name"
+        ),
+        DeclareLaunchArgument(
+            "map",
+            default_value=PathJoinSubstitution([pkg_megatron, "maps", "task1.yaml"]),
+            description="Map YAML file",
+        ),
+        DeclareLaunchArgument("rviz", default_value="true", choices=["true", "false"]),
+        DeclareLaunchArgument(
+            "visualization",
+            default_value="true",
+            choices=["true", "false"],
+            description="Start Megatron perception visualizer",
+        ),
+        DeclareLaunchArgument(
+            "show_debug_window",
+            default_value="false",
+            choices=["true", "false"],
+            description="Show the combined perception panel in an OpenCV window",
+        ),
+        DeclareLaunchArgument(
+            "use_sim_time", default_value="true", choices=["true", "false"]
+        ),
+        DeclareLaunchArgument(
+            "rviz_config",
+            default_value=PathJoinSubstitution([pkg_megatron, "config", "task1.rviz"]),
+            description="RViz config file",
+        ),
+        DeclareLaunchArgument(
+            "waypoints", default_value="test1.yaml", description="Waypoints YAML file"
+        ),
     ]
 
     # Include the full simulation + navigation stack from dis_tutorial3
     sim_nav = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            PathJoinSubstitution([pkg_dis_tutorial3, 'launch', 'sim_turtlebot_nav.launch.py'])),
+            PathJoinSubstitution(
+                [pkg_dis_tutorial3, "launch", "sim_turtlebot_nav.launch.py"]
+            )
+        ),
         launch_arguments=[
-            ('world', LaunchConfiguration('world')),
-            ('map', LaunchConfiguration('map')),
-            ('rviz', 'false'),
-            ('use_sim_time', LaunchConfiguration('use_sim_time')),
+            ("world", LaunchConfiguration("world")),
+            ("map", LaunchConfiguration("map")),
+            ("rviz", "false"),
+            ("use_sim_time", LaunchConfiguration("use_sim_time")),
         ],
     )
 
     rviz = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        arguments=['-d', LaunchConfiguration('rviz_config')],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+        package="rviz2",
+        executable="rviz2",
+        name="rviz2",
+        arguments=["-d", LaunchConfiguration("rviz_config")],
+        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
         remappings=[
-            ('/tf', 'tf'),
-            ('/tf_static', 'tf_static'),
+            ("/tf", "tf"),
+            ("/tf_static", "tf_static"),
         ],
-        output='screen',
-        #condition=IfCondition(LaunchConfiguration('rviz')),
+        output="screen",
+        # condition=IfCondition(LaunchConfiguration('rviz')),
     )
 
     # Mission controller
     controller = Node(
-        package='megatron',
-        executable='controller',
-        name='mission_controller',
-        output='screen',
-        parameters=[{
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', LaunchConfiguration('waypoints')]),
-
-        }],
+        package="megatron",
+        executable="controller",
+        name="mission_controller",
+        output="screen",
+        parameters=[
+            {
+                "use_sim_time": LaunchConfiguration("use_sim_time"),
+                "waypoints_file": PathJoinSubstitution(
+                    [pkg_megatron, "waypoints", LaunchConfiguration("waypoints")]
+                ),
+            }
+        ],
     )
 
     visualizer = Node(
-        package='megatron',
-        executable='perception_visualizer',
-        name='perception_visualizer',
-        output='screen',
-        parameters=[{
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'show_window': LaunchConfiguration('show_debug_window'),
-        }],
-        condition=IfCondition(LaunchConfiguration('visualization')),
+        package="megatron",
+        executable="perception_visualizer",
+        name="perception_visualizer",
+        output="screen",
+        parameters=[
+            {
+                "use_sim_time": LaunchConfiguration("use_sim_time"),
+                "show_window": LaunchConfiguration("show_debug_window"),
+            }
+        ],
+        condition=IfCondition(LaunchConfiguration("visualization")),
     )
 
     ld = LaunchDescription(args)

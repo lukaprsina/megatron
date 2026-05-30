@@ -17,6 +17,7 @@ from geometry_msgs.msg import PointStamped, Vector3Stamped
 # Depth → 3D projection
 # ---------------------------------------------------------------------------
 
+
 class DepthCameraGeometry:
     """Extracts 3D points from a depth image using pinhole camera intrinsics.
 
@@ -85,6 +86,7 @@ class DepthCameraGeometry:
 # PointCloud2 → 3D point extraction (organized cloud)
 # ---------------------------------------------------------------------------
 
+
 def extract_3d_points_from_pc2(
     mask: np.ndarray,
     pc2_msg,
@@ -114,7 +116,7 @@ def extract_3d_points_from_pc2(
         # Unorganized cloud — cannot use pixel-level masks
         return np.empty((0, 3), dtype=np.float64)
 
-    pts = pc2_lib.read_points_numpy(pc2_msg, field_names=['x', 'y', 'z'])
+    pts = pc2_lib.read_points_numpy(pc2_msg, field_names=["x", "y", "z"])
     pts = pts.reshape((h, w, 3)).astype(np.float64)
 
     vs, us = np.nonzero(mask)
@@ -137,6 +139,7 @@ def extract_3d_points_from_pc2(
 # ---------------------------------------------------------------------------
 # SVD-based surface fitting
 # ---------------------------------------------------------------------------
+
 
 def compute_robust_surface(
     points_3d: np.ndarray,
@@ -187,6 +190,7 @@ def compute_robust_surface(
 # ---------------------------------------------------------------------------
 # TF2 helpers
 # ---------------------------------------------------------------------------
+
 
 def transform_point_and_normal(point, normal, tf_stamped):
     """Transform a 3D point and direction vector from camera to map frame.
@@ -241,6 +245,7 @@ def normal_to_quaternion(normal_2d):
 # Incremental Track Manager
 # ---------------------------------------------------------------------------
 
+
 class IncrementalTrackManager:
     """Distance-weighted object tracker for static detections.
 
@@ -265,46 +270,46 @@ class IncrementalTrackManager:
         - 'pending'   — observation added to existing unconfirmed track
         """
         obs = {
-            'map_pos': np.asarray(map_point, dtype=np.float64),
-            'normal': np.asarray(normal, dtype=np.float64),
-            'cam_dist': float(cam_dist),
-            'stamp': stamp,
+            "map_pos": np.asarray(map_point, dtype=np.float64),
+            "normal": np.asarray(normal, dtype=np.float64),
+            "cam_dist": float(cam_dist),
+            "stamp": stamp,
         }
         if label is not None:
-            obs['label'] = label
+            obs["label"] = label
 
         # Try to match against existing tracks
         for track in self._tracks:
             center, _ = self.get_best_estimate(track)
             if np.linalg.norm(map_point - center) < self.dedup_distance:
-                track['observations'].append(obs)
+                track["observations"].append(obs)
                 # Update label to most recent if provided
                 if label is not None:
-                    track['label'] = label
-                if track['confirmed']:
-                    return 'updated', track
-                if len(track['observations']) >= self.confirmation_count:
-                    track['confirmed'] = True
-                    return 'confirmed', track
-                return 'pending', track
+                    track["label"] = label
+                if track["confirmed"]:
+                    return "updated", track
+                if len(track["observations"]) >= self.confirmation_count:
+                    track["confirmed"] = True
+                    return "confirmed", track
+                return "pending", track
 
         # No match — new track
         track = {
-            'id': self._next_id,
-            'observations': [obs],
-            'confirmed': False,
-            'label': label,
+            "id": self._next_id,
+            "observations": [obs],
+            "confirmed": False,
+            "label": label,
         }
         self._next_id += 1
         self._tracks.append(track)
-        return 'new', track
+        return "new", track
 
     def get_best_estimate(self, track):
         """Inverse-distance² weighted mean of position and normal.
 
         Returns (position, normal) as (3,) numpy arrays.
         """
-        observations = track['observations']
+        observations = track["observations"]
         if not observations:
             return np.zeros(3), np.array([1.0, 0.0, 0.0])
 
@@ -312,10 +317,10 @@ class IncrementalTrackManager:
         positions = []
         normals = []
         for obs in observations:
-            w = 1.0 / (obs['cam_dist'] ** 2 + 0.01)
+            w = 1.0 / (obs["cam_dist"] ** 2 + 0.01)
             weights.append(w)
-            positions.append(obs['map_pos'])
-            normals.append(obs['normal'])
+            positions.append(obs["map_pos"])
+            normals.append(obs["normal"])
 
         weights = np.array(weights)
         positions = np.array(positions)
@@ -334,10 +339,12 @@ class IncrementalTrackManager:
         return pos, n
 
     def get_confirmed_tracks(self):
-        return [t for t in self._tracks if t['confirmed']]
+        return [t for t in self._tracks if t["confirmed"]]
 
     def get_unconfirmed_tracks(self):
-        return [t for t in self._tracks if not t['confirmed'] and len(t['observations']) > 0]
+        return [
+            t for t in self._tracks if not t["confirmed"] and len(t["observations"]) > 0
+        ]
 
     def prune_stale(self, max_age_sec, now_stamp):
         """Remove tracks whose most recent observation is older than max_age_sec.
@@ -353,11 +360,11 @@ class IncrementalTrackManager:
 
         to_remove = []
         for i, track in enumerate(self._tracks):
-            if not track['observations']:
+            if not track["observations"]:
                 to_remove.append(i)
                 continue
-            last = track['observations'][-1]
-            last_stamp = last['stamp']
+            last = track["observations"][-1]
+            last_stamp = last["stamp"]
             if isinstance(last_stamp, (int, float)):
                 last_sec = float(last_stamp)
             else:

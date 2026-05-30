@@ -20,70 +20,108 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 
-pkg_dis_tutorial3 = get_package_share_directory('dis_tutorial3')
-pkg_megatron = get_package_share_directory('megatron')
+pkg_dis_tutorial3 = get_package_share_directory("dis_tutorial3")
+pkg_megatron = get_package_share_directory("megatron")
 
 ARGUMENTS = [
-    DeclareLaunchArgument('namespace', default_value='', description='Robot namespace'),
-    DeclareLaunchArgument('rviz', default_value='true', choices=['true', 'false'], description='Start rviz.'),
-    DeclareLaunchArgument('world', default_value='bird_demo1', description='Simulation World'),
-    DeclareLaunchArgument('model', default_value='standard', choices=['standard', 'lite'], description='Turtlebot4 Model'),
-    DeclareLaunchArgument('use_sim_time', default_value='true', choices=['true', 'false'], description='use_sim_time'),
-    DeclareLaunchArgument('map', default_value=PathJoinSubstitution([pkg_dis_tutorial3, 'maps', 'bird_demo.yaml']), description='Full path to map yaml file to load'),
-    DeclareLaunchArgument('nav2_config', default_value=PathJoinSubstitution([pkg_megatron, 'config', 'nav2.yaml']), description='Full path to nav2 config file to load')
+    DeclareLaunchArgument("namespace", default_value="", description="Robot namespace"),
+    DeclareLaunchArgument(
+        "rviz",
+        default_value="true",
+        choices=["true", "false"],
+        description="Start rviz.",
+    ),
+    DeclareLaunchArgument(
+        "world", default_value="bird_demo1", description="Simulation World"
+    ),
+    DeclareLaunchArgument(
+        "model",
+        default_value="standard",
+        choices=["standard", "lite"],
+        description="Turtlebot4 Model",
+    ),
+    DeclareLaunchArgument(
+        "use_sim_time",
+        default_value="true",
+        choices=["true", "false"],
+        description="use_sim_time",
+    ),
+    DeclareLaunchArgument(
+        "map",
+        default_value=PathJoinSubstitution(
+            [pkg_dis_tutorial3, "maps", "bird_demo.yaml"]
+        ),
+        description="Full path to map yaml file to load",
+    ),
+    DeclareLaunchArgument(
+        "nav2_config",
+        default_value=PathJoinSubstitution([pkg_megatron, "config", "nav2.yaml"]),
+        description="Full path to nav2 config file to load",
+    ),
 ]
 
-for pose_element in ['x', 'y', 'z', 'yaw']:
-    ARGUMENTS.append(DeclareLaunchArgument(pose_element, default_value='0.0', description=f'{pose_element} component of the robot pose.'))
+for pose_element in ["x", "y", "z", "yaw"]:
+    ARGUMENTS.append(
+        DeclareLaunchArgument(
+            pose_element,
+            default_value="0.0",
+            description=f"{pose_element} component of the robot pose.",
+        )
+    )
 
-def generate_launch_description():    
+
+def generate_launch_description():
     # Launch Files
-    gazebo_launch = PathJoinSubstitution([pkg_dis_tutorial3, 'launch', 'sim.launch.py'])
-    robot_spawn_launch = PathJoinSubstitution([pkg_dis_tutorial3, 'launch', 'turtlebot4_spawn.launch.py'])
-    localization_launch = PathJoinSubstitution([pkg_dis_tutorial3, 'launch', 'localization.launch.py'])
-    nav2_launch = PathJoinSubstitution([pkg_dis_tutorial3, 'launch', 'nav2.launch.py'])
+    gazebo_launch = PathJoinSubstitution([pkg_dis_tutorial3, "launch", "sim.launch.py"])
+    robot_spawn_launch = PathJoinSubstitution(
+        [pkg_dis_tutorial3, "launch", "turtlebot4_spawn.launch.py"]
+    )
+    localization_launch = PathJoinSubstitution(
+        [pkg_dis_tutorial3, "launch", "localization.launch.py"]
+    )
+    nav2_launch = PathJoinSubstitution([pkg_dis_tutorial3, "launch", "nav2.launch.py"])
 
-    #Simulator and world
+    # Simulator and world
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([gazebo_launch]),
         launch_arguments=[
-            ('world', LaunchConfiguration('world')),
-            ('use_sim_time', LaunchConfiguration('use_sim_time'))
-        ]
+            ("world", LaunchConfiguration("world")),
+            ("use_sim_time", LaunchConfiguration("use_sim_time")),
+        ],
     )
 
-    #Spawn turtlebot in the world
+    # Spawn turtlebot in the world
     robot_spawn = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([robot_spawn_launch]),
         launch_arguments=[
-            ('namespace', LaunchConfiguration('namespace')),
-            ('rviz', LaunchConfiguration('rviz')),
-            ('x', LaunchConfiguration('x')),
-            ('y', LaunchConfiguration('y')),
-            ('z', LaunchConfiguration('z')),
-            ('yaw', LaunchConfiguration('yaw')),
-            ('use_sim_time', LaunchConfiguration('use_sim_time'))
-        ]
+            ("namespace", LaunchConfiguration("namespace")),
+            ("rviz", LaunchConfiguration("rviz")),
+            ("x", LaunchConfiguration("x")),
+            ("y", LaunchConfiguration("y")),
+            ("z", LaunchConfiguration("z")),
+            ("yaw", LaunchConfiguration("yaw")),
+            ("use_sim_time", LaunchConfiguration("use_sim_time")),
+        ],
     )
-    
+
     # Localization
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([localization_launch]),
         launch_arguments=[
-            ('namespace', LaunchConfiguration('namespace')),
-            ('use_sim_time', LaunchConfiguration('use_sim_time')),
-            ('map', LaunchConfiguration('map')),
-        ]
+            ("namespace", LaunchConfiguration("namespace")),
+            ("use_sim_time", LaunchConfiguration("use_sim_time")),
+            ("map", LaunchConfiguration("map")),
+        ],
     )
 
     # Nav2
     nav2 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([nav2_launch]),
         launch_arguments=[
-            ('namespace', LaunchConfiguration('namespace')),
-            ('use_sim_time', LaunchConfiguration('use_sim_time')),
-            ('params_file', LaunchConfiguration('nav2_config')),
-        ]
+            ("namespace", LaunchConfiguration("namespace")),
+            ("use_sim_time", LaunchConfiguration("use_sim_time")),
+            ("params_file", LaunchConfiguration("nav2_config")),
+        ],
     )
 
     # Create launch description and add actions

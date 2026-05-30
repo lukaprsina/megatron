@@ -35,17 +35,21 @@ from visualization_msgs.msg import Marker, MarkerArray
 # ---------------------------------------------------------------------------
 
 COLOR_RANGES = {
-    'red':    {'lower1': (0, 100, 100),   'upper1': (10, 255, 255),
-               'lower2': (160, 100, 100), 'upper2': (180, 255, 255),
-               'rgb': (1.0, 0.0, 0.0)},
-    'green':  {'lower1': (35, 80, 80),    'upper1': (85, 255, 255),
-               'rgb': (0.0, 1.0, 0.0)},
-    'blue':   {'lower1': (90, 80, 80),    'upper1': (130, 255, 255),
-               'rgb': (0.0, 0.0, 1.0)},
-    'yellow': {'lower1': (20, 100, 100),  'upper1': (35, 255, 255),
-               'rgb': (1.0, 1.0, 0.0)},
-    'black':  {'lower1': (0, 0, 0),       'upper1': (180, 255, 35),
-               'rgb': (0.2, 0.2, 0.2)},
+    "red": {
+        "lower1": (0, 100, 100),
+        "upper1": (10, 255, 255),
+        "lower2": (160, 100, 100),
+        "upper2": (180, 255, 255),
+        "rgb": (1.0, 0.0, 0.0),
+    },
+    "green": {"lower1": (35, 80, 80), "upper1": (85, 255, 255), "rgb": (0.0, 1.0, 0.0)},
+    "blue": {"lower1": (90, 80, 80), "upper1": (130, 255, 255), "rgb": (0.0, 0.0, 1.0)},
+    "yellow": {
+        "lower1": (20, 100, 100),
+        "upper1": (35, 255, 255),
+        "rgb": (1.0, 1.0, 0.0),
+    },
+    "black": {"lower1": (0, 0, 0), "upper1": (180, 255, 35), "rgb": (0.2, 0.2, 0.2)},
 }
 
 
@@ -53,8 +57,10 @@ COLOR_RANGES = {
 # Color classification helpers
 # ---------------------------------------------------------------------------
 
-def _build_annular_mask(shape: tuple,
-                        outer_ellipse: tuple, inner_ellipse: tuple) -> np.ndarray:
+
+def _build_annular_mask(
+    shape: tuple, outer_ellipse: tuple, inner_ellipse: tuple
+) -> np.ndarray:
     mask = np.zeros(shape[:2], dtype=np.uint8)
     cv2.ellipse(mask, outer_ellipse, (255,), -1)
     cv2.ellipse(mask, inner_ellipse, (0,), -1)
@@ -78,9 +84,13 @@ def classify_ring_color(
     best_count = 0
 
     for name, ranges in color_ranges.items():
-        color_mask = cv2.inRange(hsv, np.array(ranges['lower1']), np.array(ranges['upper1']))
-        if 'lower2' in ranges:
-            color_mask2 = cv2.inRange(hsv, np.array(ranges['lower2']), np.array(ranges['upper2']))
+        color_mask = cv2.inRange(
+            hsv, np.array(ranges["lower1"]), np.array(ranges["upper1"])
+        )
+        if "lower2" in ranges:
+            color_mask2 = cv2.inRange(
+                hsv, np.array(ranges["lower2"]), np.array(ranges["upper2"])
+            )
             color_mask = cv2.bitwise_or(color_mask, color_mask2)
         hit = cv2.bitwise_and(color_mask, mask)
         count = int(cv2.countNonZero(hit))
@@ -92,14 +102,18 @@ def classify_ring_color(
     return best_name, confidence
 
 
-def _check_hole(image_gray: np.ndarray,
-                outer_ellipse: tuple, inner_ellipse: tuple,
-                min_brightness_diff: float = 20.0, logger = None) -> bool:
+def _check_hole(
+    image_gray: np.ndarray,
+    outer_ellipse: tuple,
+    inner_ellipse: tuple,
+    min_brightness_diff: float = 20.0,
+    logger=None,
+) -> bool:
     h, w = image_gray.shape[:2]
     band_mask = _build_annular_mask((h, w), outer_ellipse, inner_ellipse)
     inner_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.ellipse(inner_mask, inner_ellipse, (255,), -1)
-    
+
     # band_pixels = cv2.mean(image_gray, mask=band_mask)[0]
     # inner_pixels = cv2.mean(image_gray, mask=inner_mask)[0]
 
@@ -115,13 +129,18 @@ def _check_hole(image_gray: np.ndarray,
     band_median = float(np.median(band_vals))
     inner_median = float(np.median(inner_vals))
     if logger:
-        logger.info(f'[DBG] Hole check: band median={band_median:.1f}, inner median={inner_median:.1f}, diff={abs(band_median - inner_median):.1f}')
+        logger.info(
+            f"[DBG] Hole check: band median={band_median:.1f}, inner median={inner_median:.1f}, diff={abs(band_median - inner_median):.1f}"
+        )
     return abs(band_median - inner_median) >= min_brightness_diff
-    
 
-def _check_band_uniformity(image_bgr: np.ndarray,
-                           outer_ellipse: tuple, inner_ellipse: tuple,
-                           max_std: float = 35.0) -> bool:
+
+def _check_band_uniformity(
+    image_bgr: np.ndarray,
+    outer_ellipse: tuple,
+    inner_ellipse: tuple,
+    max_std: float = 35.0,
+) -> bool:
     """Reject candidates whose annular band has high color variance.
 
     Real rings are a single solid color (low V-channel std).  Face regions,
@@ -136,10 +155,13 @@ def _check_band_uniformity(image_bgr: np.ndarray,
     return float(np.std(pixels)) <= max_std
 
 
-def _check_depth_discontinuity(pc2_msg: PointCloud2,
-                                outer_ellipse: tuple, inner_ellipse: tuple,
-                                shape: tuple,
-                                min_depth_gap: float = 0.15) -> bool:
+def _check_depth_discontinuity(
+    pc2_msg: PointCloud2,
+    outer_ellipse: tuple,
+    inner_ellipse: tuple,
+    shape: tuple,
+    min_depth_gap: float = 0.15,
+) -> bool:
     """Check if the ring hole shows a depth gap vs. the band.
 
     For free-standing rings the hole is open air (NaN/far) while the band is at
@@ -181,6 +203,7 @@ def _check_depth_discontinuity(pc2_msg: PointCloud2,
 # Ellipse quality scoring
 # ---------------------------------------------------------------------------
 
+
 def _ellipse_area(e: tuple) -> float:
     return math.pi * (e[1][0] / 2.0) * (e[1][1] / 2.0)
 
@@ -203,8 +226,9 @@ def _score_to_bgr(score: float) -> tuple[int, int, int]:
 # Ellipse-pair ring candidate detection
 # ---------------------------------------------------------------------------
 
+
 def _ellipse_contains(larger: tuple, smaller: tuple) -> bool:
-    return (larger[1][0] >= smaller[1][0] and larger[1][1] >= smaller[1][1])
+    return larger[1][0] >= smaller[1][0] and larger[1][1] >= smaller[1][1]
 
 
 def _pair_score(e1: tuple, e2: tuple) -> float:
@@ -234,68 +258,82 @@ def _pair_score(e1: tuple, e2: tuple) -> float:
 # ROS 2 node
 # ---------------------------------------------------------------------------
 
-class RingDetectorNode(Node):
 
+class RingDetectorNode(Node):
     def __init__(self):
-        super().__init__('ring_detector')
+        super().__init__("ring_detector")
 
         # Commented out are the old parameter values
 
         # ---- Parameters ----
-        self.declare_parameter('confirmation_count', 3)
-        self.declare_parameter('dedup_distance', 0.5)
-        self.declare_parameter('min_inference_period', 0.2)
-        self.declare_parameter('track_max_age', 30.0)
-        
-        # Adaptive threshold
-        self.declare_parameter('thresh_block_size', 15)
-        self.declare_parameter('thresh_c', 25)
-        # Ellipse filtering
-        self.declare_parameter('min_contour_points', 8)
-        self.declare_parameter('max_axis', 200.0)
-        self.declare_parameter('min_axis', 3.0)
-        self.declare_parameter('max_aspect_ratio', 1.8)
+        self.declare_parameter("confirmation_count", 3)
+        self.declare_parameter("dedup_distance", 0.5)
+        self.declare_parameter("min_inference_period", 0.2)
+        self.declare_parameter("track_max_age", 30.0)
 
-        #self.declare_parameter('min_contour_points', 20)
-        #self.declare_parameter('min_axis', 6.0)
+        # Adaptive threshold
+        self.declare_parameter("thresh_block_size", 15)
+        self.declare_parameter("thresh_c", 25)
+        # Ellipse filtering
+        self.declare_parameter("min_contour_points", 8)
+        self.declare_parameter("max_axis", 200.0)
+        self.declare_parameter("min_axis", 3.0)
+        self.declare_parameter("max_aspect_ratio", 1.8)
+
+        # self.declare_parameter('min_contour_points', 20)
+        # self.declare_parameter('min_axis', 6.0)
 
         # Pair matching
-        self.declare_parameter('center_thr', 15.0)
+        self.declare_parameter("center_thr", 15.0)
         # self.declare_parameter('min_pair_score', 0.40)
-        self.declare_parameter('min_pair_score', 0.30)
+        self.declare_parameter("min_pair_score", 0.30)
         # Color classification
-        self.declare_parameter('min_color_confidence', 0.15)
-        self.declare_parameter('min_color_pixels', 6)
+        self.declare_parameter("min_color_confidence", 0.15)
+        self.declare_parameter("min_color_pixels", 6)
         # Hole check
-        self.declare_parameter('min_brightness_diff', 8.0)
+        self.declare_parameter("min_brightness_diff", 8.0)
         # self.declare_parameter('min_brightness_diff', 20.0)
-        
+
         # Band uniformity (low = solid color ring, high = textured face/wall)
-        self.declare_parameter('max_band_std', 35.0)
+        self.declare_parameter("max_band_std", 35.0)
         # Depth discontinuity (hanging rings have gap behind hole)
-        self.declare_parameter('min_depth_gap', 0.15)
-        self.declare_parameter('min_ring_points_3d', 3)
+        self.declare_parameter("min_depth_gap", 0.15)
+        self.declare_parameter("min_ring_points_3d", 3)
 
-            
-
-        self.confirmation_count = cast(int, self.get_parameter('confirmation_count').value)
-        self.dedup_distance = cast(float, self.get_parameter('dedup_distance').value)
-        self.min_inference_period = cast(float, self.get_parameter('min_inference_period').value)
-        self.track_max_age = cast(float, self.get_parameter('track_max_age').value)
-        self.thresh_block_size = cast(int, self.get_parameter('thresh_block_size').value)
-        self.thresh_c = cast(int, self.get_parameter('thresh_c').value)
-        self.min_contour_points = cast(int, self.get_parameter('min_contour_points').value)
-        self.max_axis = cast(float, self.get_parameter('max_axis').value)
-        self.min_axis = cast(float, self.get_parameter('min_axis').value)
-        self.max_aspect_ratio = cast(float, self.get_parameter('max_aspect_ratio').value)
-        self.center_thr = cast(float, self.get_parameter('center_thr').value)
-        self.min_pair_score = cast(float, self.get_parameter('min_pair_score').value)
-        self.min_color_confidence = cast(float, self.get_parameter('min_color_confidence').value)
-        self.min_color_pixels = cast(int, self.get_parameter('min_color_pixels').value)
-        self.min_brightness_diff = cast(float, self.get_parameter('min_brightness_diff').value)
-        self.max_band_std = cast(float, self.get_parameter('max_band_std').value)
-        self.min_depth_gap = cast(float, self.get_parameter('min_depth_gap').value)
-        self.min_ring_points_3d = cast(int, self.get_parameter('min_ring_points_3d').value)
+        self.confirmation_count = cast(
+            int, self.get_parameter("confirmation_count").value
+        )
+        self.dedup_distance = cast(float, self.get_parameter("dedup_distance").value)
+        self.min_inference_period = cast(
+            float, self.get_parameter("min_inference_period").value
+        )
+        self.track_max_age = cast(float, self.get_parameter("track_max_age").value)
+        self.thresh_block_size = cast(
+            int, self.get_parameter("thresh_block_size").value
+        )
+        self.thresh_c = cast(int, self.get_parameter("thresh_c").value)
+        self.min_contour_points = cast(
+            int, self.get_parameter("min_contour_points").value
+        )
+        self.max_axis = cast(float, self.get_parameter("max_axis").value)
+        self.min_axis = cast(float, self.get_parameter("min_axis").value)
+        self.max_aspect_ratio = cast(
+            float, self.get_parameter("max_aspect_ratio").value
+        )
+        self.center_thr = cast(float, self.get_parameter("center_thr").value)
+        self.min_pair_score = cast(float, self.get_parameter("min_pair_score").value)
+        self.min_color_confidence = cast(
+            float, self.get_parameter("min_color_confidence").value
+        )
+        self.min_color_pixels = cast(int, self.get_parameter("min_color_pixels").value)
+        self.min_brightness_diff = cast(
+            float, self.get_parameter("min_brightness_diff").value
+        )
+        self.max_band_std = cast(float, self.get_parameter("max_band_std").value)
+        self.min_depth_gap = cast(float, self.get_parameter("min_depth_gap").value)
+        self.min_ring_points_3d = cast(
+            int, self.get_parameter("min_ring_points_3d").value
+        )
 
         # Enforce odd block size >= 3
         if self.thresh_block_size % 2 == 0:
@@ -311,36 +349,49 @@ class RingDetectorNode(Node):
 
         # Synced RGB + PointCloud2 via message_filters
         self.rgb_sub = message_filters.Subscriber(
-            self, Image, '/oakd/rgb/preview/image_raw',
-            qos_profile=qos_profile_sensor_data)
+            self,
+            Image,
+            "/oakd/rgb/preview/image_raw",
+            qos_profile=qos_profile_sensor_data,
+        )
         self.pc2_sub = message_filters.Subscriber(
-            self, PointCloud2, '/oakd/rgb/preview/depth/points',
-            qos_profile=qos_profile_sensor_data)
+            self,
+            PointCloud2,
+            "/oakd/rgb/preview/depth/points",
+            qos_profile=qos_profile_sensor_data,
+        )
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.pc2_sub], queue_size=10, slop=0.15)
+            [self.rgb_sub, self.pc2_sub], queue_size=10, slop=0.15
+        )
         self.sync.registerCallback(self._synced_callback)
 
         # Publishers — detections
-        self.ring_pub = self.create_publisher(PoseStamped, '/detected_rings', 10)
+        self.ring_pub = self.create_publisher(PoseStamped, "/detected_rings", 10)
         self.marker_pub = self.create_publisher(
-            MarkerArray, '/ring_markers', QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT))
-        self.image_pub = self.create_publisher(Image, '/ring_detections_image', 10)
+            MarkerArray,
+            "/ring_markers",
+            QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT),
+        )
+        self.image_pub = self.create_publisher(Image, "/ring_detections_image", 10)
 
         # Publishers — debug (4 stages)
-        self.debug_binary_pub = self.create_publisher(Image, '/ring_debug/binary', 10)
-        self.debug_ellipses_pub = self.create_publisher(Image, '/ring_debug/ellipses', 10)
-        self.debug_pairs_pub = self.create_publisher(Image, '/ring_debug/pairs', 10)
-        self.debug_color_pub = self.create_publisher(Image, '/ring_debug/color', 10)
+        self.debug_binary_pub = self.create_publisher(Image, "/ring_debug/binary", 10)
+        self.debug_ellipses_pub = self.create_publisher(
+            Image, "/ring_debug/ellipses", 10
+        )
+        self.debug_pairs_pub = self.create_publisher(Image, "/ring_debug/pairs", 10)
+        self.debug_color_pub = self.create_publisher(Image, "/ring_debug/color", 10)
 
         # Track manager
         self.track_manager = IncrementalTrackManager(
             dedup_distance=self.dedup_distance,
-            confirmation_count=self.confirmation_count)
+            confirmation_count=self.confirmation_count,
+        )
 
         # Rate limiting
         self.last_inference_time = 0.0
 
-        self.get_logger().info('Ring detector initialized (PointCloud2 mode).')
+        self.get_logger().info("Ring detector initialized (PointCloud2 mode).")
 
     # ------------------------------------------------------------------
     # Synced RGB + PointCloud2 callback
@@ -355,9 +406,9 @@ class RingDetectorNode(Node):
 
         # Convert RGB image
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
+            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
         except CvBridgeError as e:
-            self.get_logger().error(f'Image conversion failed: {e}')
+            self.get_logger().error(f"Image conversion failed: {e}")
             return
 
         h, w = cv_image.shape[:2]
@@ -365,32 +416,35 @@ class RingDetectorNode(Node):
         # Get TF: PC2 frame → map
         frame_id = pc2_msg.header.frame_id
         if not frame_id:
-            frame_id = 'oakd_rgb_camera_optical_frame'
+            frame_id = "oakd_rgb_camera_optical_frame"
         try:
-            tf_stamped = self.tf_buffer.lookup_transform('map', frame_id, Time())
+            tf_stamped = self.tf_buffer.lookup_transform("map", frame_id, Time())
         except Exception as e:
-            self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=2.0)
+            self.get_logger().warn(f"TF lookup failed: {e}", throttle_duration_sec=2.0)
             return
 
         # ---- Stage 1: adaptive threshold + saturation mask -> binary ----
-        
+
         # 1. Existing grayscale adaptive threshold (background white, rings/edges black)
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
         thresh_gray = cv2.adaptiveThreshold(
-            gray, 255,
-            cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,
-            self.thresh_block_size, self.thresh_c,
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_MEAN_C,
+            cv2.THRESH_BINARY,
+            self.thresh_block_size,
+            self.thresh_c,
         )
 
         # 2. Global saturation threshold
         hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
         s_channel = hsv[:, :, 1]
-        
+
         # INVERTED THRESHOLD: Vivid things become BLACK (0), dull things become WHITE (255)
         # S-values in Gazebo for these rings are usually very high, 60 is a safe threshold
         _, thresh_color_inv = cv2.threshold(s_channel, 130, 255, cv2.THRESH_BINARY_INV)
 
-        # 3. Combine with AND! 
+        # 3. Combine with AND!
         # If a pixel is black (0) in EITHER image, it becomes black in the final image.
         thresh = cv2.bitwise_and(thresh_gray, thresh_color_inv)
 
@@ -400,9 +454,9 @@ class RingDetectorNode(Node):
         fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k_close, iterations=2)
         # k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         # fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k_open, iterations=1)
-        
+
         thresh = cv2.bitwise_not(fg)
-        
+
         self._publish_debug(self.debug_binary_pub, thresh, mono=True)
         # ---- Stage 2: contour extraction -> ellipse fitting & scoring ----
         contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -429,15 +483,20 @@ class RingDetectorNode(Node):
             score = _ellipse_score(cnt, ellipse)
             ellipses.append((ellipse, cnt, score))
 
-            #color_bgr = _score_to_bgr(score)
+            # color_bgr = _score_to_bgr(score)
             color_bgr = (rnd.randint(0, 255), rnd.randint(0, 255), rnd.randint(0, 255))
             cv2.ellipse(debug_ellipses_img, ellipse, color_bgr, 1)
             cv2.circle(debug_ellipses_img, (int(ex), int(ey)), 2, color_bgr, -1)
-            cv2.putText(debug_ellipses_img, f'{score:.2f}',
-                        (int(ex) + 5, int(ey) - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.32, color_bgr, 1)
+            cv2.putText(
+                debug_ellipses_img,
+                f"{score:.2f}",
+                (int(ex) + 5, int(ey) - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.32,
+                color_bgr,
+                1,
+            )
 
-            
         self._publish_debug(self.debug_ellipses_pub, debug_ellipses_img)
 
         # ---- Stage 3: concentric pair matching ----
@@ -487,9 +546,15 @@ class RingDetectorNode(Node):
                 cv2.ellipse(debug_pairs_img, outer, (0, 255, 0), 2)
                 cv2.ellipse(debug_pairs_img, inner, (0, 255, 0), 2)
                 cv2.circle(debug_pairs_img, (cx_px, cy_px), 5, (0, 255, 0), -1)
-                cv2.putText(debug_pairs_img, f'ps={ps:.2f}',
-                            (cx_px + 8, cy_px - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                cv2.putText(
+                    debug_pairs_img,
+                    f"ps={ps:.2f}",
+                    (cx_px + 8, cy_px - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (0, 255, 0),
+                    1,
+                )
 
         self._publish_debug(self.debug_pairs_pub, debug_pairs_img)
 
@@ -497,7 +562,7 @@ class RingDetectorNode(Node):
         debug_color_img = cv_image.copy()
         output_img = cv_image.copy()
 
-        for outer, inner, ps, (cx_px, cy_px) in ring_candidates:
+        for outer, inner, _ps, (cx_px, cy_px) in ring_candidates:
             # Hole check and band uniformity are disabled below.
             # They both failed for the green free-standing ring in Gazebo
             # (insufficient brightness contrast, high V-channel variance).
@@ -525,47 +590,74 @@ class RingDetectorNode(Node):
             #     continue
 
             color_name, confidence = classify_ring_color(
-                cv_image, outer, inner, min_pixels=self.min_color_pixels)
+                cv_image, outer, inner, min_pixels=self.min_color_pixels
+            )
 
             if color_name is None or confidence < self.min_color_confidence:
                 cv2.ellipse(debug_color_img, outer, (128, 128, 128), 1)
                 cv2.ellipse(debug_color_img, inner, (128, 128, 128), 1)
-                cv2.putText(debug_color_img, f'? ({confidence:.2f})',
-                            (cx_px + 8, cy_px),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
+                cv2.putText(
+                    debug_color_img,
+                    f"? ({confidence:.2f})",
+                    (cx_px + 8, cy_px),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (128, 128, 128),
+                    1,
+                )
                 continue
 
             # Draw colored overlay on debug image
             overlay = debug_color_img.copy()
             band_mask = _build_annular_mask(cv_image.shape, outer, inner)
-            rgb = COLOR_RANGES.get(color_name, {'rgb': (1.0, 1.0, 1.0)})['rgb']
+            rgb = COLOR_RANGES.get(color_name, {"rgb": (1.0, 1.0, 1.0)})["rgb"]
             fill_color = (int(rgb[2] * 255), int(rgb[1] * 255), int(rgb[0] * 255))
             overlay[band_mask > 0] = fill_color
             cv2.addWeighted(overlay, 0.4, debug_color_img, 0.6, 0, debug_color_img)
             cv2.ellipse(debug_color_img, outer, fill_color, 2)
             cv2.ellipse(debug_color_img, inner, fill_color, 2)
             cv2.circle(debug_color_img, (cx_px, cy_px), 5, fill_color, -1)
-            cv2.putText(debug_color_img, f'{color_name} ({confidence:.2f})',
-                        (cx_px + 8, cy_px),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, fill_color, 2)
+            cv2.putText(
+                debug_color_img,
+                f"{color_name} ({confidence:.2f})",
+                (cx_px + 8, cy_px),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                fill_color,
+                2,
+            )
 
             # Draw on main output image
             cv2.ellipse(output_img, outer, (0, 255, 0), 2)
             cv2.ellipse(output_img, inner, (0, 255, 0), 2)
             cv2.circle(output_img, (cx_px, cy_px), 4, (0, 255, 0), -1)
-            cv2.putText(output_img, color_name, (cx_px + 10, cy_px),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv2.putText(
+                output_img,
+                color_name,
+                (cx_px + 10, cy_px),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                2,
+            )
 
-        
             # Depth discontinuity: true 3D rings have open air behind the hole.
             # Depth discontinuity: additive signal for hanging rings
             has_depth_gap = _check_depth_discontinuity(
-                pc2_msg, outer, inner, cv_image.shape, self.min_depth_gap)
-        
+                pc2_msg, outer, inner, cv_image.shape, self.min_depth_gap
+            )
+
             if not has_depth_gap:
                 # Hole is at same depth as ring band → wall-mounted, reject
-                cv2.putText(debug_color_img, 'wall', (cx_px + 8, cy_px + 12),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 80, 200), 1)
+                cv2.putText(
+                    debug_color_img,
+                    "wall",
+                    (cx_px + 8, cy_px + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (0, 80, 200),
+                    1,
+                )
                 # Yes this filters rings on walls
                 # self.get_logger().info(
                 #     f'[DBG] Candidate at ({cx_px}, {cy_px}) classified as {color_name} but failed depth gap check (likely wall-mounted), skipping.')
@@ -576,41 +668,44 @@ class RingDetectorNode(Node):
             points_3d = extract_3d_points_from_pc2(annular_mask, pc2_msg)
             if len(points_3d) < self.min_ring_points_3d:
                 continue
-            
+
             result = compute_robust_surface(points_3d)
             if result is None:
                 continue
-            
+
             centroid, normal = result
 
             # Transform to map frame
             map_point, map_normal = transform_point_and_normal(
-                centroid, normal, tf_stamped)
+                centroid, normal, tf_stamped
+            )
 
             cam_dist = float(np.linalg.norm(centroid))
 
             # Feed to tracker
             status, track = self.track_manager.add_observation(
-                map_point, map_normal, cam_dist,
-                rgb_msg.header.stamp, label=color_name)
+                map_point, map_normal, cam_dist, rgb_msg.header.stamp, label=color_name
+            )
 
-            if status == 'confirmed':
+            if status == "confirmed":
                 self._publish_detection(track, rgb_msg.header.stamp)
                 pos, _ = self.track_manager.get_best_estimate(track)
-                track['_last_published_pos'] = pos.copy()
-                track['_update_count_since_publish'] = 0
-            elif status == 'updated':
+                track["_last_published_pos"] = pos.copy()
+                track["_update_count_since_publish"] = 0
+            elif status == "updated":
                 pos, _ = self.track_manager.get_best_estimate(track)
-                last_pos = track.get('_last_published_pos')
-                update_count = track.get('_update_count_since_publish', 0)
-                if (last_pos is None
-                        or np.linalg.norm(pos - last_pos) > 0.05
-                        or update_count >= 5):
+                last_pos = track.get("_last_published_pos")
+                update_count = track.get("_update_count_since_publish", 0)
+                if (
+                    last_pos is None
+                    or np.linalg.norm(pos - last_pos) > 0.05
+                    or update_count >= 5
+                ):
                     self._publish_detection(track, rgb_msg.header.stamp)
-                    track['_last_published_pos'] = pos.copy()
-                    track['_update_count_since_publish'] = 0
+                    track["_last_published_pos"] = pos.copy()
+                    track["_update_count_since_publish"] = 0
                 else:
-                    track['_update_count_since_publish'] = update_count + 1
+                    track["_update_count_since_publish"] = update_count + 1
 
         # Publish debug 4 — color
         self._publish_debug(self.debug_color_pub, debug_color_img)
@@ -619,7 +714,7 @@ class RingDetectorNode(Node):
 
         # Publish main detections image
         try:
-            self.image_pub.publish(self.bridge.cv2_to_imgmsg(output_img, 'bgr8'))
+            self.image_pub.publish(self.bridge.cv2_to_imgmsg(output_img, "bgr8"))
         except CvBridgeError:
             pass
 
@@ -629,15 +724,16 @@ class RingDetectorNode(Node):
 
     def _publish_detection(self, track, stamp):
         pos, normal = self.track_manager.get_best_estimate(track)
-        color_name = track.get('label', 'unknown')
+        color_name = track.get("label", "unknown")
 
         self.get_logger().info(
-            f'Ring #{track["id"]} ({color_name}) confirmed at '
-            f'({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})')
+            f"Ring #{track['id']} ({color_name}) confirmed at "
+            f"({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
+        )
 
         # PoseStamped: pack color into frame_id as "map|{color}"
         pose = PoseStamped()
-        pose.header.frame_id = f'map|{color_name}'
+        pose.header.frame_id = f"map|{color_name}"
         pose.header.stamp = stamp
         pose.pose.position.x = float(pos[0])
         pose.pose.position.y = float(pos[1])
@@ -659,16 +755,16 @@ class RingDetectorNode(Node):
         now_stamp = self.get_clock().now().to_msg()
         for track in self.track_manager.get_confirmed_tracks():
             pos, nrm = self.track_manager.get_best_estimate(track)
-            color_name = track.get('label', 'unknown')
-            i = track['id'] - 1
+            color_name = track.get("label", "unknown")
+            i = track["id"] - 1
 
-            rgb = COLOR_RANGES.get(color_name, {'rgb': (1.0, 1.0, 1.0)})['rgb']
+            rgb = COLOR_RANGES.get(color_name, {"rgb": (1.0, 1.0, 1.0)})["rgb"]
 
             # Sphere marker
             m = Marker()
-            m.header.frame_id = 'map'
+            m.header.frame_id = "map"
             m.header.stamp = now_stamp
-            m.ns = 'rings'
+            m.ns = "rings"
             m.id = i
             m.type = Marker.SPHERE
             m.action = Marker.ADD
@@ -687,9 +783,9 @@ class RingDetectorNode(Node):
             # Arrow marker (surface normal direction)
             qx, qy, qz, qw = normal_to_quaternion(nrm[:2])
             a = Marker()
-            a.header.frame_id = 'map'
+            a.header.frame_id = "map"
             a.header.stamp = now_stamp
-            a.ns = 'ring_normals'
+            a.ns = "ring_normals"
             a.id = i
             a.type = Marker.ARROW
             a.action = Marker.ADD
@@ -697,7 +793,7 @@ class RingDetectorNode(Node):
             a.pose.position.y = float(pos[1])
             a.pose.position.z = float(pos[2])
             a.pose.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
-            a.scale.x = 0.5   # shaft length
+            a.scale.x = 0.5  # shaft length
             a.scale.y = 0.05  # shaft diameter
             a.scale.z = 0.08  # head diameter
             a.color.r = rgb[0]
@@ -709,9 +805,9 @@ class RingDetectorNode(Node):
 
             # Text label
             t = Marker()
-            t.header.frame_id = 'map'
+            t.header.frame_id = "map"
             t.header.stamp = now_stamp
-            t.ns = 'ring_labels'
+            t.ns = "ring_labels"
             t.id = i
             t.type = Marker.TEXT_VIEW_FACING
             t.action = Marker.ADD
@@ -724,7 +820,7 @@ class RingDetectorNode(Node):
             t.color.g = rgb[1]
             t.color.b = rgb[2]
             t.color.a = 1.0
-            t.text = f'{color_name} ring'
+            t.text = f"{color_name} ring"
             t.lifetime.sec = 0
             markers.append(t)
 
@@ -738,16 +834,16 @@ class RingDetectorNode(Node):
     def _publish_debug(self, publisher, image: np.ndarray, mono: bool = False) -> None:
         try:
             if mono:
-                msg = self.bridge.cv2_to_imgmsg(image, 'mono8')
+                msg = self.bridge.cv2_to_imgmsg(image, "mono8")
             else:
-                msg = self.bridge.cv2_to_imgmsg(image, 'bgr8')
+                msg = self.bridge.cv2_to_imgmsg(image, "bgr8")
             publisher.publish(msg)
         except CvBridgeError:
             pass
 
 
 def main(args=None):
-    print('Ring detection node starting.')
+    print("Ring detection node starting.")
     rclpy.init(args=args)
     node = RingDetectorNode()
     rclpy.spin(node)
@@ -755,5 +851,5 @@ def main(args=None):
     rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

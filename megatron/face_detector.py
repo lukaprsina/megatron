@@ -30,29 +30,34 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 
 class FaceDetectorNode(Node):
-
     def __init__(self):
-        super().__init__('face_detector')
+        super().__init__("face_detector")
 
         # Parameters
-        self.declare_parameter('device', '')
-        self.declare_parameter('confidence_threshold', 0.5)
-        self.declare_parameter('confirmation_count', 3)
-        self.declare_parameter('dedup_distance', 0.5)
-        self.declare_parameter('min_inference_period', 0.2)
-        self.declare_parameter('roi_shrink', 0.3)
-        self.declare_parameter('track_max_age', 30.0)
+        self.declare_parameter("device", "")
+        self.declare_parameter("confidence_threshold", 0.5)
+        self.declare_parameter("confirmation_count", 3)
+        self.declare_parameter("dedup_distance", 0.5)
+        self.declare_parameter("min_inference_period", 0.2)
+        self.declare_parameter("roi_shrink", 0.3)
+        self.declare_parameter("track_max_age", 30.0)
 
-        self.device = cast(str, self.get_parameter('device').value)
-        self.confidence_threshold = cast(float, self.get_parameter('confidence_threshold').value)
-        self.confirmation_count = cast(int, self.get_parameter('confirmation_count').value)
-        self.dedup_distance = cast(float, self.get_parameter('dedup_distance').value)
-        self.min_inference_period = cast(float, self.get_parameter('min_inference_period').value)
-        self.roi_shrink = cast(float, self.get_parameter('roi_shrink').value)
-        self.track_max_age = cast(float, self.get_parameter('track_max_age').value)
+        self.device = cast(str, self.get_parameter("device").value)
+        self.confidence_threshold = cast(
+            float, self.get_parameter("confidence_threshold").value
+        )
+        self.confirmation_count = cast(
+            int, self.get_parameter("confirmation_count").value
+        )
+        self.dedup_distance = cast(float, self.get_parameter("dedup_distance").value)
+        self.min_inference_period = cast(
+            float, self.get_parameter("min_inference_period").value
+        )
+        self.roi_shrink = cast(float, self.get_parameter("roi_shrink").value)
+        self.track_max_age = cast(float, self.get_parameter("track_max_age").value)
 
         self.bridge = CvBridge()
-        self.model = YOLO('yolov8n-face.pt')
+        self.model = YOLO("yolov8n-face.pt")
 
         # TF2
         self.tf_buffer = tf2_ros.Buffer()
@@ -60,29 +65,37 @@ class FaceDetectorNode(Node):
 
         # Synced RGB + PointCloud2 via message_filters
         self.rgb_sub = message_filters.Subscriber(
-            self, Image, '/oakd/rgb/preview/image_raw',
-            qos_profile=qos_profile_sensor_data)
+            self,
+            Image,
+            "/oakd/rgb/preview/image_raw",
+            qos_profile=qos_profile_sensor_data,
+        )
         self.pc2_sub = message_filters.Subscriber(
-            self, PointCloud2, '/oakd/rgb/preview/depth/points',
-            qos_profile=qos_profile_sensor_data)
+            self,
+            PointCloud2,
+            "/oakd/rgb/preview/depth/points",
+            qos_profile=qos_profile_sensor_data,
+        )
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.pc2_sub], queue_size=10, slop=0.15)
+            [self.rgb_sub, self.pc2_sub], queue_size=10, slop=0.15
+        )
         self.sync.registerCallback(self._synced_callback)
 
         # Publishers
-        self.face_pub = self.create_publisher(PoseStamped, '/detected_faces', 10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/face_markers', 10)
-        self.image_pub = self.create_publisher(Image, '/face_detections_image', 10)
+        self.face_pub = self.create_publisher(PoseStamped, "/detected_faces", 10)
+        self.marker_pub = self.create_publisher(MarkerArray, "/face_markers", 10)
+        self.image_pub = self.create_publisher(Image, "/face_detections_image", 10)
 
         # Tracker
         self.track_manager = IncrementalTrackManager(
             dedup_distance=self.dedup_distance,
-            confirmation_count=self.confirmation_count)
+            confirmation_count=self.confirmation_count,
+        )
 
         # Rate limiting
         self.last_inference_time = 0.0
 
-        self.get_logger().info('Face detector initialized (PointCloud2 mode).')
+        self.get_logger().info("Face detector initialized (PointCloud2 mode).")
 
     # ------------------------------------------------------------------
     # Synced RGB + PointCloud2 callback
@@ -97,26 +110,31 @@ class FaceDetectorNode(Node):
 
         # Convert RGB image
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
+            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
         except CvBridgeError as e:
-            self.get_logger().error(f'Image conversion failed: {e}')
+            self.get_logger().error(f"Image conversion failed: {e}")
             return
 
         h, w = cv_image.shape[:2]
 
         # Run YOLO
         results = self.model.predict(
-            cv_image, imgsz=(256, 320), show=False, verbose=False,
-            device=self.device, conf=self.confidence_threshold)
+            cv_image,
+            imgsz=(256, 320),
+            show=False,
+            verbose=False,
+            device=self.device,
+            conf=self.confidence_threshold,
+        )
 
         # Get TF: PC2 frame → map
         frame_id = pc2_msg.header.frame_id
         if not frame_id:
-            frame_id = 'oakd_rgb_camera_optical_frame'
+            frame_id = "oakd_rgb_camera_optical_frame"
         try:
-            tf_stamped = self.tf_buffer.lookup_transform('map', frame_id, Time())
+            tf_stamped = self.tf_buffer.lookup_transform("map", frame_id, Time())
         except Exception as e:
-            self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=2.0)
+            self.get_logger().warn(f"TF lookup failed: {e}", throttle_duration_sec=2.0)
             return
 
         # Process each detection
@@ -161,32 +179,35 @@ class FaceDetectorNode(Node):
 
                 # Transform to map frame
                 map_point, map_normal = transform_point_and_normal(
-                    centroid, normal, tf_stamped)
+                    centroid, normal, tf_stamped
+                )
 
                 cam_dist = float(np.linalg.norm(centroid))
 
                 # Feed to tracker
                 status, track = self.track_manager.add_observation(
-                    map_point, map_normal, cam_dist,
-                    rgb_msg.header.stamp)
+                    map_point, map_normal, cam_dist, rgb_msg.header.stamp
+                )
 
-                if status == 'confirmed':
+                if status == "confirmed":
                     self._publish_detection(track, rgb_msg.header.stamp)
                     pos, _ = self.track_manager.get_best_estimate(track)
-                    track['_last_published_pos'] = pos.copy()
-                    track['_update_count_since_publish'] = 0
-                elif status == 'updated':
+                    track["_last_published_pos"] = pos.copy()
+                    track["_update_count_since_publish"] = 0
+                elif status == "updated":
                     pos, _ = self.track_manager.get_best_estimate(track)
-                    last_pos = track.get('_last_published_pos')
-                    update_count = track.get('_update_count_since_publish', 0)
-                    if (last_pos is None
-                            or np.linalg.norm(pos - last_pos) > 0.05
-                            or update_count >= 5):
+                    last_pos = track.get("_last_published_pos")
+                    update_count = track.get("_update_count_since_publish", 0)
+                    if (
+                        last_pos is None
+                        or np.linalg.norm(pos - last_pos) > 0.05
+                        or update_count >= 5
+                    ):
                         self._publish_detection(track, rgb_msg.header.stamp)
-                        track['_last_published_pos'] = pos.copy()
-                        track['_update_count_since_publish'] = 0
+                        track["_last_published_pos"] = pos.copy()
+                        track["_update_count_since_publish"] = 0
                     else:
-                        track['_update_count_since_publish'] = update_count + 1
+                        track["_update_count_since_publish"] = update_count + 1
 
                 # Draw center point on display
                 cx = (rx1 + rx2) // 2
@@ -197,7 +218,7 @@ class FaceDetectorNode(Node):
 
         # Publish annotated image
         try:
-            self.image_pub.publish(self.bridge.cv2_to_imgmsg(cv_image, 'bgr8'))
+            self.image_pub.publish(self.bridge.cv2_to_imgmsg(cv_image, "bgr8"))
         except CvBridgeError:
             pass
 
@@ -209,12 +230,13 @@ class FaceDetectorNode(Node):
         pos, normal = self.track_manager.get_best_estimate(track)
 
         self.get_logger().info(
-            f'Face #{track["id"]} confirmed at '
-            f'({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})')
+            f"Face #{track['id']} confirmed at "
+            f"({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
+        )
 
         # PoseStamped: position + normal encoded as orientation
         pose = PoseStamped()
-        pose.header.frame_id = 'map'
+        pose.header.frame_id = "map"
         pose.header.stamp = stamp
         pose.pose.position.x = float(pos[0])
         pose.pose.position.y = float(pos[1])
@@ -235,13 +257,13 @@ class FaceDetectorNode(Node):
         markers = []
         for track in self.track_manager.get_confirmed_tracks():
             pos, _ = self.track_manager.get_best_estimate(track)
-            i = track['id'] - 1
+            i = track["id"] - 1
 
             # Sphere
             m = Marker()
-            m.header.frame_id = 'map'
+            m.header.frame_id = "map"
             m.header.stamp = self.get_clock().now().to_msg()
-            m.ns = 'faces'
+            m.ns = "faces"
             m.id = i
             m.type = Marker.SPHERE
             m.action = Marker.ADD
@@ -256,9 +278,9 @@ class FaceDetectorNode(Node):
 
             # Text label
             t = Marker()
-            t.header.frame_id = 'map'
+            t.header.frame_id = "map"
             t.header.stamp = self.get_clock().now().to_msg()
-            t.ns = 'face_labels'
+            t.ns = "face_labels"
             t.id = i
             t.type = Marker.TEXT_VIEW_FACING
             t.action = Marker.ADD
@@ -268,7 +290,7 @@ class FaceDetectorNode(Node):
             t.pose.orientation.w = 1.0
             t.scale.z = 0.12
             t.color.r = t.color.g = t.color.b = t.color.a = 1.0
-            t.text = f'Face {track["id"]}'
+            t.text = f"Face {track['id']}"
             t.lifetime.sec = 0
             markers.append(t)
 
@@ -277,7 +299,7 @@ class FaceDetectorNode(Node):
 
 
 def main(args=None):
-    print('Face detection node starting.')
+    print("Face detection node starting.")
     rclpy.init(args=args)
     node = FaceDetectorNode()
     rclpy.spin(node)
@@ -285,5 +307,5 @@ def main(args=None):
     rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
