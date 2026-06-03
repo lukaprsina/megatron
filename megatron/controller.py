@@ -149,10 +149,10 @@ class MissionController(Node):
         self.declare_parameter('free_will', False)
         #self.declare_parameter('approach_distance', 0.55)
         self.declare_parameter('face_approach_distance', 0.55)
-        self.declare_parameter('ring_approach_distance', 1.3)
+        self.declare_parameter('ring_approach_distance', 0.55)
         self.declare_parameter('approach_retry_offset', 0.1)
         self.declare_parameter('total_faces', 3)
-        self.declare_parameter('total_rings', 4)
+        self.declare_parameter('total_rings', 2)
         self.declare_parameter('max_loops', 2)
         self.declare_parameter('waypoints_file', 'waypoints/test1.yaml')
         self.declare_parameter('verify_pause_sec', 1.0)
@@ -199,7 +199,7 @@ class MissionController(Node):
         try:
             wp_file = self.get_parameter('waypoints_file').value
         except Exception:
-            wp_file = 'waypoints/test1.yaml'
+            raise Exception('Waypoints file parameter "waypoints_file" is required and must be a string')
 
         try:
             self.waypoints = load_waypoints_from_yaml(wp_file)
@@ -269,7 +269,7 @@ class MissionController(Node):
 
         self.found_faces.append({'pos': pos, 'normal': (nx, ny), 'greeted': False})
 
-        self._say('Hello!')
+        self._say('I see a face!')
 
         if self.state != State.DONE:
             self.pending_approaches.append({
@@ -359,6 +359,7 @@ class MissionController(Node):
     # ── Navigation helpers ────────────────────────────────────────────
 
     def _check_nav2_states(self):
+        self.get_logger().info('Checking Nav2 node states: ' + self.states.items().__str__())
         now = self.get_clock().now().nanoseconds / 1e9
         if now - self.last_nav2_check < 2.0:
             return
@@ -510,10 +511,11 @@ class MissionController(Node):
         # Fan out from the normal direction in order of angular preference
         offsets = [
             0,
+            math.pi / 8,        -math.pi / 8,
             math.pi / 4,        -math.pi / 4,
             math.pi / 2,        -math.pi / 2,
-            3 * math.pi / 4,    -3 * math.pi / 4,
-            math.pi,
+            # 3 * math.pi / 4,    -3 * math.pi / 4,
+            # math.pi,
         ]
         candidates = []
         for offset in offsets:
@@ -556,8 +558,10 @@ class MissionController(Node):
             pass
 
     def _handle_waiting(self):
+        self.get_logger().info('Waiting for Nav2 to be ready...')
         if self.is_docked is None:
-            return
+            self.get_logger().info('Docked is None')
+            # return
 
         self._check_nav2_states()
         if not self.nav2_ready:
@@ -600,6 +604,7 @@ class MissionController(Node):
             self._send_next_waypoint()
 
     def _handle_exploring(self):
+        self.get_logger().info('Exploring...')
         # Check if a detection needs approach
         if self.pending_approaches:
             approach = self.pending_approaches.pop(0)
@@ -671,7 +676,7 @@ class MissionController(Node):
                 cycle = int(attempts // len(candidates))
                 t_attempts = attempts - len(candidates) * cycle
                 type_distance = self.face_approach_distance if approach['type'] == 'face' else self.ring_approach_distance
-                new_distance = type_distance + 0.05 * cycle  # increase distance every full cycle
+                new_distance = type_distance + 0.50 * cycle  # increase distance every full cycle
                 candidates = self._approach_candidates(approach['pos'], approach['normal'], approach['type'], distance=new_distance)
                 ax, ay, yaw = candidates[t_attempts]
                 self.get_logger().warn(
@@ -704,11 +709,11 @@ class MissionController(Node):
 
         if approach['type'] == 'face':
             self.get_logger().info('Verified face — greeting!')
-            self._say('Hello!')
+            self._say('hello flat person')
         elif approach['type'] == 'ring':
             color = approach.get('color', 'unknown')
             self.get_logger().info(f'Verified ring — announcing color: {color}!')
-            self._say(f'I see a {color} ring')
+            self._say(f'Confirmed a {color} ring')
 
         # Mark this object as successfully greeted
         target_pos = np.array(approach['pos'])
