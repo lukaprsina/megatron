@@ -37,7 +37,7 @@ controller_server:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.07
-      yaw_goal_tolerance: 0.3 # 0.05
+      yaw_goal_tolerance: 0.15 # 0.05
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.5
@@ -87,8 +87,10 @@ local_costmap:
       plugins: ["static_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.25
+        # cost_scaling_factor: 4.0
+        # inflation_radius: 0.25
+        cost_scaling_factor: 0.7
+        inflation_radius: 0.20
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
@@ -152,7 +154,9 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
+        # cost_scaling_factor: 4.0
+        cost_scaling_factor: 0.7
+        # inflation_radius: 0.35
         inflation_radius: 0.35
       always_send_full_costmap: true
 
@@ -223,8 +227,8 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 1.0]
-    min_velocity: [-0.26, 0.0, -1.0]
+    max_velocity: [0.10, 0.0, 1.0]
+    min_velocity: [-0.10, 0.0, -1.0]
     max_accel: [2.5, 0.0, 3.2]
     max_decel: [-2.5, 0.0, -3.2]
     odom_topic: "odom"
