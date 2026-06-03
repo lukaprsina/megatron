@@ -504,7 +504,7 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: global_costmap/published_footprint
           Value: false
-      Enabled: false
+      Enabled: true
       Name: Global Planner
     - Class: rviz_common/Group
       Displays:
@@ -741,7 +741,8 @@ Visualization Manager:
       Enabled: true
       Name: Face Markers
       Namespaces:
-        {}
+        face_labels: true
+        faces: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -773,9 +774,7 @@ Visualization Manager:
       Enabled: true
       Name: Ring Markers
       Namespaces:
-        ring_labels: true
-        ring_normals: true
-        rings: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -807,7 +806,7 @@ Visualization Manager:
       Enabled: true
       Name: Goal Markers
       Namespaces:
-        {}
+        waypoints: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -833,7 +832,7 @@ Visualization Manager:
       Enabled: true
       Name: Approaching Object
       Namespaces:
-        {}
+        approaching_object: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -884,13 +883,16 @@ Visualization Manager:
         Value: /gemini/color/image_raw/compressed
       Value: false
       Visibility:
-        "": true
         Amcl Particle Swarm: true
         Approaching Object: true
         Bumper Hit: true
         Controller:
-          "": true
+          Local Costmap: true
+          Local Plan: true
+          Polygon: true
+          Trajectories: true
           Value: true
+          VoxelGrid: true
         Depth image compressed: true
         DepthCloud: true
         Detected Faces: true
@@ -905,14 +907,18 @@ Visualization Manager:
         Grid: true
         Image: true
         Image compressed: true
+        Image custom 2: true
+        Image custom 3: true
         Image custom ring: true
+        Image custom1: true
         Image depth compressed: true
         LaserScan: true
         Map: true
         MarkerArray: true
         PoseWithCovariance: true
         Realsense:
-          "": true
+          RealsenseCamera: true
+          RealsenseDepthImage: true
           Value: true
         Ring Markers: true
         RobotModel: true
@@ -933,7 +939,6 @@ Visualization Manager:
         Value: /gemini/depth/image_raw/compressedDepth
       Value: false
       Visibility:
-        "": true
         Amcl Particle Swarm: true
         Approaching Object: true
         Bumper Hit: true
@@ -947,26 +952,24 @@ Visualization Manager:
         Face Markers: true
         Faces and Rings Camera: true
         Global Planner:
-          Downsampled Costmap: true
-          Global Costmap: true
-          Path: true
-          Polygon: true
+          "": true
           Value: true
-          VoxelGrid: true
         Goal Markers: true
         Goal Pose: true
         Grid: true
         Image: true
         Image compressed: true
+        Image custom 2: true
+        Image custom 3: true
         Image custom ring: true
+        Image custom1: true
         Image depth compressed: true
         LaserScan: true
         Map: true
         MarkerArray: true
         PoseWithCovariance: true
         Realsense:
-          RealsenseCamera: true
-          RealsenseDepthImage: true
+          "": true
           Value: true
         Ring Markers: true
         RobotModel: true
