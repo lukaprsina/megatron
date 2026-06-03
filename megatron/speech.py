@@ -6,10 +6,12 @@ from std_msgs.msg import String
 class Speaker:
     """Publishes text strings to the /speak topic for downstream TTS handling."""
 
-    def __init__(self):
+    def __init__(self, allowed_to_speak: bool = True):
         self._logger = logging.getLogger(__name__)
         self._node_logger = None
         self._publisher = None
+        self.allowed_to_speak = allowed_to_speak
+        
 
     def set_node_logger(self, node) -> None:
         """Use an rclpy Node for logging and create the /speak publisher.
@@ -31,6 +33,8 @@ class Speaker:
 
     def speak(self, text: str) -> None:
         """Publish text to the /speak topic."""
+        if not self.allowed_to_speak:
+            return
         if self._publisher is None:
             self._logger.debug('speak() called but publisher is not available')
             return

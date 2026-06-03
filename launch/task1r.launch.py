@@ -65,9 +65,15 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'free_will',
-            default_value='true',
+            default_value='false',
             choices=['true', 'false'],
             description='freeWill mode: do not autonomously follow waypoints',
+        ),
+        DeclareLaunchArgument(
+            'allowed_to_speak',
+            default_value='true',
+            choices=['true', 'false'],
+            description='Allowed to speak',
         ),
 
         # If the Gemini driver publishes PointCloud2 with frame_id=gemini_color_optical_frame
@@ -173,25 +179,6 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('pc2_overlay')),
     )
 
-    # Publish a static TF for Gemini optical frame if the robot doesn't provide it.
-    gemini_static_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='gemini_static_tf',
-        output='screen',
-        arguments=[
-            '--x', LaunchConfiguration('gemini_tf_x'),
-            '--y', LaunchConfiguration('gemini_tf_y'),
-            '--z', LaunchConfiguration('gemini_tf_z'),
-            '--roll', LaunchConfiguration('gemini_tf_roll'),
-            '--pitch', LaunchConfiguration('gemini_tf_pitch'),
-            '--yaw', LaunchConfiguration('gemini_tf_yaw'),
-            '--frame-id', LaunchConfiguration('gemini_tf_parent_frame'),
-            '--child-frame-id', LaunchConfiguration('gemini_tf_child_frame'),
-        ],
-        condition=IfCondition(LaunchConfiguration('publish_gemini_tf')),
-    )
-
     # Mission controller
     controller = Node(
         package='megatron',
@@ -201,8 +188,10 @@ def generate_launch_description():
         parameters=[
             {
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', 'task1r.yaml']),
+                'waypoints_file': PathJoinSubstitution([pkg_megatron, 'waypoints', 'task1r_v2.yaml']),
                 'free_will': LaunchConfiguration('free_will'),
+                'allowed_to_speak': LaunchConfiguration('allowed_to_speak'),
+
             }
         ],
     )

@@ -156,6 +156,7 @@ class MissionController(Node):
         self.declare_parameter('max_loops', 2)
         self.declare_parameter('waypoints_file', 'waypoints/test1.yaml')
         self.declare_parameter('verify_pause_sec', 1.0)
+        self.declare_parameter('allowed_to_speak', True)
 
         self.dedup_distance = self.get_parameter('dedup_distance').value
         self.free_will = bool(self.get_parameter('free_will').value)
@@ -166,9 +167,10 @@ class MissionController(Node):
         self.total_rings = self.get_parameter('total_rings').value
         self.max_loops = self.get_parameter('max_loops').value
         self.verify_pause_sec = self.get_parameter('verify_pause_sec').value
-
+        self.allowed_to_speak = bool(self.get_parameter('allowed_to_speak').value)
+        
         # Speech
-        self.speaker = Speaker()
+        self.speaker = Speaker(allowed_to_speak=self.allowed_to_speak)
         self.speaker.set_node_logger(self)
         self.speech_queue: list[str] = []
 
@@ -509,14 +511,22 @@ class MissionController(Node):
         px, py = float(pos[0]), float(pos[1])
 
         # Fan out from the normal direction in order of angular preference
-        offsets = [
+        degrees = [
             0,
-            math.pi / 8,        -math.pi / 8,
-            math.pi / 4,        -math.pi / 4,
-            math.pi / 2,        -math.pi / 2,
-            # 3 * math.pi / 4,    -3 * math.pi / 4,
-            # math.pi,
-        ]
+            5,           -5,
+            10,          -10,
+            #15,          -15,
+            20,          -20,
+            #25,          -25,
+            #30,          -30,
+            #35,          -35,
+            40,          -40,
+            #50,          -50,
+            60,          -60,
+            70,          -70,
+            ]
+        
+        offsets = [math.radians(d) for d in degrees]
         candidates = []
         for offset in offsets:
             angle = base_angle + offset
@@ -747,7 +757,6 @@ class MissionController(Node):
         self._publish_goal_markers()
 
     def _finish(self):
-        return False
         elapsed = 0.0
         if self.start_time is not None:
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
