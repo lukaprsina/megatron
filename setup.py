@@ -42,6 +42,7 @@ setup(
             "face_detector = megatron.face_detector:main",
             "ring_detector = megatron.ring_detector:main",
             "controller = megatron.controller:main",
+            "task2_controller = megatron.task2_controller:main",
             "perception_visualizer = megatron.perception_visualizer:main",
         ],
     },

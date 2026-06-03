@@ -111,8 +111,8 @@ def generate_launch_description():
 
     controller = Node(
         package="megatron",
-        executable="controller",
-        name="mission_controller",
+        executable="task2_controller",
+        name="task2_controller",
         output="screen",
         parameters=[
             {
@@ -120,8 +120,6 @@ def generate_launch_description():
                 "waypoints_file": PathJoinSubstitution(
                     [pkg_megatron, "waypoints", "task.yaml"]
                 ),
-                "total_faces": 3,
-                "total_rings": 4,
             }
         ],
     )

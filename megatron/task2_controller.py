@@ -1,0 +1,923 @@
+"""Task 2 mission controller.
+
+State machine:
+  INIT → PATROL → APPROACH_TARGET → INTERACT → INSPECT_WORKSTATION → FOLLOW_BLUE_LINE → DONE
+
+Detectors publish PoseStamped on their respective topics; this controller deduplicates
+by position and queues pending_targets for approach.
+"""
+
+import math
+from enum import Enum, auto
+from pathlib import Path
+from typing import cast
+
+import numpy as np
+import rclpy
+import yaml
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from lifecycle_msgs.srv import GetState
+from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import OccupancyGrid
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+    qos_profile_sensor_data,
+)
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool, String
+from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
+from visualization_msgs.msg import Marker, MarkerArray
+
+from megatron.speech import Speaker
+
+# ---------------------------------------------------------------------------
+# State machine
+# ---------------------------------------------------------------------------
+
+
+class State(Enum):
+    INIT = auto()
+    PATROL = auto()
+    APPROACH_TARGET = auto()
+    INTERACT = auto()
+    INSPECT_WORKSTATION = auto()
+    FOLLOW_BLUE_LINE = auto()
+    DONE = auto()
+
+
+# ---------------------------------------------------------------------------
+# QoS profiles
+# ---------------------------------------------------------------------------
+
+# Latched: late-joining subscribers get the last message immediately.
+robot_state_qos = QoSProfile(
+    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=1,
+)
+
+amcl_pose_qos = QoSProfile(
+    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=1,
+)
+
+
+# ---------------------------------------------------------------------------
+# Waypoint loading (same format as controller.py)
+# ---------------------------------------------------------------------------
+
+
+def _quaternion_to_yaw(q_list):
+    try:
+        w, x, y, z = q_list
+    except Exception:
+        return 0.0
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def load_waypoints_from_yaml(path):
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Waypoints file not found: {p}")
+    data = yaml.safe_load(p.read_text())
+    out = []
+    candidates = []
+    if isinstance(data, dict) and "waypoints" in data:
+        candidates = list(data["waypoints"].values())
+    elif isinstance(data, list):
+        candidates = data
+    elif isinstance(data, dict):
+        candidates = list(data.values())
+
+    for entry in candidates:
+        x = y = yaw = None
+        if isinstance(entry, dict):
+            pose = entry.get("pose")
+            orient = entry.get("orientation")
+            if pose and len(pose) >= 2:
+                x, y = float(pose[0]), float(pose[1])
+            if orient and len(orient) == 4:
+                yaw = _quaternion_to_yaw(orient)
+        elif isinstance(entry, (list, tuple)):
+            if len(entry) >= 2:
+                x, y = float(entry[0]), float(entry[1])
+            if len(entry) >= 3:
+                yaw = float(entry[2])
+        if x is None or y is None:
+            continue
+        out.append((x, y, yaw or 0.0))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Normal extraction from quaternion (same as controller.py)
+# ---------------------------------------------------------------------------
+
+
+def _quaternion_to_normal_2d(q):
+    siny = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    yaw = math.atan2(siny, cosy)
+    return -math.cos(yaw), -math.sin(yaw)
+
+
+def _normalize_angle(a: float) -> float:
+    while a > math.pi:
+        a -= 2 * math.pi
+    while a < -math.pi:
+        a += 2 * math.pi
+    return a
+
+
+# ---------------------------------------------------------------------------
+# QR task text → task token
+# ---------------------------------------------------------------------------
+
+
+def _parse_qr_task(text: str) -> str | None:
+    t = text.lower()
+    if "report" in t or "thanks" in t:  # qr_cto.png
+        return "report"
+    if "red belt" in t or ("red" in t and ("defect" in t or "fault" in t)):
+        return "defects_red"
+    if "green belt" in t or ("green" in t and ("defect" in t or "fault" in t)):
+        return "defects_green"
+    if "barrel" in t:
+        return "barrels"
+    if "ring" in t:
+        return "rings"
+    if "visitor" in t:
+        return "nothing"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Controller node
+# ---------------------------------------------------------------------------
+
+
+class Task2Controller(Node):
+    NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
+    DEDUP_DISTANCE = 0.8  # metres — two detections within this are the same object
+
+    def __init__(self):
+        super().__init__("task2_controller")
+
+        # --- Parameters ---
+        self.declare_parameter("waypoints_file", "waypoints/task.yaml")
+        self.declare_parameter("face_approach_distance", 0.55)
+        self.declare_parameter("barrel_approach_distance", 0.50)
+        self.declare_parameter("barrel_lateral_offset", 0.30)
+        self.declare_parameter("approach_retry_offset", 0.25)
+
+        wp_file = cast(str, self.get_parameter("waypoints_file").value)
+        self.waypoints = load_waypoints_from_yaml(wp_file)
+        self.get_logger().info(f"Loaded {len(self.waypoints)} waypoints from {wp_file}")
+
+        # --- State ---
+        self.state = State.INIT
+        self.waypoint_index = 0
+
+        # --- Nav2 lifecycle ---
+        self._nav2_states = {n: "Unknown" for n in self.NODES_TO_CHECK}
+        self.nav2_ready = False
+        self._last_nav2_check = 0.0
+
+        # --- Current robot pose ---
+        self.current_pose = None
+        self.initial_pose_received = False
+
+        # --- Navigation async state ---
+        self.nav_goal_handle = None
+        self.nav_result_future = None
+        self.nav_in_flight = False
+        self._nav_ever_sent = False
+
+        # --- Costmap ---
+        self.costmap = None
+
+        # --- Detection tracking ---
+        # Each entry: {'pos': np.array, 'normal': (nx,ny), 'type': str,
+        #              'color': str|None, 'orientation': str|None, 'approached': bool,
+        #              'label': str|None, 'quat': quaternion|None}
+        self.found_faces: list[dict] = []
+        self.found_rings: list[dict] = []
+        self.found_barrels: list[dict] = []
+        self.pending_targets: list[dict] = []  # queue of objects to approach
+
+        # --- Task assignment (from person dialogue) ---
+        self.assigned_task: str | None = None
+        self.workstation_poses: dict[str, np.ndarray] = {}
+
+        # --- Report data ---
+        self.ring_counts: dict[str, int] = {}
+        self.barrel_report: list[dict] = []
+        self.tile_results: list[dict] = []
+
+        # --- Approach tracking ---
+        self.current_target: dict | None = None
+        self._approach_attempt = 0
+
+        # --- Interact tracking ---
+        self._qr_task_raw: str | None = None
+
+        # --- Inspection state ---
+        self._inspection_phase = 0
+        self._inspection_color: str | None = None
+        self._last_scan_ranges = None
+        self._yellow_seen = False
+        self._tile_index = 0
+        self._phase_start_time: float | None = None
+        self._tile_pause_start: float | None = None
+
+        # --- Speech ---
+        self.speaker = Speaker()
+        self.speaker.set_node_logger(self)
+
+        # --- Publishers ---
+        self.robot_state_pub = self.create_publisher(
+            String, "/robot_state", robot_state_qos
+        )
+        self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel_unstamped", 10)
+        self.arm_pub = self.create_publisher(String, "/arm_command", 10)
+        self.goal_marker_pub = self.create_publisher(MarkerArray, "/goal_markers", 10)
+
+        # --- Subscribers ---
+        self.create_subscription(
+            PoseWithCovarianceStamped, "amcl_pose", self._amcl_cb, amcl_pose_qos
+        )
+        self.create_subscription(PoseStamped, "/detected_faces", self._face_cb, 10)
+        self.create_subscription(PoseStamped, "/detected_rings", self._ring_cb, 10)
+        self.create_subscription(
+            PoseStamped, "/detected_cylinders", self._cylinder_cb, 10
+        )
+        self.create_subscription(
+            Marker, "/detected_workstations", self._workstation_cb, 10
+        )
+        self.create_subscription(String, "/qr_task", self._qr_cb, 10)
+        self.create_subscription(
+            LaserScan, "/scan", self._scan_cb, qos_profile_sensor_data
+        )
+        self.create_subscription(Bool, "/yellow_line_seen", self._yellow_seen_cb, 10)
+        costmap_qos = QoSProfile(
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+        )
+        self.create_subscription(
+            OccupancyGrid, "/global_costmap/costmap", self._costmap_cb, costmap_qos
+        )
+
+        # --- Nav2 action client ---
+        self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+
+        # --- Nav2 lifecycle clients ---
+        self._nav2_clients = {
+            n: self.create_client(GetState, f"{n}/get_state")
+            for n in self.NODES_TO_CHECK
+        }
+
+        # --- Main tick timer (10 Hz) ---
+        self.create_timer(0.1, self._tick)
+        self.get_logger().info("Task2Controller initialised.")
+
+    # ── Callbacks ─────────────────────────────────────────────────────
+
+    def _amcl_cb(self, msg: PoseWithCovarianceStamped):
+        self.current_pose = msg.pose.pose
+        self.initial_pose_received = True
+
+    def _face_cb(self, msg: PoseStamped):
+        pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
+        now = self.get_clock().now()
+
+        for f in self.found_faces:
+            if np.linalg.norm(pos - f["pos"]) < self.DEDUP_DISTANCE:
+                f["pos"] = pos
+                f["normal"] = (nx, ny)
+                f["last_seen"] = now
+                if not f.get("approached", False) and self.state == State.PATROL:
+                    self._requeue_if_not_pending("face", f)
+                return
+
+        self.get_logger().info(f"New face at ({pos[0]:.2f}, {pos[1]:.2f})")
+        entry = {
+            "type": "face",
+            "pos": pos,
+            "normal": (nx, ny),
+            "label": None,
+            "approached": False,
+            "last_seen": now,
+        }
+        self.found_faces.append(entry)
+        if self.state == State.PATROL:
+            self.pending_targets.append(dict(entry))
+
+    def _ring_cb(self, msg: PoseStamped):
+        parts = msg.header.frame_id.split("|")
+        color = parts[1] if len(parts) > 1 else "unknown"
+        pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+
+        for r in self.found_rings:
+            if np.linalg.norm(pos - r["pos"]) < self.DEDUP_DISTANCE:
+                r["pos"] = pos
+                r["last_seen"] = self.get_clock().now()
+                return
+
+        self.get_logger().info(f"New ring ({color}) at ({pos[0]:.2f}, {pos[1]:.2f})")
+        self.found_rings.append(
+            {
+                "type": "ring",
+                "pos": pos,
+                "color": color,
+                "last_seen": self.get_clock().now(),
+            }
+        )
+        self.ring_counts[color] = self.ring_counts.get(color, 0) + 1
+
+    def _cylinder_cb(self, msg: PoseStamped):
+        parts = msg.header.frame_id.split("|")
+        color = parts[1] if len(parts) > 1 else "unknown"
+        orientation = parts[2] if len(parts) > 2 else "vertical"
+        pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        now = self.get_clock().now()
+
+        for b in self.found_barrels:
+            if np.linalg.norm(pos - b["pos"]) < self.DEDUP_DISTANCE:
+                b["pos"] = pos
+                b["last_seen"] = now
+                if not b.get("approached", False) and self.state == State.PATROL:
+                    self._requeue_if_not_pending("barrel", b)
+                return
+
+        self.get_logger().info(
+            f"New {orientation} {color} barrel at ({pos[0]:.2f}, {pos[1]:.2f})"
+        )
+        entry = {
+            "type": "barrel",
+            "pos": pos,
+            "color": color,
+            "orientation": orientation,
+            "quat": msg.pose.orientation,
+            "approached": False,
+            "last_seen": now,
+        }
+        self.found_barrels.append(entry)
+        if self.state == State.PATROL:
+            self.pending_targets.append(dict(entry))
+
+    def _workstation_cb(self, msg: Marker):
+        color = msg.ns  # "red" or "green"
+        self.workstation_poses[color] = np.array(
+            [msg.pose.position.x, msg.pose.position.y]
+        )
+        self.get_logger().info(
+            f"Workstation '{color}' at ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
+        )
+
+    def _qr_cb(self, msg: String):
+        self._qr_task_raw = msg.data
+        self.get_logger().info(f"QR received: {msg.data!r}")
+
+    def _scan_cb(self, msg: LaserScan):
+        self._last_scan_ranges = msg.ranges
+
+    def _yellow_seen_cb(self, msg: Bool):
+        self._yellow_seen = msg.data
+
+    def _costmap_cb(self, msg: OccupancyGrid):
+        self.costmap = msg
+
+    # ── Dedup helper ──────────────────────────────────────────────────
+
+    def _requeue_if_not_pending(self, obj_type: str, track: dict):
+        if track.get("approached", False):
+            return
+        pos = track["pos"]
+        for t in self.pending_targets:
+            if (
+                t["type"] == obj_type
+                and np.linalg.norm(pos - np.array(t["pos"])) < self.DEDUP_DISTANCE
+            ):
+                return
+        if (
+            self.current_target is not None
+            and self.current_target["type"] == obj_type
+            and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+            < self.DEDUP_DISTANCE
+        ):
+            return
+        self.get_logger().info(
+            f"Re-queuing unapproached {obj_type} at ({pos[0]:.2f}, {pos[1]:.2f})"
+        )
+        self.pending_targets.append(dict(track))
+
+    # ── Main tick ──────────────────────────────────────────────────────
+
+    def _tick(self):
+        if self.state == State.INIT:
+            self._handle_init()
+        elif self.state == State.PATROL:
+            self._handle_patrol()
+        elif self.state == State.APPROACH_TARGET:
+            self._handle_approach()
+        elif self.state == State.INTERACT:
+            self._handle_interact()
+        elif self.state == State.INSPECT_WORKSTATION:
+            self._handle_inspection()
+        elif self.state == State.FOLLOW_BLUE_LINE:
+            self._handle_follow_blue_line()
+        elif self.state == State.DONE:
+            pass
+
+    def _transition(self, new_state: State):
+        self.get_logger().info(f"→ {new_state.name}")
+        self.state = new_state
+        msg = String()
+        msg.data = new_state.name
+        self.robot_state_pub.publish(msg)
+
+    # ── INIT ──────────────────────────────────────────────────────────
+
+    def _handle_init(self):
+        if not self.initial_pose_received:
+            return
+        self._check_nav2_states()
+        if not self.nav2_ready:
+            return
+        self.get_logger().info("Nav2 ready — starting patrol.")
+        self._transition(State.PATROL)
+        self._send_next_waypoint()
+
+    # ── PATROL ────────────────────────────────────────────────────────
+
+    def _handle_patrol(self):
+        # Pending target takes priority — preempt navigation
+        if self.pending_targets:
+            target = self.pending_targets.pop(0)
+            self._cancel_nav()
+            self.current_target = target
+            self._approach_attempt = 0
+            self._transition(State.APPROACH_TARGET)
+            self._send_approach(target, attempt=0)
+            return
+
+        if not self._is_nav_complete():
+            return
+
+        if self._nav_aborted():
+            self.get_logger().warn(f"Waypoint {self.waypoint_index} aborted, skipping.")
+
+        self.waypoint_index += 1
+
+        if self.waypoint_index >= len(self.waypoints):
+            self.get_logger().info("Patrol loop complete.")
+            self._on_patrol_complete()
+            return
+
+        self._send_next_waypoint()
+
+    def _on_patrol_complete(self):
+        if self.assigned_task and self.assigned_task.startswith("defects"):
+            color = self.assigned_task.split("_")[1]  # "red" or "green"
+            if color in self.workstation_poses:
+                self.get_logger().info(
+                    f"Heading to {color} workstation for inspection."
+                )
+                self._transition(State.INSPECT_WORKSTATION)
+                self._start_inspection(color)
+                return
+            else:
+                self.get_logger().warn(
+                    f"Workstation '{color}' pose not known — skipping inspection."
+                )
+        self._transition(State.FOLLOW_BLUE_LINE)
+
+    # ── APPROACH_TARGET ───────────────────────────────────────────────
+
+    def _handle_approach(self):
+        if self.nav_in_flight:
+            return
+        if not self._is_nav_complete():
+            return
+
+        if self._nav_succeeded():
+            self._transition(State.INTERACT)
+            self._start_interact()
+            return
+
+        if self._nav_aborted():
+            self._approach_attempt += 1
+            if self.current_target is not None:
+                self._send_approach(self.current_target, self._approach_attempt)
+
+    def _send_approach(self, target: dict, attempt: int):
+        if target["type"] == "face":
+            candidates = self._face_approach_candidates(target["pos"], target["normal"])
+        else:
+            candidates = self._barrel_approach_candidates(target)
+
+        if attempt >= len(candidates):
+            self.get_logger().warn(
+                "All approach candidates exhausted — re-queuing target."
+            )
+            if self.current_target is not None:
+                self.current_target["approached"] = False
+                self.pending_targets.append(self.current_target)
+            self.current_target = None
+            self._transition(State.PATROL)
+            self._send_next_waypoint()
+            return
+
+        ax, ay, yaw = candidates[attempt]
+        if not self._cost_at_goal_ok(ax, ay):
+            self._send_approach(target, attempt + 1)
+            return
+
+        self._send_nav_goal(ax, ay, yaw)
+
+    def _face_approach_candidates(self, pos, normal):
+        """Fan of 8 from surface normal — same as controller.py."""
+        dist = cast(float, self.get_parameter("face_approach_distance").value)
+        nx, ny = normal
+        base = math.atan2(ny, nx)
+        px, py = float(pos[0]), float(pos[1])
+        offsets = [
+            0,
+            math.pi / 4,
+            -math.pi / 4,
+            math.pi / 2,
+            -math.pi / 2,
+            3 * math.pi / 4,
+            -3 * math.pi / 4,
+            math.pi,
+        ]
+        return [
+            (
+                px + math.cos(base + o) * dist,
+                py + math.sin(base + o) * dist,
+                math.atan2(-math.sin(base + o), -math.cos(base + o)),
+            )
+            for o in offsets
+        ]
+
+    def _barrel_approach_candidates(self, target: dict):
+        """Single approach candidate — position-based (no fanout)."""
+        pos = target["pos"]
+        dist = cast(float, self.get_parameter("barrel_approach_distance").value)
+        lateral = cast(float, self.get_parameter("barrel_lateral_offset").value)
+        px, py = float(pos[0]), float(pos[1])
+
+        if target.get("orientation", "vertical") == "vertical":
+            # Approach from robot's current direction toward barrel
+            if self.current_pose is not None:
+                rx = self.current_pose.position.x
+                ry = self.current_pose.position.y
+                dx, dy = px - rx, py - ry
+                d = math.sqrt(dx**2 + dy**2)
+                if d > 1e-3:
+                    dx, dy = dx / d, dy / d
+                else:
+                    dx, dy = 1.0, 0.0
+            else:
+                dx, dy = 1.0, 0.0
+            ax = px - dx * dist
+            ay = py - dy * dist
+            yaw = math.atan2(dy, dx)
+            return [(ax, ay, yaw)]
+
+        # Horizontal barrel: perpendicular to axis + lateral shift
+        q = target.get("quat")
+        if q is not None:
+            ax_yaw = math.atan2(
+                2 * (q.w * q.z + q.x * q.y),
+                1 - 2 * (q.y * q.y + q.z * q.z),
+            )
+        else:
+            ax_yaw = 0.0
+        # Two perpendiculars; pick the one toward robot
+        perp_x, perp_y = -math.sin(ax_yaw), math.cos(ax_yaw)
+        if self.current_pose is not None:
+            rx, ry = self.current_pose.position.x, self.current_pose.position.y
+            if (px - rx) * perp_x + (py - ry) * perp_y < 0:
+                perp_x, perp_y = -perp_x, -perp_y
+        # Lateral shift to robot-right (cross product of approach direction and Z-up)
+        right_x = perp_y  # rotate approach 90° CW in XY
+        right_y = -perp_x
+        approach_x = px + perp_x * dist + right_x * lateral
+        approach_y = py + perp_y * dist + right_y * lateral
+        yaw = math.atan2(-perp_y, -perp_x)
+        return [(approach_x, approach_y, yaw)]
+
+    # ── INTERACT ──────────────────────────────────────────────────────
+
+    def _start_interact(self):
+        target = self.current_target
+        if target is None:
+            self._resume_patrol()
+            return
+
+        if target["type"] == "face":
+            label = target.get("label") or ""
+            pronoun = "woman" if "she" in label.lower() else "man"
+            self.speaker.speak(f"Hi {pronoun}! What task should I perform?")
+            self._qr_task_raw = None
+
+        elif target["type"] == "barrel":
+            self.speaker.speak("Inspecting barrel.")
+            # TODO Phase 3: call /spill_check service
+            leaking = False
+            if leaking:
+                self.speaker.speak("Alert! Alert! This barrel is leaking!")
+            else:
+                self.speaker.speak("Barrel OK.")
+            self.barrel_report.append(
+                {
+                    "id": len(self.barrel_report) + 1,
+                    "color": target.get("color", "unknown"),
+                    "orientation": target.get("orientation", "unknown"),
+                    "leaking": leaking,
+                    "pos": target["pos"].tolist(),
+                }
+            )
+            self._mark_approached(target)
+            self._resume_patrol()
+
+    def _handle_interact(self):
+        target = self.current_target
+        if target is None:
+            self._resume_patrol()
+            return
+
+        if target["type"] == "barrel":
+            return  # handled fully in _start_interact
+
+        # Face: wait for QR
+        if self._qr_task_raw is None:
+            return
+
+        task_token = _parse_qr_task(self._qr_task_raw)
+        self._qr_task_raw = None
+
+        if task_token and task_token != "nothing" and task_token != "report":
+            self.assigned_task = task_token
+            # TODO: not used
+            _color_word = task_token.split("_")[1] if "_" in task_token else task_token
+            self.speaker.speak(
+                f"OK. I will {task_token.replace('_', ' ').replace('defects', 'detect anomalies on the')}."
+            )
+        elif task_token == "nothing":
+            self.speaker.speak("OK, no task for me. Continuing patrol.")
+        else:
+            self.speaker.speak("Understood.")
+
+        self._mark_approached(target)
+        self._resume_patrol()
+
+    def _mark_approached(self, target: dict):
+        pos = target["pos"]
+        for f in self.found_faces + self.found_barrels:
+            if np.linalg.norm(pos - f["pos"]) < self.DEDUP_DISTANCE:
+                f["approached"] = True
+        self.current_target = None
+
+    def _resume_patrol(self):
+        self._transition(State.PATROL)
+        self._send_next_waypoint()
+
+    # ── INSPECT_WORKSTATION ───────────────────────────────────────────
+
+    def _start_inspection(self, color: str):
+        self._inspection_color = color
+        self._inspection_phase = 0
+        self._tile_index = 0
+        self._yellow_seen = False
+        self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
+        arm_pose = "look_at_belt_right" if color == "red" else "look_at_belt_left"
+        self._pub_arm(arm_pose)
+        ws_pos = self.workstation_poses[color]
+        self._send_nav_goal(
+            ws_pos[0], ws_pos[1], math.pi if color == "red" else math.pi / 2
+        )
+
+    def _handle_inspection(self):
+        # Phase -1: navigate to workstation first
+        if self._inspection_phase == 0 and not self._is_nav_complete():
+            return
+        if self._inspection_phase == 0 and self._is_nav_complete():
+            self._inspection_phase = 1
+            self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
+
+        # TODO Phase 4: implement inspection phases 1–5
+        # Stub: immediately proceed to FOLLOW_BLUE_LINE
+        self.get_logger().warn(
+            "INSPECT_WORKSTATION not yet implemented — skipping to FOLLOW_BLUE_LINE."
+        )
+        self._pub_arm("garage")
+        self._transition(State.FOLLOW_BLUE_LINE)
+
+    # ── FOLLOW_BLUE_LINE ──────────────────────────────────────────────
+
+    def _handle_follow_blue_line(self):
+        # blue_line_follower.py activates on /robot_state == "FOLLOW_BLUE_LINE"
+        if self._qr_task_raw is not None:
+            task_token = _parse_qr_task(self._qr_task_raw)
+            self._qr_task_raw = None
+            if task_token == "report":
+                self.get_logger().info("CTO QR received — generating report.")
+                self._generate_report()
+                self._transition(State.DONE)
+                self.speaker.speak("Inspection complete. Report delivered.")
+
+    # ── DONE ─────────────────────────────────────────────────────────
+
+    # (no periodic action; _tick does nothing in DONE)
+
+    # ── Report ────────────────────────────────────────────────────────
+
+    def _generate_report(self):
+        """Write a simple text report. Replace with FPDF2 in Phase 5."""
+        lines = ["# Task 2 Inspection Report\n"]
+        lines.append("## Ring Counts")
+        for color, count in sorted(self.ring_counts.items()):
+            lines.append(f"  {color}: {count}")
+        lines.append("\n## Barrel Inspection")
+        for b in self.barrel_report:
+            leak = "LEAKING" if b["leaking"] else "OK"
+            lines.append(f"  #{b['id']} {b['color']} {b['orientation']} — {leak}")
+        lines.append("\n## Tile Anomalies")
+        for t in self.tile_results:
+            flag = "DEFECT" if t["defect"] else "OK"
+            lines.append(
+                f"  {t['station']} tile {t['tile_id']}: {flag} (ssim={t['ssim']:.3f})"
+            )
+        report_text = "\n".join(lines)
+        self.get_logger().info("\n" + report_text)
+        try:
+            import os
+            import tempfile
+
+            path = os.path.join(tempfile.gettempdir(), "megatron_report.txt")
+            with open(path, "w") as fh:
+                fh.write(report_text)
+            self.get_logger().info(f"Report written to {path}")
+        except Exception as e:
+            self.get_logger().error(f"Report write failed: {e}")
+
+    # ── Arm command ────────────────────────────────────────────────────
+
+    def _pub_arm(self, pose_name: str):
+        msg = String()
+        msg.data = pose_name
+        self.arm_pub.publish(msg)
+
+    # ── Navigation helpers ─────────────────────────────────────────────
+
+    def _send_next_waypoint(self):
+        if self.waypoint_index >= len(self.waypoints):
+            return
+        x, y, yaw = self.waypoints[self.waypoint_index]
+        self.get_logger().info(
+            f"Navigating to waypoint {self.waypoint_index}: ({x:.2f}, {y:.2f})"
+        )
+        self._send_nav_goal(x, y, yaw)
+
+    def _send_nav_goal(self, x: float, y: float, yaw: float) -> bool:
+        if not self.nav_client.wait_for_server(timeout_sec=0.5):
+            self.get_logger().warn("Nav2 server not available.")
+            return False
+
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = "map"
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x = float(x)
+        goal.pose.pose.position.y = float(y)
+        q = quaternion_from_euler(0.0, 0.0, float(yaw))
+        goal.pose.pose.orientation.w = q[0]
+        goal.pose.pose.orientation.x = q[1]
+        goal.pose.pose.orientation.y = q[2]
+        goal.pose.pose.orientation.z = q[3]
+
+        self.nav_in_flight = True
+        self._nav_ever_sent = True
+        future = self.nav_client.send_goal_async(goal)
+        future.add_done_callback(self._nav_goal_response)
+        return True
+
+    def _nav_goal_response(self, future):
+        self.nav_goal_handle = future.result()
+        self.nav_in_flight = False
+        if not self.nav_goal_handle.accepted:
+            self.get_logger().warn("Nav goal rejected by server.")
+            self.nav_result_future = None
+            return
+        self.nav_result_future = self.nav_goal_handle.get_result_async()
+
+    def _cancel_nav(self):
+        if self.nav_goal_handle is not None:
+            self.nav_goal_handle.cancel_goal_async()
+        self.nav_goal_handle = None
+        self.nav_result_future = None
+        self.nav_in_flight = False
+
+    def _is_nav_complete(self) -> bool:
+        if not self._nav_ever_sent or self.nav_in_flight:
+            return False
+        if self.nav_result_future is None:
+            return False
+        return self.nav_result_future.done()
+
+    def _nav_succeeded(self) -> bool:
+        if not self._is_nav_complete():
+            return False
+        result = self.nav_result_future.result()
+        return result is not None and result.status == GoalStatus.STATUS_SUCCEEDED
+
+    def _nav_aborted(self) -> bool:
+        if not self._is_nav_complete():
+            return False
+        result = self.nav_result_future.result()
+        return result is not None and result.status in (
+            GoalStatus.STATUS_ABORTED,
+            GoalStatus.STATUS_CANCELED,
+        )
+
+    # ── Costmap check ──────────────────────────────────────────────────
+
+    def _cost_at_goal_ok(self, x: float, y: float) -> bool:
+        if self.costmap is None:
+            return True
+        mx, my = self._world_to_map(x, y)
+        w, h = self.costmap.info.width, self.costmap.info.height
+        if not (0 <= mx < w and 0 <= my < h):
+            return False
+        cost = self.costmap.data[my * w + mx]
+        if cost >= 50 or cost < 0:
+            self.get_logger().warn(
+                f"Approach ({x:.2f}, {y:.2f}) blocked (cost={cost})."
+            )
+            return False
+        return True
+
+    def _world_to_map(self, x: float, y: float):
+        res = self.costmap.info.resolution
+        ox, oy = (
+            self.costmap.info.origin.position.x,
+            self.costmap.info.origin.position.y,
+        )
+        return int((x - ox) / res), int((y - oy) / res)
+
+    # ── Nav2 lifecycle check ───────────────────────────────────────────
+
+    def _check_nav2_states(self):
+        now = self.get_clock().now().nanoseconds / 1e9
+        if now - self._last_nav2_check < 1.0:
+            return
+        self._last_nav2_check = now
+        for name, client in self._nav2_clients.items():
+            if not client.service_is_ready():
+                continue
+            req = GetState.Request()
+            future = client.call_async(req)
+            future.add_done_callback(lambda f, n=name: self._nav2_state_cb(f, n))
+
+    def _nav2_state_cb(self, future, node_name: str):
+        try:
+            result = future.result()
+            self._nav2_states[node_name] = result.current_state.label
+        except Exception:
+            self._nav2_states[node_name] = "error"
+        self.nav2_ready = all(s == "active" for s in self._nav2_states.values())
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = Task2Controller()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
