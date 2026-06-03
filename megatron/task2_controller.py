@@ -203,6 +203,8 @@ class Task2Controller(Node):
         self.nav_result_future = None
         self.nav_in_flight = False
         self._nav_ever_sent = False
+        self._nav_seq = 0        # incremented on cancel; filters stale callbacks
+        self._nav_rejected = False  # True when server rejected the last goal
 
         # --- Costmap ---
         self.costmap = None
@@ -529,24 +531,20 @@ class Task2Controller(Node):
         else:
             candidates = self._barrel_approach_candidates(target)
 
-        if attempt >= len(candidates):
-            self.get_logger().warn(
-                "All approach candidates exhausted — re-queuing target."
-            )
-            if self.current_target is not None:
-                self.current_target["approached"] = False
-                self.pending_targets.append(self.current_target)
-            self.current_target = None
-            self._transition(State.PATROL)
-            self._send_next_waypoint()
-            return
+        while attempt < len(candidates):
+            ax, ay, yaw = candidates[attempt]
+            if self._cost_at_goal_ok(ax, ay):
+                self._send_nav_goal(ax, ay, yaw)
+                return
+            attempt += 1
 
-        ax, ay, yaw = candidates[attempt]
-        if not self._cost_at_goal_ok(ax, ay):
-            self._send_approach(target, attempt + 1)
-            return
-
-        self._send_nav_goal(ax, ay, yaw)
+        self.get_logger().warn("All approach candidates exhausted — re-queuing target.")
+        if self.current_target is not None:
+            self.current_target["approached"] = False
+            self.pending_targets.append(self.current_target)
+        self.current_target = None
+        self._transition(State.PATROL)
+        self._send_next_waypoint()
 
     def _face_approach_candidates(self, pos, normal):
         """Fan of 8 from surface normal — same as controller.py."""
@@ -705,28 +703,35 @@ class Task2Controller(Node):
         self._tile_index = 0
         self._yellow_seen = False
         self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
-        arm_pose = "look_at_belt_right" if color == "red" else "look_at_belt_left"
-        self._pub_arm(arm_pose)
         ws_pos = self.workstation_poses[color]
         self._send_nav_goal(
             ws_pos[0], ws_pos[1], math.pi if color == "red" else math.pi / 2
         )
 
     def _handle_inspection(self):
-        # Phase -1: navigate to workstation first
+        # Phase 0: navigate to workstation
         if self._inspection_phase == 0 and not self._is_nav_complete():
             return
         if self._inspection_phase == 0 and self._is_nav_complete():
+            arm_pose = (
+                "look_at_belt_right"
+                if self._inspection_color == "red"
+                else "look_at_belt_left"
+            )
+            self._pub_arm(arm_pose)
             self._inspection_phase = 1
             self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
+            return
 
-        # TODO Phase 4: implement inspection phases 1–5
-        # Stub: immediately proceed to FOLLOW_BLUE_LINE
-        self.get_logger().warn(
-            "INSPECT_WORKSTATION not yet implemented — skipping to FOLLOW_BLUE_LINE."
-        )
-        self._pub_arm("garage")
-        self._transition(State.FOLLOW_BLUE_LINE)
+        # TODO Phase 4: implement inspection phases 1–5.
+        # Stub: phases 1+ skip straight to FOLLOW_BLUE_LINE.
+        # Remove this block when real phase logic is added.
+        if self._inspection_phase >= 1:
+            self.get_logger().warn(
+                "INSPECT_WORKSTATION not yet implemented — skipping to FOLLOW_BLUE_LINE."
+            )
+            self._pub_arm("garage")
+            self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── FOLLOW_BLUE_LINE ──────────────────────────────────────────────
 
@@ -793,6 +798,38 @@ class Task2Controller(Node):
             f"Navigating to waypoint {self.waypoint_index}: ({x:.2f}, {y:.2f})"
         )
         self._send_nav_goal(x, y, yaw)
+        self._publish_goal_markers()
+
+    def _publish_goal_markers(self):
+        markers: list[Marker] = []
+        for i, (x, y, yaw) in enumerate(self.waypoints):
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = "waypoints"
+            m.id = i
+            m.type = Marker.ARROW
+            m.action = Marker.ADD
+            m.pose.position.x = float(x)
+            m.pose.position.y = float(y)
+            m.pose.position.z = 0.05
+            q = quaternion_from_euler(0.0, 0.0, float(yaw))
+            m.pose.orientation.x = q[0]
+            m.pose.orientation.y = q[1]
+            m.pose.orientation.z = q[2]
+            m.pose.orientation.w = q[3]
+            m.scale.x = 0.3
+            m.scale.y = 0.08
+            m.scale.z = 0.08
+            if i < self.waypoint_index:
+                m.color.r, m.color.g, m.color.b, m.color.a = 0.3, 0.7, 0.3, 0.5
+            elif i == self.waypoint_index:
+                m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 1.0, 0.0, 1.0
+            else:
+                m.color.r, m.color.g, m.color.b, m.color.a = 0.3, 0.3, 1.0, 0.5
+            m.lifetime.sec = 0
+            markers.append(m)
+        self.goal_marker_pub.publish(MarkerArray(markers=markers))
 
     def _send_nav_goal(self, x: float, y: float, yaw: float) -> bool:
         if not self.nav_client.wait_for_server(timeout_sec=0.5):
@@ -804,37 +841,46 @@ class Task2Controller(Node):
         goal.pose.header.stamp = self.get_clock().now().to_msg()
         goal.pose.pose.position.x = float(x)
         goal.pose.pose.position.y = float(y)
-        q = quaternion_from_euler(0.0, 0.0, float(yaw))
-        goal.pose.pose.orientation.w = q[0]
-        goal.pose.pose.orientation.x = q[1]
-        goal.pose.pose.orientation.y = q[2]
-        goal.pose.pose.orientation.z = q[3]
+        q = quaternion_from_euler(0.0, 0.0, float(yaw))  # returns [x, y, z, w]
+        goal.pose.pose.orientation.x = q[0]
+        goal.pose.pose.orientation.y = q[1]
+        goal.pose.pose.orientation.z = q[2]
+        goal.pose.pose.orientation.w = q[3]
 
         self.nav_in_flight = True
         self._nav_ever_sent = True
+        self._nav_rejected = False
+        seq = self._nav_seq
         future = self.nav_client.send_goal_async(goal)
-        future.add_done_callback(self._nav_goal_response)
+        future.add_done_callback(lambda f: self._nav_goal_response(f, seq))
         return True
 
-    def _nav_goal_response(self, future):
+    def _nav_goal_response(self, future, seq: int):
+        if seq != self._nav_seq:
+            return  # stale callback from a cancelled goal
         self.nav_goal_handle = future.result()
         self.nav_in_flight = False
         if not self.nav_goal_handle.accepted:
             self.get_logger().warn("Nav goal rejected by server.")
             self.nav_result_future = None
+            self._nav_rejected = True
             return
         self.nav_result_future = self.nav_goal_handle.get_result_async()
 
     def _cancel_nav(self):
+        self._nav_seq += 1  # invalidates any in-flight callback
         if self.nav_goal_handle is not None:
             self.nav_goal_handle.cancel_goal_async()
         self.nav_goal_handle = None
         self.nav_result_future = None
         self.nav_in_flight = False
+        self._nav_rejected = False
 
     def _is_nav_complete(self) -> bool:
         if not self._nav_ever_sent or self.nav_in_flight:
             return False
+        if self._nav_rejected:
+            return True
         if self.nav_result_future is None:
             return False
         return self.nav_result_future.done()
@@ -842,13 +888,23 @@ class Task2Controller(Node):
     def _nav_succeeded(self) -> bool:
         if not self._is_nav_complete():
             return False
-        result = self.nav_result_future.result()
+        if self._nav_rejected:
+            return False
+        try:
+            result = self.nav_result_future.result()
+        except Exception:
+            return False
         return result is not None and result.status == GoalStatus.STATUS_SUCCEEDED
 
     def _nav_aborted(self) -> bool:
         if not self._is_nav_complete():
             return False
-        result = self.nav_result_future.result()
+        if self._nav_rejected:
+            return True
+        try:
+            result = self.nav_result_future.result()
+        except Exception:
+            return True
         return result is not None and result.status in (
             GoalStatus.STATUS_ABORTED,
             GoalStatus.STATUS_CANCELED,
