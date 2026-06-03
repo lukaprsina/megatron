@@ -264,6 +264,7 @@ class FaceDetectorNode(Node):
                     cy = (ry1 + ry2) // 2
                     cv2.circle(cv_image, (cx, cy), 4, (0, 0, 255), -1)
 
+
                 else:
                     # Rejected contender
                     rejection_counts[rejection_reason] += 1
