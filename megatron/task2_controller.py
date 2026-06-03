@@ -170,6 +170,7 @@ def _parse_qr_task(text: str) -> str | None:
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.8  # metres — two detections within this are the same object
+    MAX_RETRY_CYCLES = 3  # bump distance up to 3× approach_retry_offset before giving up
 
     def __init__(self):
         super().__init__("task2_controller")
@@ -180,10 +181,14 @@ class Task2Controller(Node):
         self.declare_parameter("barrel_approach_distance", 0.50)
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.25)
+        self.declare_parameter("manual_mode", False)
 
         wp_file = cast(str, self.get_parameter("waypoints_file").value)
         self.waypoints = load_waypoints_from_yaml(wp_file)
         self.get_logger().info(f"Loaded {len(self.waypoints)} waypoints from {wp_file}")
+        self.manual_mode = cast(bool, self.get_parameter("manual_mode").value)
+        if self.manual_mode:
+            self.get_logger().info("MANUAL MODE — perception only, no navigation. Drive with keyboard.")
 
         # --- State ---
         self.state = State.INIT
@@ -450,13 +455,21 @@ class Task2Controller(Node):
         msg = String()
         msg.data = new_state.name
         self.robot_state_pub.publish(msg)
+        if new_state == State.DONE:
+            self._cancel_nav()
+            self.cmd_vel_pub.publish(Twist())
 
     # ── INIT ──────────────────────────────────────────────────────────
 
     def _handle_init(self):
         if not self.initial_pose_received:
             return
+
         self._check_nav2_states()
+
+        if self.manual_mode:
+            return
+
         if not self.nav2_ready:
             return
         self.get_logger().info("Nav2 ready — starting patrol.")
@@ -473,7 +486,15 @@ class Task2Controller(Node):
             self.current_target = target
             self._approach_attempt = 0
             self._transition(State.APPROACH_TARGET)
-            self._send_approach(target, attempt=0)
+            if not self._send_approach(target, attempt=0):
+                self.get_logger().warn(
+                    "Initial approach candidates blocked — re-queuing target."
+                )
+                self.current_target["approached"] = False
+                self.pending_targets.append(self.current_target)
+                self.current_target = None
+                self._transition(State.PATROL)
+                self._send_next_waypoint()
             return
 
         if not self._is_nav_complete():
@@ -523,32 +544,59 @@ class Task2Controller(Node):
         if self._nav_aborted():
             self._approach_attempt += 1
             if self.current_target is not None:
-                self._send_approach(self.current_target, self._approach_attempt)
+                if not self._send_approach(self.current_target, self._approach_attempt):
+                    self.get_logger().warn(
+                        "All approach candidates exhausted — re-queuing target."
+                    )
+                    self.current_target["approached"] = False
+                    self.pending_targets.append(self.current_target)
+                    self.current_target = None
+                    self._transition(State.PATROL)
+                    self._send_next_waypoint()
 
-    def _send_approach(self, target: dict, attempt: int):
-        if target["type"] == "face":
-            candidates = self._face_approach_candidates(target["pos"], target["normal"])
+    def _send_approach(self, target: dict, attempt: int) -> bool:
+        """Try candidate at `attempt`, costmap-skip forward if blocked.
+
+        Returns True if a nav goal was sent, False if all candidates at all
+        retry distances have been exhausted.
+        """
+        _type = target["type"]
+        if _type == "face":
+            n_candidates = 8
+            base_dist = cast(float, self.get_parameter("face_approach_distance").value)
+            def _gen(d): return self._face_approach_candidates(
+                target["pos"], target["normal"], distance=d)
         else:
-            candidates = self._barrel_approach_candidates(target)
+            n_candidates = 1
+            base_dist = cast(float, self.get_parameter("barrel_approach_distance").value)
+            def _gen(d): return self._barrel_approach_candidates(target, distance=d)
 
-        while attempt < len(candidates):
-            ax, ay, yaw = candidates[attempt]
-            if self._cost_at_goal_ok(ax, ay):
-                self._send_nav_goal(ax, ay, yaw)
-                return
-            attempt += 1
+        retry_offset = cast(float, self.get_parameter("approach_retry_offset").value)
+        remaining_cycles = self.MAX_RETRY_CYCLES - (attempt // n_candidates)
 
-        self.get_logger().warn("All approach candidates exhausted — re-queuing target.")
-        if self.current_target is not None:
-            self.current_target["approached"] = False
-            self.pending_targets.append(self.current_target)
-        self.current_target = None
-        self._transition(State.PATROL)
-        self._send_next_waypoint()
+        while remaining_cycles > 0:
+            cycle = attempt // n_candidates
+            distance = base_dist + retry_offset * cycle
+            candidates = _gen(distance)
+            idx = attempt % n_candidates
 
-    def _face_approach_candidates(self, pos, normal):
+            while idx < len(candidates):
+                ax, ay, yaw = candidates[idx]
+                if self._cost_at_goal_ok(ax, ay):
+                    self._send_nav_goal(ax, ay, yaw)
+                    self._approach_attempt = attempt  # sync for next abort
+                    return True
+                idx += 1
+                attempt += 1
+
+            attempt = (cycle + 1) * n_candidates
+            remaining_cycles -= 1
+
+        return False  # fully exhausted
+
+    def _face_approach_candidates(self, pos, normal, distance=None):
         """Fan of 8 from surface normal — same as controller.py."""
-        dist = cast(float, self.get_parameter("face_approach_distance").value)
+        dist = distance if distance is not None else cast(float, self.get_parameter("face_approach_distance").value)
         nx, ny = normal
         base = math.atan2(ny, nx)
         px, py = float(pos[0]), float(pos[1])
@@ -571,10 +619,10 @@ class Task2Controller(Node):
             for o in offsets
         ]
 
-    def _barrel_approach_candidates(self, target: dict):
+    def _barrel_approach_candidates(self, target: dict, distance=None):
         """Single approach candidate — position-based (no fanout)."""
         pos = target["pos"]
-        dist = cast(float, self.get_parameter("barrel_approach_distance").value)
+        dist = distance if distance is not None else cast(float, self.get_parameter("barrel_approach_distance").value)
         lateral = cast(float, self.get_parameter("barrel_lateral_offset").value)
         px, py = float(pos[0]), float(pos[1])
 

@@ -49,6 +49,12 @@ def generate_launch_description():
             default_value=PathJoinSubstitution([pkg_megatron, "config", "nav2.yaml"]),
             description="Nav2 params file",
         ),
+        DeclareLaunchArgument(
+            "manual_mode",
+            default_value="false",
+            choices=["true", "false"],
+            description="Perception-only teleop mode (no autonomous patrol)",
+        ),
     ]
 
     sim_arm_nav = IncludeLaunchDescription(
@@ -120,6 +126,7 @@ def generate_launch_description():
                 "waypoints_file": PathJoinSubstitution(
                     [pkg_megatron, "waypoints", "task.yaml"]
                 ),
+                "manual_mode": LaunchConfiguration("manual_mode"),
             }
         ],
     )
