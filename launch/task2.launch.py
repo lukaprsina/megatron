@@ -101,6 +101,14 @@ def generate_launch_description():
         output="screen",
     )
 
+    cylinder_segmentation = Node(
+        package="cylinder_segmentation",
+        executable="cylinder_segmentation",
+        name="cylinder_segmentation",
+        output="screen",
+        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+    )
+
     controller = Node(
         package="megatron",
         executable="controller",
@@ -135,6 +143,7 @@ def generate_launch_description():
     ld = LaunchDescription(args)
     ld.add_action(sim_arm_nav)
     ld.add_action(rviz)
+    ld.add_action(cylinder_segmentation)
     ld.add_action(face_detector)
     ld.add_action(ring_detector)
     ld.add_action(arm_mover)
