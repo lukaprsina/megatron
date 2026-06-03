@@ -1,0 +1,1165 @@
+╭─── Claude Code v2.1.161 ─────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting        │
+│                 Welcome back klod!                 │ started                 │
+│                                                    │ Run /init to create a … │
+│                       ▐▛███▜▌                      │ ─────────────────────── │
+│                      ▝▜█████▛▘                     │ What's new              │
+│                        ▘▘ ▝▝                       │ `OTEL_RESOURCE_ATTRIBU… │
+│  Sonnet 4.6 · Claude Pro · prsinaluka@gmail.com's  │ `claude agents` rows n… │
+│  Organization                                      │ `/mcp` now collapses c… │
+│                    ~/coding/dis                    │ /release-notes for more │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ /model default                                                                
+  ⎿  Set model to claude-sonnet-4-6
+
+❯ Prompt given to DeepSeek V4 Pro:                                              
+                                                                                
+  ```                                                                           
+  Read @AGENTS.md and any other relevant materials, research the project        
+  (including the documentation and `src/megatron/docs`). I am just starting     
+  Task 2, and a teammate has kindly given me access to their code for           
+  reference, located in `./src/vendor/teammate-project/`. Their project is      
+  complete, so let's do an initial exploration of it. Run at least two          
+  subagents on both repositories (maybe another for other vendor repos),        
+  identify the solutions used, and write a markdown file at the root with your  
+  findings. Be thorough and good luck!                                          
+  ```                                                                           
+                                                                                
+  I pasted the results into `src/megatron/docs/04*.md`, a-c are subagents, d is 
+  the result. Also read 00 and 01 docs. Read, research a bit, then get the      
+  /grill-with-docs skill (read it from .agents directly) and let's figure this  
+  out. How can we make our Task 2 as fast as possible but not half-assed, code  
+  must be reliable. Task 2 is RViz simulation only, no IRL.                     
+  ⎿  Read AGENTS.md (18 lines)
+
+  Thought for 2s (ctrl+o to expand)
+
+● Let me read the key docs to get oriented before diving into the skill.
+
+  Thought for 2s, read 4 files, listed 1 directory (ctrl+o to expand)
+
+● Now let me read the synthesis and teammate analysis docs in parallel.
+
+  Thought for 4s, read 2 files (ctrl+o to expand)
+
+● Now let me look for the grill-with-docs skill in .agents.
+
+  Thought for 2s, searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Now let me read the grill-with-docs skill.
+
+  Thought for 7s, read 2 files (ctrl+o to expand)
+
+● Let me check for existing CONTEXT.md and ADRs.
+
+  Thought for 24s, listed 1 directory (ctrl+o to expand)
+
+● Good — I have everything I need: the synthesis, our codebase structure, the
+  teammate's reference, and the skill. No CONTEXT.md terms to challenge yet, so
+  I'll start fresh.
+
+  ---
+  I'll run the grill-with-docs session now. One question at a time, waiting for
+  your answer before continuing.
+
+  ---
+  Question 1 — Controller architecture (hard to reverse)
+
+  Our existing mission_controller is Task 1-only: it knows only faces and rings,
+  has no concept of two rooms, lines, dialogue, or inspection. The teammate
+  solved this with a brand-new behavior_manager.py (1319 lines) alongside their
+  existing nodes.
+
+  Options:
+  - A) Create a new task2_controller.py, starting from scratch with the two-room
+  state machine. Reuse Nav2 / approach-candidate / costmap-guard logic by
+  importing from a shared module. Keep mission_controller untouched.
+  - B) Extend mission_controller incrementally with Task 2 states. Avoids a
+  parallel file but risks compounding complexity in an already 1127-line file.
+  - C) Adapt the teammate's behavior_manager.py directly into our package (topic
+  names adjusted). Gets a proven state machine fast, but couples us to their
+  topic topology and may introduce dead code we don't understand.
+
+  My recommendation: A. The two-room state machine (PATROL-ROOM1 → INTERACT →
+  WORKSTATION → BLUE-LINE-ROOM2 → REPORT) is fundamentally incompatible with the
+  current EXPLORING state's logic. Extending incrementally will produce
+  unmaintainable spaghetti. Option C gives us untested coupling debt with no
+  upside in simulation where we control the environment. Starting fresh with a
+  clean state machine, and calling our shared perception_utils.py utilities
+  directly, gets us reliable code fastest.
+
+  What do you think — A, B, C, or something else?
+
+❯ A.                                                                            
+
+  Thought for 29s (ctrl+o to expand)
+
+● Good. Next branch: scope.
+
+  ---
+  Question 2 — Which shortcuts do we take?
+
+  The spec explicitly allows several shortcuts for a lower grade. Given
+  simulation-only and the goal of "fast but reliable," we need to decide upfront
+  what's in scope.
+
+  The spec allows skipping exactly one of: ring counting, barrel inspection, or
+  anomaly detection. Other allowed shortcuts: use QR codes instead of ASR, skip
+  autonomous exploration, skip anomaly segmentation (report defects at image
+  level), skip gender recognition, skip face recognition entirely.
+
+  Grading impact of each missing feature:
+  - Autonomous exploration: −1 pt (easiest skip, we have fixed waypoints
+  already)
+  - Face recognition + gender: −2 pt combined, medium effort
+  - ASR dialogue (QR instead): −2 pt but QR shortcut costs ~0 pt to implement
+  - Yellow line avoidance: −2 pt (medium effort, camera-only trick)
+  - Blue line following: −2 pt (medium effort, arm camera)
+  - Anomaly detection pipeline: −3 pt for defects, −1 pt tile detection, −1 pt
+  cell detection = up to −5 pt
+  - Barrel inspection: −2 pt (part of must-do cylinder detection)
+  - Inspection report: −1 pt
+
+  My recommendation — the pragmatic target scope:
+
+  ┌────────────────────┬───────────┬────────────────────────────────────────┐
+  │      Feature       │ Decision  │               Rationale                │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ Autonomous         │ Skip      │ Fixed waypoints work fine, 1 pt not    │
+  │ exploration        │           │ worth frontier-exploration complexity  │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ QR dialogue        │ Implement │ Near-zero cost, unlocks full           │
+  │ (shortcut)         │           │ task-dispatch flow                     │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ Face recognition   │ Implement │ face_recognition lib is easy to add on │
+  │ (dlib)             │           │  top of our existing face_detector     │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ Gender recognition │ Skip      │ Caffe model dependency, +1 pt only,    │
+  │                    │           │ assume everyone answers directly       │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ Yellow line        │ Implement │ Camera-only + dual-topic override is a │
+  │ avoidance          │           │  clean pattern, 2 pts                  │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ Blue line          │ Implement │ Arm camera + centroid steering, 2 pts, │
+  │ following          │           │  sim-friendly                          │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ Cylinder/barrel    │ Implement │ 2 pts must-do, adapt dis_tutorial5 C++ │
+  │ detection          │           │  node                                  │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ Barrel spill       │ Implement │ Relatively self-contained with         │
+  │ detection          │           │ pointcloud_viewer pattern              │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ Anomaly detection  │ Implement │ 5 pts max, ML can be trained offline   │
+  │ + tiles            │           │ now                                    │
+  ├────────────────────┼───────────┼────────────────────────────────────────┤
+  │ Inspection report  │ Implement │ 1 pt, straightforward once data is     │
+  │                    │           │ collected                              │
+  └────────────────────┴───────────┴────────────────────────────────────────┘
+
+  This targets roughly 30/35 points max (minus gender, minus exploration, minus
+  performance unknowns).
+
+  Does this scope feel right, or do you want to drop/add anything?
+
+❯ Good, I think QR code do cost us a point or two, that's okay though, we       
+  really don't have the time. I think this is the optimal selection.            
+
+  Thought for 27s (ctrl+o to expand)
+
+● Noted — QR shortcut accepted, small point cost, right call.
+
+  ---
+  Question 3 — Detect → confirm pipeline: single-node or split?
+
+  The teammate splits perception into raw detector nodes + separate localizer
+  nodes (one per object type) that cluster in map frame and publish confirmed
+  markers. We have IncrementalTrackManager in perception_utils.py which does the
+  same clustering/confirmation/dedup logic.
+
+  Our face_detector.py already uses IncrementalTrackManager internally — it only
+  publishes confirmed faces on /detected_faces. The controller then does a
+  second dedup pass on top.
+
+  Options:
+  - A) Keep detection + confirmation inside each detector node (our current
+  pattern). New cylinder_detector.py follows the same pattern. Controller
+  subscribes to three already-confirmed topics: /detected_faces,
+  /detected_rings, /detected_cylinders. No separate localizer nodes needed.
+  - B) Split each detector into a raw publisher + a localizer node (teammate
+  pattern). More nodes, more topics, but cleaner separation — detector doesn't
+  need to hold map-frame transforms.
+
+  My recommendation: A. We already have it working this way for faces. The
+  IncrementalTrackManager handles map-frame clustering correctly (it weights by
+  inverse-distance-squared, prunes stale tracks, counts confirmations). Adding a
+  second node just to relay confirmed markers is unnecessary complexity. The
+  only reason the teammate split it was because they reused tutorial nodes
+  (detect_people.py, cylinder_segmentation C++) that they couldn't modify —
+  their localizer nodes were adapters. We write our own nodes, so we can bake it
+  in.
+
+  Agree?
+
+❯ A.                                                                            
+
+  Thought for 19s (ctrl+o to expand)
+
+● Good. Next: the only missing must-do detector.
+
+  ---
+  Question 4 — Cylinder/barrel detector: how do we build it?
+
+  We need cylinder detection (2 pts, must-do). The teammate used dis_tutorial5's
+  C++ cylinder_segmentation node (PCL RANSAC cylinder fit) as the raw detector,
+  then wrapped it with their Python cylinder_localizator.py. We're on pattern A
+  (no separate localizer), but dis_tutorial5 is a read-only C++ tutorial node
+  we can't modify.
+
+  Options:
+  - A) Launch dis_tutorial5's cylinder_segmentation as-is (publishes raw
+  /cylinder_markers) + write cylinder_detector.py in Python that subscribes to
+  that, applies IncrementalTrackManager for clustering/confirmation, classifies
+  color from RGB, detects orientation, and publishes confirmed
+  /detected_cylinders. Two-node setup, but the Python node is what the
+  controller sees — consistent with pattern A from the controller's perspective.
+  - B) Write a pure Python cylinder detector from scratch using numpy +
+  organized PC2 (similar to how our ring_detector.py works). No C++ dependency,
+  single node. More dev time, less battle-tested geometry.
+  - C) Use YOLO-based barrel detection on RGB image (visual appearance) + PC2
+  for 3D position. Faster to prototype but less robust to pose/lighting
+  variation in sim.
+
+  My recommendation: A. The C++ PCL RANSAC fit is reliable for actual 3D
+  cylinder shapes — it's exactly what this task needs. Writing our own 3D
+  cylinder fitter in Python is a week of work we don't have. Option C is too
+  fragile for "reliable code." The two-node split here is forced by the
+  read-only C++ dependency, not a design choice — it doesn't contradict pattern
+  A since cylinder_detector.py is still the authoritative confirmed-output node
+  the controller talks to.
+
+  Agree?
+
+❯ A, anything else is masochism.                                                
+
+  Thought for 27s (ctrl+o to expand)
+
+● Agreed. Next: the core design.
+
+  ---
+  Question 5 — task2_controller top-level states
+
+  The new controller needs to handle two fundamentally different rooms. Here's
+  the proposed state machine:
+
+  INIT
+    → wait for Nav2 lifecycle + initial pose
+  PATROL
+    → waypoint navigation (room 1), all detectors running
+    → on confirmed face/barrel: push to target queue, preempt waypoint
+  APPROACH_TARGET
+    → navigate 0.35m in front of face or 0.5m lateral of barrel
+    → on arrival: INTERACT
+  INTERACT
+    → if face: wait for QR scan → record task assignment → speech greeting →
+  back to PATROL
+    → if barrel: trigger spill check → speech warning if leaking → back to
+  PATROL
+    → patrol resumes from saved pose after each interruption
+  INSPECT_WORKSTATION
+    → entered after patrol complete, if a workstation task was assigned
+    → controller publishes workstation color + pose to a `/inspection_command`
+  topic
+    → a separate `workstation_inspector.py` node takes over (own 6-phase state
+  machine)
+    → controller waits for `/inspection_done` signal, then proceeds
+  FOLLOW_BLUE_LINE
+    → after workstation inspection (or if no workstation task)
+    → controller enables `/blue_line_enabled` Bool, disables Nav2 patrol
+    → `blue_line_follower.py` drives directly via `/cmd_vel_unstamped`
+    → on "report" QR scan near CTO: generate report, publish to RViz, speech
+  DONE
+    → all objectives complete, stop
+
+  Key design point: workstation_inspector.py is its own node with its own Nav2
+  action client. The controller delegates — posts a command, waits for a signal,
+  doesn't micromanage the 6 fine-positioning phases. Same subprocess-style
+  delegation the teammate uses, but as a proper ROS 2 node (not a subprocess) so
+  it stays in the graph and we can monitor it in RViz.
+
+  My recommendation: This split is right. The 6-phase fine-positioning (LiDAR
+  wall stop → yaw align → Hough tilt → yellow-line back-up → tile scan → escape)
+  is its own state machine and belongs in its own node. Cramming it into the
+  controller would make the controller unreadable and harder to debug.
+
+  Does this state machine structure match your mental model, or any states
+  missing?
+
+❯ I don't think the workstation inspector should be it's own node. Seems        
+  cleaner, but I don't want clean. It has to work and I have to do it fast.     
+  Writing two extra API surfaces for it doesn't make sense. Am I wrong here?    
+  You have full agency to decline.                                              
+                                                                                
+  If you do agree, how would you like to do this? Nested state machine or       
+  inline with keys "INSPECT_WORKSTATION/${name}".                               
+
+  Thought for 22s (ctrl+o to expand)
+
+● You're right. I concede — a separate node for something that's fundamentally a
+  linear sequence of phases adds two topics, a launch entry, and a
+  synchronization surface you'll have to debug at 2am. The only reason the
+  teammate split it was the protected-code constraint. We don't have that
+  constraint.
+
+  Nested state machine, not string keys. Here's why:
+
+  String keys like INSPECT_WORKSTATION/phase_0 leak the inspection's internal
+  state into the top-level enum. Every if self._state == ... check elsewhere in
+  the controller has to be aware of the slash syntax. It's a flat state machine
+  pretending to be hierarchical.
+
+  A nested approach keeps the controller's top-level states clean:
+
+  class State(Enum):
+      INIT, PATROL, APPROACH_TARGET, INTERACT,
+      INSPECT_WORKSTATION, FOLLOW_BLUE_LINE, DONE
+
+  # secondary counter, only meaningful when _state == INSPECT_WORKSTATION
+  self._inspection_phase: int = 0  # 0=approach_wall, 1=yaw_align, 2=hough_tilt,
+                                    # 3=backup_to_yellow, 4=tile_scan, 5=escape
+
+  The timer callback pattern stays clean:
+
+  def _tick(self):
+      if self._state == State.PATROL:
+          self._tick_patrol()
+      elif self._state == State.INSPECT_WORKSTATION:
+          self._tick_inspection()   # internal switch on self._inspection_phase
+      ...
+
+  _tick_inspection() is a private method with its own if phase == 0 / elif phase
+  == 1 / ... — it never bleeds into the main tick. You can read the controller
+  top-level logic without knowing anything about inspection phases.
+
+  No extra class needed, no string parsing, no cross-node signaling. Agreed?
+
+❯ Agreed.                                                                       
+
+  Thought for 24s (ctrl+o to expand)
+
+● Good. The longest lead-time item needs to be decided now.
+
+  ---
+  Question 6 — Anomaly detection: what model?
+
+  The spec explicitly accepts PCA, AE, VAE, normalising flow, diffusion models,
+  or discriminative/reconstructive methods. Training images are already in
+  worlds/task2_meshes/ (good1-6.png, damaged5-27.png). The teammate used U-Net
+  (ResNet34 encoder, 98 MB .pth, GPU training, segmentation_models_pytorch +
+  albumentations).
+
+  Key simulation advantage: Gazebo renders perfectly consistent textures and
+  lighting. The test tiles will look identical to the training tiles — no
+  real-world variation to handle. This makes heavy ML overkill.
+
+  Options:
+  - A) PCA reconstruction error. Fit PCA on flattened good-tile patches. At
+  inference: project → reconstruct → per-pixel residual → threshold. Trains in
+  seconds on 6 images, zero GPU, zero heavy deps, deterministic.
+  - B) Lightweight autoencoder (small CNN, ~4 layers). Slightly more expressive
+  than PCA, still trains in minutes on CPU. Adds PyTorch dependency.
+  - C) U-Net with ResNet34 (teammate approach). Handles real-world variation
+  well but needs GPU training, 98 MB model, segmentation_models_pytorch,
+  albumentations, CLAHE normalization. Overkill for simulation.
+
+  My recommendation: A. In Gazebo, a good tile always looks like a good tile and
+  a cracked tile always has visible texture deviation. PCA reconstruction error
+  catches this reliably. If the 6 good images aren't enough variance, we
+  augment with random crops, rotations, and brightness jitter in numpy — no
+  framework needed. If it fails on mild defects we can step up to B, but try A
+  first. It's 50 lines of numpy, not a training pipeline.
+
+  Agree, or do you want the flexibility of B from the start?
+
+❯ Agree, but does it handle the perspective of the camera not being dead-on     
+  well?                                                                         
+
+  Thought for 14s (ctrl+o to expand)
+● Good catch — this is the real constraint on PCA.
+
+  PCA works on flattened pixel vectors. If the camera angle varies, the same
+  good tile looks different each frame, and reconstruction error spikes
+  spuriously. PCA is only reliable on geometrically normalized patches.
+
+  The fix is a perspective warp before PCA, not a different model. This is
+  exactly what the teammate's tile_detect.py does before passing tiles to their
+  classifier — OTSU threshold → contour detection → 4-corner extraction →
+  cv2.getPerspectiveTransform + cv2.warpPerspective → canonical fronto-parallel
+  patch. Classification happens on the warped image, not the raw camera frame.
+
+  If we implement that warp step (which we need to do anyway to reliably segment
+  individual tiles from the conveyor belt), PCA receives aligned, normalized
+  patches and the perspective problem disappears. The warp is ~30 lines of
+  OpenCV, nothing exotic.
+
+  So the pipeline is:
+
+  arm camera frame
+    → OTSU threshold → contour → 4-corner fit
+    → warpPerspective → canonical N×N patch
+    → PCA reconstruction error → threshold → DEFECT / OK
+
+  The warp is load-bearing. If the fine-positioning phases (LiDAR wall stop,
+  Hough tilt correction) don't get the camera close enough to overhead, the
+  contour-finding step breaks before PCA even sees anything. So the warp's
+  robustness depends on fine-positioning quality.
+
+  Bottom line: PCA is still the right call — but it's contingent on the warp
+  working, which is contingent on fine-positioning working. These three
+  components live and die together.
+
+  Does that change anything for you, or do you want to proceed with PCA + warp?
+
+❯ Agree, PCA + warp.                                                            
+
+  Thought for 33s (ctrl+o to expand)
+
+● Good. The perception and ML decisions are locked. Next: inter-node wiring.
+
+  ---
+  Question 7 — Global state broadcast: one topic or per-node enable/disable?
+
+  Several nodes need to know what the controller is doing to behave correctly:
+  - yellow_line_avoider: should only activate during PATROL (not during
+  inspection or blue-line)
+  - blue_line_follower: should only drive when the controller hands off room 2
+  - qr_reader: needs to distinguish "face mode" (scan for task QR) vs "blue-line
+  mode" (scan for report QR)
+
+  Options:
+  - A) Single /robot_state String topic (latched), published by the controller
+  on every state transition. Each node subscribes and checks the string to
+  decide whether to activate. One source of truth, easy to observe in
+  RViz/console. Teammate uses this exact pattern.
+  - B) Per-node Bool enable/disable topics: /yellow_line_enabled,
+  /blue_line_enabled, /qr_mode (String). Controller explicitly enables/disables
+  each node. More explicit, but the controller has to remember to flip every
+  flag on every transition — easy to miss one.
+  - C) No broadcast — each node infers its own activation from what it sees
+  (e.g. yellow avoider always runs, blue follower checks its own line-found
+  state). Simpler but brittle: no central coordination.
+
+  My recommendation: A. One /robot_state String, latched. The controller
+  publishes "PATROL", "APPROACH_TARGET", "INTERACT", "INSPECT_WORKSTATION",
+  "FOLLOW_BLUE_LINE", "DONE" on each transition. Every dependent node has one
+  subscriber and one string comparison. Adding a new node that needs state
+  awareness is trivial — subscribe to /robot_state, done. Option B scales badly:
+  adding a new node means adding a new topic and remembering to publish it on
+  every controller transition. Option C is a debugging nightmare.
+
+  The one nuance: blue_line_follower still gets an explicit /blue_line_enabled
+  Bool in addition to reading /robot_state — because it needs a clean
+  rising-edge trigger to start its SEARCH sub-state, not just a level check. But
+  everything else reads /robot_state.
+
+  Agree?
+
+❯ Option A is the cleanest. Two alternatives to avoid the extra topic:          
+  - Edge-detect /robot_state: blue_line_follower stores prev_state, triggers    
+  SEARCH on prev != "FOLLOW_BLUE_LINE" and curr == "FOLLOW_BLUE_LINE". Same     
+  effect, no extra topic.                                                       
+  - Dedicated trigger topic: /blue_line_go (Empty), fired once by the           
+  controller on handoff. Even simpler than a Bool.                              
+
+  Thought for 18s (ctrl+o to expand)
+
+● Both are better than the extra Bool. Edge-detect wins — blue_line_follower
+  already needs to subscribe to /robot_state to know when to stop (state
+  transitions out), so prev_state tracking costs one variable and zero extra
+  topics. No new surface at all.
+
+  def _on_robot_state(self, msg):
+      curr = msg.data
+      if self._prev_state != "FOLLOW_BLUE_LINE" and curr == "FOLLOW_BLUE_LINE":
+          self._start_search()  # rising-edge trigger
+      self._prev_state = curr
+
+  /blue_line_go Empty is clean too, but it's an extra topic for something
+  already expressible in existing data. Agreed: edge-detect on /robot_state, no
+  extra topic.
+
+  ---
+  Question 8 — Face recognition: enhance face_detector or new node?
+
+  We need to identify persons by name from photos in worlds/task2_meshes/ (fred,
+  elena, jeff, anita, robert, maria, luka). The face_recognition library
+  (dlib-based) runs at ~2 Hz on CPU.
+
+  Our face_detector.py already runs YOLO at ~10 Hz with a synchronized RGB + PC2
+  subscriber. Adding 2 Hz face_recognition on top means:
+  - Same node, heavier per-frame callback
+  - But in simulation CPU headroom is generous
+
+  Options:
+  - A) Enhance face_detector.py directly: on each YOLO detection, run
+  face_recognition.compare_faces() against preloaded personnel encodings.
+  Publish name in the confirmed track's label. One node, zero extra topics.
+  - B) Separate face_recognizer.py node subscribing to /face_detections_image +
+  confirmed face poses. Runs recognition asynchronously. Publishes name back —
+  controller waits for it during INTERACT. Extra node, extra topic, but YOLO
+  throughput unaffected.
+
+  My recommendation: A. Simulation CPU is not a bottleneck. Running recognition
+  in the same callback keeps everything in one place — face position, name, and
+  confirmation count all tracked together in IncrementalTrackManager. We can
+  throttle recognition to every Nth detection (e.g. only run face_recognition
+  every 5th YOLO hit) to cap CPU, no architecture change needed. A separate node
+  adds a second topic the controller must join before it can greet someone.
+
+  Agree?
+
+❯ Yes, A, this is a good one.                                                   
+
+  Thought for 43s (ctrl+o to expand)
+
+● Good. Almost through the decision tree. One important simplification to
+  confirm.
+
+  ---
+  Question 9 — Workstation positions: hardcode or detect?
+
+  The teammate built line_localizator.py + workstation_recorder.py to detect
+  red/green floor lines and dynamically compute workstation approach positions.
+  That's ~586 lines of skeletonization, HoughLinesP, 3D PCA fitting, and
+  confirmation logic.
+
+  The spec says: "The main setup will not change" and "The teams will be allowed
+  to build the map in advance." Workstations are part of the fixed factory
+  layout — unlike faces, rings, and tiles which are repositioned on evaluation
+  day.
+
+  Options:
+  - A) Hardcode workstation approach poses (one for red cell, one for green
+  cell) as parameters in task2.launch.py or a YAML config. Zero detection
+  complexity, guaranteed correct for the known map.
+  - B) Detect workstations dynamically via floor line color. Required if we
+  didn't know the map, but we do.
+
+  My recommendation: A, obviously. The map is built in advance, workstations
+  don't move, we have factory.pgm. Spending time on dynamic workstation
+  detection would be the wrong trade. We set two poses in YAML, the controller
+  reads them, done. The only thing dynamic is which workstation to visit — and
+  that comes from the QR task, not from detection.
+
+  Agree?
+
+❯ /export                                                                       
+  ⎿  Conversation copied to clipboard
+
+❯ The instructions say to detect it dynamically, but it's implicit. They gave   
+  us better instructions in the class. We *could* cheat and hardcode, the       
+  assistant doesn't read the code. What are other options.                      
+
+  Thought for 31s (ctrl+o to expand)
+
+● Fair — there's real ground between "full line detection pipeline" and "pure
+  hardcode." Here are the actual options:
+
+  A) Approximate hardcode + sensor fine-positioning does the rest
+  Navigate to a known "workstation region" pose from the map. Phase 0 of
+  inspection (drive forward until LiDAR reads 0.30m from wall) handles final
+  alignment. Technically the robot IS using sensors to position itself — just
+  not to find the cell. Defensible if the map work is visible. ~0 extra lines.
+
+  B) Minimal color confirmation on approach
+  Navigate to approximate region, then do a quick HSV scan (same OAK-D camera)
+  to confirm "I can see a red/green line ahead — correct cell." If wrong color,
+  rotate and try adjacent. ~40-50 lines of OpenCV, no skeletonization or
+  HoughLines. The robot genuinely detects which cell it's at. Easy to demo.
+
+  C) Color blob detection during patrol
+  During PATROL, whenever the camera sees a large red or green floor region,
+  record the robot's map pose and label it as the corresponding cell. No
+  approach needed — cell positions accumulate passively as the robot drives
+  past. Similar to how ring/face confirmation works. Reuses the same
+  IncrementalTrackManager pattern.
+
+  D) Full line detection — teammate's line_localizator + workstation_recorder,
+  ~586 lines, skeletonization + HoughLinesP + 3D PCA. Complete but expensive.
+
+  My recommendation: C. It's genuinely dynamic, fits the existing detection
+  pattern, and costs almost nothing extra — the camera is already running during
+  patrol. By the time the robot finishes PATROL, it knows where both cells are.
+  Clean to demo: RViz markers appear as the robot discovers them.
+
+  Which fits best with what the class expects?
+
+[Image #1]
+
+❯ C is clever, I like it. I attached an image of what the course actually looks 
+  like. You can see the lines (red is top left, green is top right) are quite   
+  long. Yellow marks the boundary.                                              
+                                                                                
+  We have to be careful not to detect the colored cylinders too, they sit on    
+  the ground. How can we discriminate? Do you think it will work?               
+
+  Thought for 41s (ctrl+o to expand)
+
+● Looking at the image: the lines are long narrow strips along the conveyor belt
+  edges, both clearly at floor level. The concern is real — green cylinder and
+  green workstation line share the same HSV range.
+
+  Three discriminators, applied in order:
+
+  1. Aspect ratio (strongest filter)
+  In the floor ROI of the camera image, fit a bounding box to each detected
+  color blob. Workstation lines are highly elongated — from the robot's
+  viewpoint they appear as wide, nearly horizontal strips. A cylinder's visible
+  floor footprint is roughly circular. Threshold at ~4:1 minimum aspect ratio.
+  The green cylinder fails this immediately.
+
+  2. Minimum blob area
+  Those lines are long and wide enough to produce large blobs even at patrol
+  distance. A cylinder bottom edge produces a small arc. Set a minimum area
+  threshold — the line clears it, the cylinder doesn't.
+
+  3. Depth-gated floor ROI
+  The OAK-D gives depth per pixel. Restrict detection to pixels where Z (from
+  point cloud) is within ~5cm of the estimated floor plane. Cylinder sides are
+  at varying depths; floor lines are flat. This is the nuclear option if 1+2
+  aren't clean enough.
+
+  Will it work? Yes, with 1+2 alone — the aspect ratio filter is the decisive
+  one. Red is unambiguous (no red cylinders). Green is the only collision, and
+  the elongated-strip shape vs. small-circle shape is a clean geometric
+  distinction.
+
+  One edge case worth noting from the image: the yellow boundary lines cross the
+  green line's vicinity. Yellow is already handled by the avoider with a
+  separate HSV range, so no interference there.
+
+  Verdict: C still holds, discriminate via aspect ratio + minimum blob area in 
+  floor ROI. Reliable, ~20 lines of OpenCV.
+
+  Ready to move on to the last question before we lock the plan?
+
+❯ It's not that the yellow lines *cross* the green lines, the yellow ones turn  
+  into red and green (just different color), but they are physically the same   
+  line. Let's just do 1 for now. Does this change anything (looking at the      
+  image), maybe nodes for cylinder and line detection?                          
+
+  Thought for 40s (ctrl+o to expand)
+
+● That's a significant clarification. Looking at the image again — the yellow
+  boundary line literally becomes red at the left conveyor and green at the
+  right conveyor. Same physical line, different colors at the workstation
+  sections.
+
+  This changes two things:
+
+  1. Yellow avoider + workstation detector should be one node
+
+  They're detecting colors on the same physical line, from the same camera.
+  Splitting into two nodes means two subscribers to the same image topic,
+  duplicated color masking. Instead: one line_detector.py that runs a fast
+  yellow danger-zone check (the 50Hz avoidance logic) AND a lower-frequency
+  elongated-blob scan for red/green workstation markers. One camera
+  subscription, two responsibilities, clean separation internally.
+
+  2. No conflict with cylinder_detector at all
+
+  The cylinder detector (dis_tutorial5 C++ + your Python wrapper) works on the
+  point cloud via PCL RANSAC — it never touches camera color. The camera-color
+  pipeline (line_detector) and the PCL pipeline (cylinder_detector) are
+  completely different modalities. A green cylinder cannot be misidentified as a
+  green workstation line because those two detectors don't share any
+  processing.
+
+  The aspect ratio discriminator still matters inside line_detector.py — when
+  the robot is near the conveyor during patrol, both the workstation line and a
+  nearby cylinder's floor projection could appear in the same camera frame.
+  Aspect ratio catches that. But the concern you originally raised
+  (cylinder_detector vs line_detector conflict) doesn't exist.
+
+  Net change to the node list:
+
+  ┌──────────────────────────────────────────┬───────────────────────────┐
+  │                  Before                  │           After           │
+  ├──────────────────────────────────────────┼───────────────────────────┤
+  │ yellow_line_avoider.py                   │ line_detector.py (merged) │
+  ├──────────────────────────────────────────┼───────────────────────────┤
+  │ workstation detection (option C, inline) │ same node                 │
+  ├──────────────────────────────────────────┼───────────────────────────┤
+  │ cylinder_detector.py                     │ unchanged                 │
+  └──────────────────────────────────────────┴───────────────────────────┘
+
+  Does that hold with how you were imagining it?
+
+❯ Yes, good, continue.                                                          
+
+  Thought for 33s (ctrl+o to expand)
+
+● One thing I need to look up before the next question rather than guessing.
+
+  Thought for 31s, searched for 2 patterns (ctrl+o to expand)
+
+● Only three predefined arm poses exist in dis_tutorial7's arm_mover_actions.py:
+
+  'look_at_belt_right': [-1.57, 0.9, 0.3, 1.7]
+  'look_at_belt_left':  [ 1.57, 0.9, 0.3, 1.7]
+  'look_for_qr':        [ 0.,   0.6, 0.5, 2.0]
+
+  Custom positions are only possible if the name prefix is already a valid key
+  (the assert fires first). So we're constrained to these three unless we modify
+  arm_mover_actions.py.
+
+  ---
+  Question 10 — Arm poses: are these sufficient?
+
+  Two places we need the arm in specific positions:
+
+  - Tile scanning (inspection phase 4): arm camera looks down at the conveyor
+  belt. look_at_belt_right or look_at_belt_left seems purpose-built for this —
+  matches the inspection direction (red cell is left side, green is right from
+  the image).
+  - Blue line following (room 2): blue_line_explorer uses /top_camera. The arm
+  needs to look at the floor ahead/below the robot as it drives forward along
+  the line. None of the three poses are obviously correct for this — look_for_qr
+  faces forward-upward, belt poses face sideways.
+
+  Options:
+  - A) Add one pose to arm_mover_actions.py — e.g. look_down_forward: [0., 1.2, 
+  0.5, 1.8] (approximate). It's a tutorial file but a single-line addition, low
+  risk.
+  - B) Empirically test whether look_at_belt_right or look_for_qr puts the
+  camera close enough to floor-ahead to follow the blue line. Avoids touching
+  tutorial code, but might not work.
+  - C) Blue line follower uses the OAK-D front camera instead of /top_camera,
+  bypassing the arm entirely. The front camera is lower to the ground and might
+  see floor lines in its bottom ROI without any arm movement.
+
+  My recommendation: C first, A as fallback. The OAK-D front camera already sees
+  the floor in its lower portion — the teammate used the arm camera because
+  they wanted maximum downward coverage, but for a line that's wide and brightly
+  colored in simulation, the front camera's floor ROI may be entirely
+  sufficient. Zero arm complexity. If it doesn't work in testing, add one pose.
+
+  What do you think?
+
+❯ I talked to DeepSeek V4 Pro, this is his answer:                              
+                                                                                
+  ```                                                                           
+  Your Option C (OAK-D) and Option A (add a pose) can both be replaced with a   
+  simpler answer: **do what the teammate did — use `/top_camera` as-is, no arm  
+  movement.**                                                                   
+                                                                                
+  Their blue_line_explorer has zero references to `/arm_command`. The camera    
+  defaults to looking forward parallel to ground (you confirmed this in         
+  Gazebo), and their ROI parameters capture the floor in the lower portion:     
+                                                                                
+  ```                                                                           
+  # From blue_line_explorer.py                                                  
+  roi_top_fraction: 0.0              # no crop — full image                     
+  branch_roi_top/bottom: 0.42–0.90   # bottom half = floor                      
+  straight_roi_top/bottom: 0.20–0.65 # middle = line further ahead              
+  ```                                                                           
+                                                                                
+  Arm_mover_actions.py accepts `manual:[a,b,c,d]` syntax for custom poses       
+  without source modification (line 122-124: splits on `:`, asserts `manual` in 
+  keys, `eval`s the right side). But the teammate didn't use it for blue line   
+  — they're not doing custom poses for this either.                             
+                                                                                
+  They did add one pose to their copy: `'look_for_spill':[0.,0.6,0.5,2.0]` in   
+  `src/vendor/teammate-project/src/dis_tutorial7/scripts/arm_mover_actions.py`  
+  — used by station_inspector for spill inspection. Not relevant to blue line.  
+                                                                                
+  So: use `/top_camera`, set ROIs on the lower ~60% of the frame, no arm        
+  movement. If you later want to angle the camera down for better floor         
+  coverage, publish `manual:[0., 1.0, 0.5, 1.8]` to `/arm_command` — no source  
+  changes needed.                                                               
+  ```                                                                           
+
+  Thought for 26s (ctrl+o to expand)
+
+● Good — DeepSeek is right. I misread the intent of the assertion comment: the
+  split-on-colon is there specifically to support manual override. And more
+  importantly: the teammate uses /top_camera with no arm movement at all for
+  blue line following. The camera's default position already captures the floor
+  in the lower frame ROI. Zero arm complexity for room 2.
+
+  Arm question resolved: look_at_belt_right/left for tile scanning, look_for_qr
+  for QR, default/neutral for blue line. No new poses needed.
+
+  ---
+  Question 11 — Inspection report: full PDF or lightweight?
+
+  The spec awards 1 pt for the report. The teammate built 829 lines of FPDF PDF
+  generation. For simulation the evaluator is watching RViz and Gazebo — they're
+  not reading a PDF file on disk.
+
+  Options:
+  - A) Lightweight: when "report" QR is scanned, controller speaks a summary
+  ("Found 3 rings: 1 green, 1 blue, 1 red. 2 barrels: 1 leaking. Anomalies
+  detected in green cell."), publishes a RViz TEXT_VIEW_FACING marker with the
+  full results, and writes a simple JSON to disk. ~50 lines.
+  - B) Full PDF via FPDF with tables and defect tile images. ~300+ lines, FPDF
+  dependency.
+
+  My recommendation: A, obviously. The evaluator sees the RViz marker and hears
+  the speech. The JSON on disk is the "report" artefact. 1 pt does not justify
+  300 lines of PDF layout code.
+
+  Agree?
+
+❯ Teammate generates both independently from the same data — _generate_pdf via  
+  FPDF and _write_markdown via string formatting — within the same              
+  _make_report() call. No pandoc, no external tool.                             
+                                                                                
+  I'd go markdown + pandoc. ~50 lines of string formatting instead of 400+      
+  lines of FPDF layout. Pandoc handles tables, images, ToC, and PDF output      
+  properly. One apt install pandoc.                                             
+
+  Thought for 36s (ctrl+o to expand)
+
+● Agreed — markdown + pandoc is better than both my options. String formatting
+  for the content, pandoc for the PDF rendering. Clean, ~50 lines, proper
+  output.
+
+  ---
+  I think we've covered all the hard-to-reverse decisions. Let me confirm the
+  full picture before writing it up:
+
+  ┌─────────────────┬───────────────────────────────────────────────────────┐
+  │    Decision     │                        Settled                        │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Controller      │ New task2_controller.py, clean state machine          │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ States          │ INIT → PATROL → APPROACH_TARGET → INTERACT →          │
+  │                 │ INSPECT_WORKSTATION → FOLLOW_BLUE_LINE → DONE         │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Inspection      │ Inline _inspection_phase int + _tick_inspection(), no │
+  │ substates       │  separate node                                        │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Detection       │ IncrementalTrackManager inside each detector node     │
+  │ pipeline        │                                                       │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Cylinder        │ dis_tutorial5 C++ (PCL RANSAC) + cylinder_detector.py │
+  │ detector        │  Python wrapper                                       │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Line detector   │ Single line_detector.py: yellow avoidance + red/green │
+  │                 │  workstation blob detection merged                    │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Workstation     │ Detected dynamically during patrol via                │
+  │ positions       │ line_detector.py (aspect ratio filter)                │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Face            │ Throttled face_recognition inside face_detector.py    │
+  │ recognition     │                                                       │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Gender          │ Skipped                                               │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Anomaly         │ PCA reconstruction error + perspective warp           │
+  │ detection       │                                                       │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Arm             │ Existing poses sufficient; /top_camera default for    │
+  │                 │ blue line                                             │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ State broadcast │ /robot_state String latched; blue_line_follower       │
+  │                 │ edge-detects the transition                           │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Report          │ Markdown string formatting + pandoc → PDF             │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Autonomous      │ Skipped, fixed waypoints                              │
+  │ exploration     │                                                       │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ Dialogue        │ QR shortcut, no ASR                                   │
+  └─────────────────┴───────────────────────────────────────────────────────┘
+
+  Anything missing or wrong before I write CONTEXT.md and the implementation
+  order?
+
+❯ Yeah, is PCA still the best thing for tile patches? Any other simple algos or 
+  models? Read my talk with Gemini @gemini-3.1-pro-tiles.md . As a wildcard, I  
+  tested gemini-3.1-flash-lite by uploading bad and good tiles from Gazebo,     
+  added a simple prompt, it works. 3 seconds, 1000 requests is 25 cents.        
+  ⎿  Read gemini-3.1-pro-tiles.md (69 lines)
+
+  Thought for 31s (ctrl+o to expand)
+● PCA is no longer the best choice. Reading the Gemini conversation changes the
+  calculus.
+
+  SSIM beats PCA for Gazebo specifically. PCA fits a subspace on 6 images and
+  measures reconstruction error. SSIM compares directly against one reference
+  warped good tile. In Gazebo — perfect lighting, deterministic textures — the
+  good tile always looks identical after warp. SSIM gives you a scalar
+  similarity score in one numpy call with no fitting step and no threshold
+  tuning on a training set. It's strictly simpler and Gemini's claim of
+  near-100% accuracy in sim is plausible.
+
+  Updated recommendation: warp + SSIM as primary, PatchCore as upgrade path.
+
+  If the evaluator wants to see "proper ML" on the rubric, swap SSIM for
+  PatchCore via anomalib. It's 20 lines — load pretrained ResNet features, fit
+  memory bank on 6 good tiles, KNN at inference. No GPU needed, no training on
+  damaged tiles. Gemini's top pick for exactly this dataset size.
+
+  On the Gemini API wildcard: It works and the cost is irrelevant, but there's
+  one hard problem — internet dependency at evaluation. University WiFi during a
+  demo is not something to bet 3 points on. If the department blocks the API
+  endpoint or WiFi drops, your anomaly detection is just gone. It's also unclear
+  whether uploading images to an external API qualifies as "creating/training a
+  surface anomaly detector" per the spec.
+
+  Revised decision:
+
+  ┌─────────────────┬───────┬────────────────┬─────────────────────────────┐
+  │     Method      │ Lines │      Risk      │            Notes            │
+  ├─────────────────┼───────┼────────────────┼─────────────────────────────┤
+  │ Warp + SSIM     │ ~20   │ Very low       │ Primary, no training        │
+  ├─────────────────┼───────┼────────────────┼─────────────────────────────┤
+  │ Warp +          │ ~30   │ Low            │ Upgrade if evaluator wants  │
+  │ PatchCore       │       │                │ ML                          │
+  ├─────────────────┼───────┼────────────────┼─────────────────────────────┤
+  │ Gemini API      │ ~15   │ High           │ Wildcard only               │
+  │                 │       │ (internet)     │                             │
+  └─────────────────┴───────┴────────────────┴─────────────────────────────┘
+
+  Should we update the decision from PCA → SSIM, with PatchCore as the easy
+  fallback?
+
+❯ Okay, just Warp + SSIM. Review the other decisions again, anything            
+  problematic or missing?                                                       
+
+  Thought for 1m 12s (ctrl+o to expand)
+
+● Going through the full list critically:
+
+  One unresolved decision — spill check
+
+  We never settled where it lives. The controller is in INTERACT_BARREL, the
+  robot is 0.5m from the barrel. It needs to count PC2 points in a Z-slice above
+  the floor within 1m. Options: (a) cylinder_detector.py subscribes to PC2 and
+  exposes a /spill_check Trigger service — controller calls it once during
+  INTERACT; (b) controller subscribes to PC2 directly and does the count inline
+  during INTERACT_BARREL. Option (b) keeps it in one place but adds a PC2
+  subscription to an already-busy node. Option (a) is a clean service with one
+  extra topic. This needs a decision.
+
+  SSIM reference tile — capture strategy needed
+
+  The good1-6.png meshes may look different from the actual arm camera output in
+  Gazebo (resolution, color profile, anti-aliasing). The reference template
+  needs to come from the same pipeline as runtime images — one pre-run capture:
+  launch the sim, drive to the workstation, take one tile image, warp it, save
+  as config/reference_tile.png. Done once, stored in the package.
+
+  Two nodes missing from the formal list
+
+  qr_reader.py and blue_line_follower.py were discussed but never added to the
+  node inventory. Both are separate nodes — qr_reader subscribes to OAK-D image,
+  mode-switches on /robot_state; blue_line_follower subscribes to /top_camera,
+  edge-detects /robot_state, publishes to /cmd_vel_unstamped.
+
+  Minor — line_detector.py cadence
+
+  Yellow avoidance needs to be fast (every frame, simple pixel count in danger
+  ROI). Workstation blob detection (aspect ratio filtering, accumulation) can
+  run at a lower rate. Keep these as two separate code paths inside the same
+  node — avoidance path runs every callback, workstation path runs every Nth
+  frame.
+
+  Nothing else looks wrong. The big decisions are solid.
+
+  Spill check: service on cylinder_detector.py (option a) or inline in
+  controller (option b)?
+
+❯ Spill check should be a), `spill_check` is a good name. But we can't do the   
+  SSIM reference tile at runtime, there is no guarantee that any one tile is    
+  good. We can read from the `src/megatron/worlds/task2_*meshes` directories    
+  directly. Only the ones used in the specifc world are put in the respective   
+  folder (though idk, the ones in `task2_meshes` could be re-used in all        
+  worlds). Good?                                                                
+
+  Thought for 8s (ctrl+o to expand)
+
+● Let me check those directories before answering.
+
+  Thought for 28s, listed 1 directory, ran 1 shell command (ctrl+o to expand)
+
+● Clean. good1.png is identical across both worlds (same MD5), 512×512 RGB. It's
+  the literal Gazebo texture — exactly what the arm camera renders onto the
+  tile surface. After perspective warp, a good tile should match it closely. A
+  cracked one won't.
+
+  So the plan: load good1.png from worlds/task2_meshes/ at startup as the SSIM
+  reference. No world-specific branching needed, no runtime capture required.
+  The reference is ground truth.
+
+  One nuance: Gazebo renders with lighting and the arm camera introduces some
+  variation even after warp. The SSIM won't be 1.0 for a perfect good tile —
+  it'll be something like 0.85-0.95. Damaged tiles will drop below 0.7-0.8. The
+  exact threshold needs one calibration pass in the sim before evaluation.
+  That's unavoidable and takes 5 minutes.
+
+  ---
+  All decisions are now locked. Final inventory:
+
+  Nodes:
+  - task2_controller.py — new, central state machine
+  - face_detector.py — enhanced with face_recognition (throttled)
+  - ring_detector.py — unchanged
+  - cylinder_detector.py — new, wraps dis_tutorial5 C++ +
+  IncrementalTrackManager + /spill_check Trigger service
+  - line_detector.py — new, yellow avoidance + workstation color detection
+  merged
+  - blue_line_follower.py — new, /top_camera centroid steering
+  - qr_reader.py — new, OAK-D image, mode-switches on /robot_state
+  - perception_visualizer.py — extend for new marker types
+
+  Anomaly: warp + SSIM, good1.png as reference
+  Report: markdown string format + pandoc subprocess
+
+  Ready to write CONTEXT.md and the implementation order?
+
+❯ Great, TYSM, do it. We'll see how this plays out over time.                   
+
+  Thought for 1m 1s (ctrl+o to expand)
+
+● I'll write both in parallel — first let me check the memory file to update it
+  too.
+
+  Thought for 27s, read 2 files (ctrl+o to expand)
+
+● All three files at once.
+
+● Update(CONTEXT.md)
+  ⎿  Added 47 lines
+      36  
+      37  Task 1 spec at `src/megatron/docs/00-requirements.md`.
+      38  Task 2 spec at `src/megatron/docs/01-task2.md`.
+      39 +                                                               
+      40 +## Language                                                    
+      41 +                                                               
+      42 +### Scene entities                                             
+      43 +                                                               
+      44 +**Worker**: A person stationed in the factory that the robot mu
+         +st approach and receive a task assignment from.                
+      45 +_Avoid_: person, human, face (face is the detection mechanism, 
+         +not the entity)                                                
+      46 +                                                               
+      47 +**CTO**: The specific person at the end of the blue line in roo
+         +m 2 who receives the final inspection report.                  
+      48 +_Avoid_: boss, manager, end-person                             
+      49 +                                                               
+      50 +**Workstation**: A red or green inspection area along a conveyo
+         +r belt where the robot performs tile anomaly detection.        
+      51 +_Avoid_: working cell, station, cell                           
+      52 +                                                               
+      53 +**Barrel**: A cylindrical object on the factory floor. May be v
+         +ertical (detection only) or horizontal (requires spill check). 
+      54 +_Avoid_: cylinder, drum                                        
+      55 +                                                               
+      56 +**Ring**: A 3D circular object floating in space. Distinct from
+         + 2D printed circles which must be rejected.                    
+      57 +_Avoid_: circle, hoop                                          
+      58 +                                                               
+      59 +**Tile**: A surface element on a conveyor belt workstation, sub
+         +ject to anomaly detection.                                     
+      60 +_Avoid_: object, surface, sample                               
+      61 +                                                               
+      62 +**Defect**: A visible anomaly on a tile surface (crack, mark, e
+         +tc.) that the robot must detect and report.                    
+      63 +_Avoid_: anomaly (use only in the context of "anomaly detection
+         +" as the technique name)                                       
+      64 +                                                               
+      65 +**Spill**: Leaked fluid from a horizontal barrel, inferred from
+         + ground-level point cloud density within 1 m.                  
+      66 +_Avoid_: leak, liquid                                          
+      67 +                                                               
+      68 +### Navigation                                                 
+      69 +                                                               
+      70 +**Room 1**: The main factory floor navigated via goal-based Nav
+         +2. Contains workers, barrels, rings, and workstations. Bounded 
+         +by yellow lines.                                               
+      71 +_Avoid_: first room, factory floor                             
+      72 +                                                               
+      73 +**Room 2**: The corridor navigated by following the blue line. 
+         +Contains only the CTO.                                         
+      74 +_Avoid_: second room, hallway, corridor                        
+      75 +                                                               
+      76 +**Patrol**: The robot's systematic waypoint-based traversal of 
+         +room 1 used to discover workers, barrels, rings, and workstatio
+         +n positions.                                                   
+      77 +_Avoid_: exploration, traversal, sweep                         
+      78 +                                                               
+      79 +### Detection                                                  
+      80 +                                                               
+      81 +**Confirmed detection**: A detection that has been observed N t
+         +imes from distinct positions and clustered in map frame, distin
+         +guishing it from a transient false positive.                   
+      82 +_Avoid_: detection (use only for raw, unconfirmed observations)
+      83 +                                                               
+      84 +**Task**: A work assignment received from a worker (via QR code
+         +): anomaly detection in red or green workstation, barrel inspec
+         +tion, ring counting, or nothing.                               
+      85 +_Avoid_: job, instruction, command                             
+
+● Write(src/megatron/docs/05-plan.md)
+  ⎿  Wrote 159 lines to src/megatron/docs/05-plan.md
+       1 # Task 2 — Implementation Plan
+       2 
+         imulation only (RViz + Gazebo).
+       4 
+       5 ## Node inventory
+       7 | Node | File | Status | Notes |
+       8 |---|---|---|---|
+       9 | `task2_controller` | `megatron/task2_controller.py` | **New** 
+      10 | `face_detector` | `megatron/face_detector.py` | **Enhance** | 
+         Add throttled `face_recognition` |
+     … +225 lines (ctrl+o to expand)
+
+● Now the memory file.
+
+● Write(.claude/projects/-home-luka-coding-dis/memory/project_task2_plan.md)
+  ⎿  Wrote 42 lines to
+     .claude/projects/-home-luka-coding-dis/memory/project_task2_plan.md
+       1 ---
+       3 description: Task 2 architecture decisions, node inventory, and 
+         implementation order for the megatron ROS 2 package. Settled 202
+       4 metadata:
+       5   type: project
+       7 
+       8 All decisions locked 2026-06-03. Simulation only (RViz + Gazebo)
+       9 
+      10 **Why:** Task 2 is the Industry 5.0 factory scene — two rooms, w
+         . 35 pts total.
+     … +60 lines (ctrl+o to expand)
+
+● Now update MEMORY.md to point to the new memory file.
+
+  Read 1 file (ctrl+o to expand)
+
+● Write(.claude/projects/-home-luka-coding-dis/memory/MEMORY.md)
+  ⎿  Wrote 3 lines to
+     .claude/projects/-home-luka-coding-dis/memory/MEMORY.md
+      1 # Memory Index
+      2 
+      3 - [Task 2 Architecture Plan](project_task2_plan.md) — Node invent
+        ory, controller states, all locked decisions, implementation phas
+        es for megatron Task 2
+
+● Done. Three files written:
+
+  - CONTEXT.md — Language section added with canonical terms (Worker,
+  Workstation, Patrol, Confirmed detection, Tile, Defect, Spill, Room 1/2, Task)
+  - src/megatron/docs/05-plan.md — Full implementation plan: node inventory,
+  topic table, state machine, anomaly pipeline, scope decisions, 6 phases with
+  checkboxes, reference file index
+  - Memory updated with all locked decisions so future sessions start with full
+  context
+
+  Phase 0 (launch infra verification) is the right first move — unblocks
+  everything else and takes 30 minutes. Start there.
+
+❯ /export                                                                       
+  ⎿  Conversation copied to clipboard
