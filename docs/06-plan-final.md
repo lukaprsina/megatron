@@ -312,18 +312,25 @@ at high frequency to win the last-write-wins race.
 
 ```
 PATROL / APPROACH_TARGET / INTERACT states:
-  If yellow_pixel_count ≥ 150 in danger ROI (bottom 80–95%, center 40–60%):
+  Crop tight ROI (bottom 8 %, center 10 %) from yellow HSV mask.
+  Find contours; if any contour reaches the ROI bottom edge (within 3 px):
+    → yellow line is physically under the robot
     enter BACKING state
     for 1.8 s: publish stop+reverse to BOTH at 50 Hz:
       /cmd_vel_unstamped (Twist, linear.x = -0.12, angular.z = 0)
       /cmd_vel (TwistStamped, same values)
     speak "Prohibited zone!"
+  Contours NOT reaching the bottom edge (yellow ahead/to the side) are
+  ignored — Nav2 + costmap handle those.
+
+  This is a contour-bottom check, NOT a pixel-count threshold.  A yellow
+  box adjacent to the path produces yellow in the ROI but its contour
+  doesn't extend to the bottom — no false trigger (§P).
 
 INSPECT_WORKSTATION state:
-  Skip stop+reverse logic entirely (controller owns cmd_vel during inspection)
-  Monitor same ROI; when yellow_pixel_count ≥ 300:
-    publish True to /yellow_line_seen (default QoS, depth=10)
-    do NOT publish any velocity command
+  Skip velocity commands entirely (controller owns cmd_vel during inspection)
+  Same contour-bottom check → publish Bool to /yellow_line_seen every tick
+  (controller sees True when line is under the robot, False otherwise)
 
 INIT / FOLLOW_BLUE_LINE / DONE states:
   Skip yellow detection entirely (avoider is passive)
@@ -565,10 +572,13 @@ reach waypoint 0 → oscillated PATROL/APPROACH_TARGET. `/yellow_line_seen` neve
 because INSPECT_WORKSTATION was unreachable.
 
 Teammate's avoider has the same PATROL-active logic but their task1 arena has no yellow
-objects in patrol paths — the bug is environmental. Fix: tightened danger ROI from
-30–70 %×65–95 % to 40–60 %×80–95 % (75 % smaller area, only directly-in-front and very
-close yellow triggers), lowered threshold from 300 to 150 px. Yellow box alongside the
-path stays outside the center 20 % strip; yellow line across the path enters it.
+objects in patrol paths — the bug is environmental. Fix: replaced pixel-count threshold
+with a **contour-bottom** check. Tightened ROI to 40–60 %×80–95 % (75 % smaller area),
+then trigger only when a yellow contour reaches the ROI bottom edge (within 3 px).
+A yellow box alongside the path has yellow in the ROI but its contour doesn't extend
+to the bottom — ignored. A yellow line the robot is about to cross spans the full ROI
+height — contour reaches bottom → stop+reverse. Removed `danger_px_threshold` parameter
+entirely; contour presence is self-filtering.
 
 ---
 
@@ -601,7 +611,7 @@ path stays outside the center 20 % strip; yellow line across the path enters it.
 **Build order:** yellow_avoider → cylinder_detector → workstation_detector.
 **No C++ changes in this phase** (axis yaw encoding skipped — see §Cylinder encoding convention).
 
-- [x] `yellow_avoider.py`: HSV yellow mask, tight danger-zone ROI (80–95% Y, 40–60% X), threshold 150 px; dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; **PATROL/APPROACH_TARGET/INTERACT** → stop+reverse (tight ROI avoids spawn-box false positives — see §P); INSPECT_WORKSTATION → publish `/yellow_line_seen` True **and False** every tick (§N)
+- [x] `yellow_avoider.py`: HSV yellow mask, contour-bottom trigger in tiny bottom-edge ROI (92–100% Y, 45–55% X); dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH_TARGET/INTERACT → stop+reverse only when a yellow contour reaches the ROI bottom edge; INSPECT_WORKSTATION → publish `/yellow_line_seen` True/False per tick based on same contour-bottom check (§P)
 - [x] `cylinder_detector.py`: subscribe `/cylinder_markers` + buffer `/oakd/rgb/preview/depth/points` (sensor_qos); Cluster dedup (orientation-dependent radii: 0.33 m vertical / 0.70 m horizontal, CONFIRM_THRESH=10, COMPACT_MIN=6 — see §L); publish `/detected_cylinders` PoseStamped (`frame_id="map|{color}|{orientation}"`, identity quat); suppressed clusters excluded from republish (see §M); provide `/spill_check` Trigger service (see §Spill check design)
 - [x] `workstation_detector.py`: subscribe `/top_camera/rgb/preview/image_raw` + `/top_camera/rgb/preview/depth/points`; HSV red/green mask → contour → **minAreaRect** aspect ≥ 3.0 (not boundingRect — see §O) → `extract_3d_points_from_pc2` → TF to map → ITM dedup (0.5 m, 5 votes) → publish `/detected_workstations` Marker (ns=color, pose=centroid)
 

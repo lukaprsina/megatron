@@ -2,18 +2,19 @@
 """
 Yellow line avoider — camera-only, no costmap editing.
 
-PATROL / APPROACH_TARGET / INTERACT:
-  Yellow in tight danger ROI (bottom 80–95 %, center 40–60 %) → stop + back-up
-  at 50 Hz on BOTH /cmd_vel topics, overrunning Nav2's ~10-20 Hz output.
-  Tight ROI prevents false triggers on yellow boxes adjacent to the path.
+APPROACH_TARGET / INTERACT / PATROL:
+  Find yellow contours in tight danger ROI (bottom 8 %, center 10 %).
+  Trigger only when a contour reaches the bottom edge of the ROI — i.e. the
+  yellow line is literally under the robot, not just visible ahead/to the side.
+  Stop + back-up at 50 Hz on BOTH /cmd_vel topics.
 
 INSPECT_WORKSTATION:
-  Yellow in danger ROI → publish True/False to /yellow_line_seen (default QoS)
-  every tick.  No velocity commands — controller owns cmd_vel during inspection.
+  Same contour-bottom check → publish True/False to /yellow_line_seen
+  (default QoS) every tick.  No velocity commands.
 
-PATROL / INIT / FOLLOW_BLUE_LINE / DONE:
-  Fully passive — no avoidance, no /yellow_line_seen publishing.  Nav2 + costmap
-  are the sole navigation authority during PATROL.  Debug image keeps updating.
+INIT / FOLLOW_BLUE_LINE / DONE:
+  Fully passive — no avoidance, no /yellow_line_seen publishing.
+  Debug image keeps updating in all states.
 """
 
 from typing import cast
@@ -50,11 +51,10 @@ class YellowAvoider(Node):
 
         self.declare_parameter("camera_topic", "/top_camera/rgb/preview/image_raw")
         self.declare_parameter("publish_debug_image", True)
-        self.declare_parameter("danger_zone_top", 0.80)
-        self.declare_parameter("danger_zone_bottom", 0.95)
-        self.declare_parameter("roi_left", 0.40)
-        self.declare_parameter("roi_right", 0.60)
-        self.declare_parameter("danger_px_threshold", 150)
+        self.declare_parameter("danger_zone_top", 0.92)
+        self.declare_parameter("danger_zone_bottom", 1.0)
+        self.declare_parameter("roi_left", 0.45)
+        self.declare_parameter("roi_right", 0.55)
         self.declare_parameter("back_speed", 0.12)
         self.declare_parameter("back_duration", 1.8)
 
@@ -123,20 +123,33 @@ class YellowAvoider(Node):
         xr = int(w * cast(float, self.get_parameter("roi_right").value))
         dt = int(h * cast(float, self.get_parameter("danger_zone_top").value))
         db = int(h * cast(float, self.get_parameter("danger_zone_bottom").value))
-        danger_px = int(cv2.countNonZero(mask[dt:db, xl:xr]))
-        thresh = cast(int, self.get_parameter("danger_px_threshold").value)
+        roi_mask = mask[dt:db, xl:xr]
+        danger_px = int(cv2.countNonZero(roi_mask))
+        reaches_bottom = danger_px > 0 and self._reaches_bottom(roi_mask)
 
         if self.robot_state in _INSPECT_STATES:
-            # Publish on every tick so controller sees False when line disappears,
-            # not a stale True from a previous phase.
-            self.yellow_seen.publish(Bool(data=danger_px >= thresh))
+            self.yellow_seen.publish(Bool(data=reaches_bottom))
         elif self.robot_state in _ACTIVE_STATES:
-            self._run_avoidance(danger_px, thresh, now)
+            self._run_avoidance(reaches_bottom, now)
 
         if cast(bool, self.get_parameter("publish_debug_image").value):
-            self._publish_debug(img, mask, xl, xr, dt, db, danger_px, thresh)
+            self._publish_debug(img, mask, xl, xr, dt, db, danger_px, reaches_bottom)
 
-    def _run_avoidance(self, danger_px: int, thresh: int, now: float):
+    @staticmethod
+    def _reaches_bottom(mask_crop):
+        """Return True if any contour in the cropped ROI touches the bottom edge."""
+        contours, _ = cv2.findContours(
+            mask_crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            return False
+        bottom_y = mask_crop.shape[0] - 1
+        for cnt in contours:
+            if any(int(p[0][1]) >= bottom_y - 3 for p in cnt):
+                return True
+        return False
+
+    def _run_avoidance(self, reaches_bottom: bool, now: float):
         if self._avoider_state == "BACKING":
             if now >= self.back_end:
                 self._pub_vel(0.0, 0.0)
@@ -145,12 +158,10 @@ class YellowAvoider(Node):
                 self.get_logger().info("Backing done — CLEAR.")
             else:
                 self._pub_vel(-cast(float, self.get_parameter("back_speed").value), 0.0)
-        elif danger_px >= thresh:
+        elif reaches_bottom:
             self._pub_vel(0.0, 0.0)
             if not self._spoke:
-                self.get_logger().warn(
-                    f"PROHIBITED — {danger_px} px yellow in danger zone."
-                )
+                self.get_logger().warn("PROHIBITED — yellow line under robot.")
                 self.speaker.speak("Prohibited zone!")
                 self._spoke = True
                 self._avoider_state = "BACKING"
@@ -160,16 +171,17 @@ class YellowAvoider(Node):
         else:
             self._avoider_state = "CLEAR"
 
-    def _publish_debug(self, img, mask, xl, xr, dt, db, danger_px, thresh):
+    def _publish_debug(self, img, mask, xl, xr, dt, db, danger_px, reaches_bottom):
         debug = img.copy()
         overlay = debug.copy()
         overlay[mask > 0] = (0, 220, 255)
         cv2.addWeighted(overlay, 0.40, debug, 0.60, 0, debug)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(debug, contours, -1, (0, 180, 255), 2)
-        d_col = (0, 0, 255) if danger_px >= thresh else (80, 80, 80)
+        d_col = (0, 0, 255) if reaches_bottom else (80, 80, 80)
         cv2.rectangle(debug, (xl, dt), (xr, db), d_col, 2)
-        self._label(debug, f"DANGER {danger_px}px", (xl + 4, dt + 16), d_col)
+        status = f"DANGER {danger_px}px FEET" if reaches_bottom else f"{danger_px}px"
+        self._label(debug, status, (xl + 4, dt + 16), d_col)
         mode = (
             f"INSPECT|{self._avoider_state}"
             if self.robot_state in _INSPECT_STATES
