@@ -1,8 +1,8 @@
 # Task 2 — Final Implementation Plan
 
 **Supersedes** 05-plan.md, 05-plan-revision.md, 05-plan-revision2.md.
-All prior revision decisions are incorporated. New adversarial findings below.
-Locked 2026-06-03.
+All prior revision decisions are incorporated. Revised 2026-06-04 (grill-with-docs, Phase 2 split).
+Locked 2026-06-03. Revised 2026-06-04.
 
 ---
 
@@ -14,7 +14,7 @@ Locked 2026-06-03.
 | Gender recognition          | Skip (QR shortcut replaces dialogue)                 |
 | ASR dialogue                | Skip — QR code shortcut                              |
 | Face recognition            | Implement — dlib, throttled every 5th YOLO hit       |
-| Yellow line avoidance       | Implement — line_detector, dual-topic override       |
+| Yellow line avoidance       | Implement — yellow_avoider, dual-topic override      |
 | Blue line following         | Implement — blue_line_follower, /top_camera centroid |
 | Cylinder / barrel detection | Implement — C++ RANSAC + cylinder_detector.py        |
 | Spill detection             | Implement — /spill_check Trigger service             |
@@ -29,37 +29,38 @@ Locked 2026-06-03.
 
 ## Node inventory
 
-| Node                    | File                                | Status      | Notes                                 |
-| ----------------------- | ----------------------------------- | ----------- | ------------------------------------- |
-| `task2_controller`      | `megatron/task2_controller.py`      | **New**     | Replaces `mission_controller`         |
-| `face_detector`         | `megatron/face_detector.py`         | **Enhance** | Add face_recognition every 5th hit    |
-| `ring_detector`         | `megatron/ring_detector.py`         | Keep        | Unchanged                             |
-| `cylinder_detector`     | `megatron/cylinder_detector.py`     | **New**     | Wraps C++ markers                     |
-| `line_detector`         | `megatron/line_detector.py`         | **New**     | Yellow avoidance + workstation blobs  |
-| `blue_line_follower`    | `megatron/blue_line_follower.py`    | **New**     | /top_camera centroid + direct cmd_vel |
-| `qr_reader`             | `megatron/qr_reader.py`             | **New**     | Dual-engine; mode via /robot_state    |
-| `perception_visualizer` | `megatron/perception_visualizer.py` | **Extend**  | Barrel/workstation/anomaly markers    |
-| `cylinder_segmentation` | `src/cylinder_segmentation/` C++    | Done        | Already in task2.launch.py            |
-| `arm_mover_actions`     | dis_tutorial7                       | Use as-is   | Already launched                      |
+| Node                    | File                                | Status      | Notes                                     |
+| ----------------------- | ----------------------------------- | ----------- | ----------------------------------------- |
+| `task2_controller`      | `megatron/task2_controller.py`      | **New**     | Replaces `mission_controller`             |
+| `face_detector`         | `megatron/face_detector.py`         | **Enhance** | Add face_recognition every 5th hit        |
+| `ring_detector`         | `megatron/ring_detector.py`         | Keep        | Unchanged                                 |
+| `cylinder_detector`     | `megatron/cylinder_detector.py`     | **New**     | Wraps C++ markers + /spill_check svc      |
+| `yellow_avoider`        | `megatron/yellow_avoider.py`        | **New**     | Dual-topic /cmd_vel override at 50 Hz     |
+| `workstation_detector`  | `megatron/workstation_detector.py`  | **New**     | Color blob + ITM → /detected_workstations |
+| `blue_line_follower`    | `megatron/blue_line_follower.py`    | **New**     | /top_camera centroid + direct cmd_vel     |
+| `qr_reader`             | `megatron/qr_reader.py`             | **New**     | Dual-engine; mode via /robot_state        |
+| `perception_visualizer` | `megatron/perception_visualizer.py` | **Extend**  | Barrel/workstation/anomaly markers        |
+| `cylinder_segmentation` | `src/cylinder_segmentation/` C++    | Done        | Already in task2.launch.py                |
+| `arm_mover_actions`     | dis_tutorial7                       | Use as-is   | Already launched                          |
 
 ---
 
 ## Topic inventory
 
-| Topic                    | Type               | Publisher                            | QoS                                     | Notes                                                                   |
-| ------------------------ | ------------------ | ------------------------------------ | --------------------------------------- | ----------------------------------------------------------------------- |
-| `/robot_state`           | `String`           | task2_controller                     | TRANSIENT_LOCAL, RELIABLE, KEEP_LAST(1) | Global state broadcast — every node reads this                          |
-| `/detected_faces`        | `PoseStamped`      | face_detector                        | default                                 | frame_id = `"map"`, name in future field                                |
-| `/detected_rings`        | `PoseStamped`      | ring_detector                        | default                                 | frame_id = `"map\|{color}"`                                             |
-| `/detected_cylinders`    | `PoseStamped`      | cylinder_detector                    | default                                 | **frame_id = `"map\|{color}\|{orientation}"`** (see §Cylinder encoding) |
-| `/detected_workstations` | `Marker`           | line_detector                        | default                                 | ns = `"red"` or `"green"`, pose = centroid                              |
-| `/yellow_line_seen`      | `Bool`             | line_detector                        | TRANSIENT_LOCAL, RELIABLE, KEEP_LAST(1) | Latched; True when yellow under robot during INSPECT_WORKSTATION        |
-| `/spill_check`           | `std_srvs/Trigger` | cylinder_detector                    | service                                 | Point-count in Z-slice [0.005, 0.15m]                                   |
-| `/qr_task`               | `String`           | qr_reader                            | default                                 | Raw decoded QR text                                                     |
-| `/cmd_vel_unstamped`     | `Twist`            | task2_controller, blue_line_follower | default                                 | Direct drive                                                            |
-| `/cmd_vel`               | `TwistStamped`     | line_detector (yellow avoider)       | default                                 | **Must also publish here** to override Nav2                             |
-| `/arm_command`           | `String`           | task2_controller                     | default                                 | Arm pose names                                                          |
-| `/scan`                  | `LaserScan`        | robot                                | sensor_qos                              | Inspection phases 0 + 3                                                 |
+| Topic                    | Type               | Publisher                                            | QoS                                     | Notes                                                                   |
+| ------------------------ | ------------------ | ---------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------- |
+| `/robot_state`           | `String`           | task2_controller                                     | TRANSIENT_LOCAL, RELIABLE, KEEP_LAST(1) | Global state broadcast — every node reads this                          |
+| `/detected_faces`        | `PoseStamped`      | face_detector                                        | default                                 | frame_id = `"map"`, name in future field                                |
+| `/detected_rings`        | `PoseStamped`      | ring_detector                                        | default                                 | frame_id = `"map\|{color}"`                                             |
+| `/detected_cylinders`    | `PoseStamped`      | cylinder_detector                                    | default                                 | **frame_id = `"map\|{color}\|{orientation}"`** (see §Cylinder encoding) |
+| `/detected_workstations` | `Marker`           | workstation_detector                                 | default                                 | ns = `"red"` or `"green"`, pose = centroid                              |
+| `/yellow_line_seen`      | `Bool`             | yellow_avoider                                       | TRANSIENT_LOCAL, RELIABLE, KEEP_LAST(1) | Latched; True when yellow under robot during INSPECT_WORKSTATION        |
+| `/spill_check`           | `std_srvs/Trigger` | cylinder_detector                                    | service                                 | Point-count in Z-slice [0.005, 0.15m]                                   |
+| `/qr_task`               | `String`           | qr_reader                                            | default                                 | Raw decoded QR text                                                     |
+| `/cmd_vel_unstamped`     | `Twist`            | task2_controller, blue_line_follower, yellow_avoider | default                                 | Direct drive                                                            |
+| `/cmd_vel`               | `TwistStamped`     | yellow_avoider                                       | default                                 | **Must also publish here** to override Nav2                             |
+| `/arm_command`           | `String`           | task2_controller                                     | default                                 | Arm pose names                                                          |
+| `/scan`                  | `LaserScan`        | robot                                                | sensor_qos                              | Inspection phases 0 + 3                                                 |
 
 ---
 
@@ -249,7 +250,7 @@ exit when |tilt_rad| < 0.5° (0.0087 rad) or 5 s timeout
 ```
 reverse at -0.06 m/s
 exit on:
-  /yellow_line_seen == True  (line_detector publishes when state = INSPECT_WORKSTATION)
+  /yellow_line_seen == True  (yellow_avoider publishes when state = INSPECT_WORKSTATION)
   OR min(ranges[150:210]) ≤ 0.40 m (rear obstacle)
   OR timeout 10 s
 ```
@@ -258,11 +259,14 @@ exit on:
 
 ```
 forward at 0.08 m/s
-every tick: arm camera → OTSU → contour → 4-corner → warpPerspective → 512×512
-  SSIM vs reference_tile.png
-  if SSIM < threshold → defect
-  record in tile_results; log
-pause 2.0 s per tile (stop cmd_vel, wait, resume)
+per tick:
+  brightness of central ROI in /top_camera/rgb/preview/image_raw
+  if brightness crosses threshold (tile under camera) → stop, pause 0.3 s for settling
+    arm camera → OTSU → contour → 4-corner → warpPerspective → 512×512
+    SSIM vs reference_tile.png
+    if SSIM < threshold → defect
+    record in tile_results; log
+    wait remainder of 2.0 s pause, resume forward
 exit when /yellow_line_seen == True again (reached wall end) or timeout 30 s
 ```
 
@@ -301,7 +305,7 @@ All three task2 world variants use the same `good1.png` (MD5 `7bbed964a13b4bf449
 `/cmd_vel_unstamped` (Twist) does not stop Nav2's forward motion. Must publish to **both** topics
 at high frequency to win the last-write-wins race.
 
-**Design (in `line_detector.py`):**
+**Design (in `yellow_avoider.py`):**
 
 ```
 Normal (PATROL state):
@@ -459,13 +463,14 @@ executor thread. Document in §Inspection phases.
 - [x] Add `task2_controller` to `setup.py` entry_points
 - [x] Smoke test: robot completes patrol loop in sim (waypoints recorded 2026-06-04)
 
-### Phase 2 — New detectors (parallel with Phase 1)
+### Phase 2 — New detectors
 
-- [ ] `cylinder_detector.py`: subscribe to `/cylinder_markers`, ITM dedup, publish `/detected_cylinders` using encoding convention
-- [ ] `cylinder_detector.py`: `/spill_check` Trigger service (point count in Z-slice)
-- [ ] `line_detector.py`: yellow avoidance — HSV mask, dual-topic override at 50 Hz
-- [ ] `line_detector.py`: workstation blobs — red/green in floor ROI, aspect > 4:1, ITM, publish `/detected_workstations`
-- [ ] `line_detector.py`: `/yellow_line_seen` latched Bool (INSPECT_WORKSTATION mode)
+**Build order:** yellow_avoider → cylinder_detector → workstation_detector.
+
+- [ ] C++ `cylinder_segmentation`: encode RANSAC axis yaw in `marker.pose.orientation` for horizontal barrels (identity for vertical)
+- [ ] `cylinder_detector.py`: subscribe to `/cylinder_markers` + OAK-D PC2 buffer, ITM dedup, publish `/detected_cylinders` using encoding convention, provide `/spill_check` Trigger service
+- [ ] `yellow_avoider.py`: HSL yellow mask, danger-zone ROI, dual-topic `/cmd_vel` + `/cmd_vel_unstamped` override at 50 Hz, PATROL → stop+reverse, INSPECT_WORKSTATION → publish `/yellow_line_seen`
+- [ ] `workstation_detector.py`: red/green color blob in floor ROI, aspect > 4:1, ITM confirmation, publish `/detected_workstations` Marker (ns=color, pose=centroid)
 
 ### Phase 3 — Room 1 completion
 
@@ -498,7 +503,7 @@ executor thread. Document in §Inspection phases.
 - [ ] Review `waypoints/task.yaml` — ensure patrol covers both conveyors
 - [ ] Verify arm pose mapping (red/green → left/right)
 - [ ] End-to-end run: room 1 → inspection → room 2 → report
-- [ ] Tune line_detector HSV ranges, SSIM threshold, LiDAR distances in sim
+- [ ] Tune yellow_avoider HSV ranges, SSIM threshold, LiDAR distances in sim
 
 ---
 
