@@ -2,18 +2,18 @@
 """
 Yellow line avoider — camera-only, no costmap editing.
 
-APPROACH_TARGET / INTERACT:
-  Yellow in danger ROI → stop + back-up at 50 Hz on BOTH /cmd_vel topics,
-  overrunning Nav2's ~10-20 Hz output. A 3 s cooldown after backing prevents
-  immediate re-trigger on persistent yellow (e.g. a wall-like box).
+PATROL / APPROACH_TARGET / INTERACT:
+  Yellow in tight danger ROI (bottom 80–95 %, center 40–60 %) → stop + back-up
+  at 50 Hz on BOTH /cmd_vel topics, overrunning Nav2's ~10-20 Hz output.
+  Tight ROI prevents false triggers on yellow boxes adjacent to the path.
 
 INSPECT_WORKSTATION:
-  Yellow in danger ROI → publish True to /yellow_line_seen (default QoS).
-  No velocity commands — controller owns cmd_vel during inspection.
+  Yellow in danger ROI → publish True/False to /yellow_line_seen (default QoS)
+  every tick.  No velocity commands — controller owns cmd_vel during inspection.
 
 PATROL / INIT / FOLLOW_BLUE_LINE / DONE:
-  Fully passive — images not processed, no publishing.  Nav2 + costmap
-  are the sole navigation authority during PATROL.
+  Fully passive — no avoidance, no /yellow_line_seen publishing.  Nav2 + costmap
+  are the sole navigation authority during PATROL.  Debug image keeps updating.
 """
 
 from typing import cast
@@ -40,7 +40,7 @@ YELLOW_LO = np.array([18, 100, 80], dtype=np.uint8)
 YELLOW_HI = np.array([35, 255, 255], dtype=np.uint8)
 MORPH_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
-_ACTIVE_STATES = frozenset(("APPROACH_TARGET", "INTERACT"))
+_ACTIVE_STATES = frozenset(("PATROL", "APPROACH_TARGET", "INTERACT"))
 _INSPECT_STATES = frozenset(("INSPECT_WORKSTATION",))
 
 
@@ -50,14 +50,13 @@ class YellowAvoider(Node):
 
         self.declare_parameter("camera_topic", "/top_camera/rgb/preview/image_raw")
         self.declare_parameter("publish_debug_image", True)
-        self.declare_parameter("danger_zone_top", 0.65)
+        self.declare_parameter("danger_zone_top", 0.80)
         self.declare_parameter("danger_zone_bottom", 0.95)
-        self.declare_parameter("roi_left", 0.30)
-        self.declare_parameter("roi_right", 0.70)
-        self.declare_parameter("danger_px_threshold", 300)
+        self.declare_parameter("roi_left", 0.40)
+        self.declare_parameter("roi_right", 0.60)
+        self.declare_parameter("danger_px_threshold", 150)
         self.declare_parameter("back_speed", 0.12)
         self.declare_parameter("back_duration", 1.8)
-        self.declare_parameter("back_cooldown", 3.0)
 
         cam = cast(str, self.get_parameter("camera_topic").value)
         self.bridge = CvBridge()
@@ -75,7 +74,6 @@ class YellowAvoider(Node):
         self.robot_state = "INIT"
         self._avoider_state = "CLEAR"
         self.back_end = 0.0
-        self._cool_down_until = 0.0
         self._spoke = False
         self._latest = None
 
@@ -87,26 +85,28 @@ class YellowAvoider(Node):
         if msg.data != self.robot_state:
             self.robot_state = msg.data
             self._avoider_state = "CLEAR"
-            self._cool_down_until = 0.0
             self._spoke = False
 
     def _image_cb(self, msg: Image):
-        if (
-            self.robot_state not in _ACTIVE_STATES
-            and self.robot_state not in _INSPECT_STATES
-        ):
-            return
+        # TODO: CPU savings: why burn cycles on a downward cam when the avoider's off duty?
+        # however, the debug image then doesn't display.
+        # if (
+        #     self.robot_state not in _ACTIVE_STATES
+        #     and self.robot_state not in _INSPECT_STATES
+        # ):
+        #     return
         try:
             self._latest = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception:
             pass
 
     def _update(self):
-        if (
-            self.robot_state not in _ACTIVE_STATES
-            and self.robot_state not in _INSPECT_STATES
-        ):
-            return
+        # same as _image_cb
+        # if (
+        #     self.robot_state not in _ACTIVE_STATES
+        #     and self.robot_state not in _INSPECT_STATES
+        # ):
+        #     return
         if self._latest is None:
             return
 
@@ -130,7 +130,7 @@ class YellowAvoider(Node):
             # Publish on every tick so controller sees False when line disappears,
             # not a stale True from a previous phase.
             self.yellow_seen.publish(Bool(data=danger_px >= thresh))
-        else:
+        elif self.robot_state in _ACTIVE_STATES:
             self._run_avoidance(danger_px, thresh, now)
 
         if cast(bool, self.get_parameter("publish_debug_image").value):
@@ -141,18 +141,11 @@ class YellowAvoider(Node):
             if now >= self.back_end:
                 self._pub_vel(0.0, 0.0)
                 self._avoider_state = "CLEAR"
-                self._cool_down_until = now + cast(
-                    float, self.get_parameter("back_cooldown").value
-                )
                 self._spoke = False
-                self.get_logger().info(
-                    f"Backing done — CLEAR (cooldown {self._cool_down_until - now:.1f}s)."
-                )
+                self.get_logger().info("Backing done — CLEAR.")
             else:
                 self._pub_vel(-cast(float, self.get_parameter("back_speed").value), 0.0)
         elif danger_px >= thresh:
-            if now < self._cool_down_until:
-                return
             self._pub_vel(0.0, 0.0)
             if not self._spoke:
                 self.get_logger().warn(
