@@ -227,6 +227,21 @@ def transform_point_and_normal(point, normal, tf_stamped):
     return map_point, map_normal
 
 
+def quaternion_to_rotation_matrix(q) -> np.ndarray:
+    """Convert a geometry_msgs/Quaternion to a 3×3 rotation matrix.
+
+    Accepts any object with .x .y .z .w attributes (TransformStamped rotation).
+    """
+    qx, qy, qz, qw = q.x, q.y, q.z, q.w
+    return np.array(
+        [
+            [1 - 2 * (qy**2 + qz**2), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx**2 + qz**2), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx**2 + qy**2)],
+        ]
+    )
+
+
 def normal_to_quaternion(normal_2d):
     """Convert a 2D normal (x, y) into a quaternion facing opposite that normal.
 

@@ -423,7 +423,7 @@ Face_detector enhancement:
 
 ## /detected_cylinders dedup and "approached" flag
 
-`cylinder_detector.py` uses `IncrementalTrackManager` internally; publishes on confirmed + updated (every 5 updates). Controller receives multiple messages per barrel.
+`cylinder_detector.py` uses a custom `Cluster` class internally (not ITM — Cluster supports orientation-dependent merge radii); publishes on confirmed + updated (every 5 updates). Controller receives multiple messages per barrel.
 
 Controller dedup:
 
@@ -559,7 +559,7 @@ before the avoider publishes during inspection. Changed to default QoS on both s
 **No C++ changes in this phase** (axis yaw encoding skipped — see §Cylinder encoding convention).
 
 - [ ] `yellow_avoider.py`: HSV yellow mask, danger-zone ROI (65–95%, 30–70%), dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH/INTERACT → stop+reverse; INSPECT_WORKSTATION → publish `/yellow_line_seen` (default QoS) on detection, no velocity; FOLLOW_BLUE_LINE/DONE → passive
-- [ ] `cylinder_detector.py`: subscribe `/cylinder_markers` + buffer `/oakd/rgb/preview/depth/points` (sensor_qos); ITM dedup (CLUSTER_RADIUS=0.33 m vertical, 0.70 m horizontal, CONFIRM_THRESH=10); publish `/detected_cylinders` PoseStamped (`frame_id="map|{color}|{orientation}"`, identity quat); provide `/spill_check` Trigger service (see §Spill check design)
+- [ ] `cylinder_detector.py`: subscribe `/cylinder_markers` + buffer `/oakd/rgb/preview/depth/points` (sensor_qos); Cluster dedup (adapted from teammate, orientation-dependent radii: 0.33 m vertical / 0.70 m horizontal, CONFIRM_THRESH=10); publish `/detected_cylinders` PoseStamped (`frame_id="map|{color}|{orientation}"`, identity quat); provide `/spill_check` Trigger service (see §Spill check design)
 - [ ] `workstation_detector.py`: subscribe `/top_camera/rgb/preview/image_raw` + `/top_camera/rgb/preview/depth/points`; HSV red/green mask → contour → aspect ≥ 3.0 → `extract_3d_points_from_pc2` → TF to map → ITM dedup (0.5 m, 5 votes) → publish `/detected_workstations` Marker (ns=color, pose=centroid)
 
 ### Phase 3 — Room 1 completion

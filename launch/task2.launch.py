@@ -131,6 +131,30 @@ def generate_launch_description():
         ],
     )
 
+    yellow_avoider = Node(
+        package="megatron",
+        executable="yellow_avoider",
+        name="yellow_avoider",
+        output="screen",
+        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+    )
+
+    cylinder_detector = Node(
+        package="megatron",
+        executable="cylinder_detector",
+        name="cylinder_detector",
+        output="screen",
+        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+    )
+
+    workstation_detector = Node(
+        package="megatron",
+        executable="workstation_detector",
+        name="workstation_detector",
+        output="screen",
+        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+    )
+
     visualizer = Node(
         package="megatron",
         executable="perception_visualizer",
@@ -152,6 +176,9 @@ def generate_launch_description():
     ld.add_action(face_detector)
     ld.add_action(ring_detector)
     ld.add_action(arm_mover)
+    ld.add_action(yellow_avoider)
+    ld.add_action(cylinder_detector)
+    ld.add_action(workstation_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
     return ld
