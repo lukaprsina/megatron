@@ -328,11 +328,28 @@ PATROL / APPROACH_TARGET / INTERACT states:
       speak "Prohibited zone!"
       reverse 1.8 s → CLEAR
 
+  Three ROIs along the bottom strip (92–100 % Y): CENTER (45–55 % X),
+  LEFT (15–30 % X), RIGHT (70–85 % X).  All check contour-bottom.
+
+  CENTER contour-bottom triggers → determine which side the line is on
+  (centroid left/right of ROI center).
+
+    Safe-zone ROI (opposite side) clear → STEERING:
+      publish forward + angular on BOTH cmd_vel topics at 50 Hz
+      (linear = steer_speed, angular = ±steer_angular)
+      Nav2 sees forward progress → local planner re-routes around line
+      Exit STEERING when CENTER clears
+
+    Safe-zone ROI ALSO has yellow → BACKING fallback:
+      speak "Prohibited zone!"
+      reverse 1.8 s → CLEAR
+
   Contours NOT reaching the bottom edge (yellow ahead/to the side) are
   ignored — Nav2 + costmap handle those.
 
 INSPECT_WORKSTATION state:
   Skip velocity commands entirely (controller owns cmd_vel during inspection)
+  CENTER contour-bottom → publish Bool to /yellow_line_seen every tick
   CENTER contour-bottom → publish Bool to /yellow_line_seen every tick
 
 INIT / FOLLOW_BLUE_LINE / DONE states:
@@ -579,9 +596,9 @@ TF transform — zero manual calibration. Homography computed once at startup fr
 line equation in base_link: ax + by + c = 0.
 
 TTI = -c/a (intersection of robot's forward X-axis with the line). Steering is
-proportional: angular = steer_dir * kp / max(d_x, 0.05), clamped to max_angular.
+proportional: angular = steer_dir \* kp / max(d_x, 0.05), clamped to max_angular.
 Panic BACKING at d_x < 0.2 m if steering can't suffice. No state machine beyond
-_backing flag.
+\_backing flag.
 
 INSPECT_WORKSTATION: `/yellow_line_seen` → True when d_x < inspection_threshold
 (0.15 m), replacing the contour-bottom check.

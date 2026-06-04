@@ -7,8 +7,13 @@ APPROACH_TARGET / INTERACT / PATROL:
   CENTER contour-bottom triggers detection.  If a safe-zone ROI (opposite
   side of the line) is clear → STEER forward + angular away from the line
   while Nav2 re-plans.  If both sides blocked → BACKING fallback.
+  Three tight ROIs along the bottom of the frame: CENTER, LEFT, RIGHT.
+  CENTER contour-bottom triggers detection.  If a safe-zone ROI (opposite
+  side of the line) is clear → STEER forward + angular away from the line
+  while Nav2 re-plans.  If both sides blocked → BACKING fallback.
 
 INSPECT_WORKSTATION:
+  CENTER contour-bottom → publish True/False to /yellow_line_seen
   CENTER contour-bottom → publish True/False to /yellow_line_seen
   (default QoS) every tick.  No velocity commands.
 
@@ -63,6 +68,12 @@ class YellowAvoider(Node):
         self.declare_parameter("safe_zone_left_r", 0.30)
         self.declare_parameter("safe_zone_right_l", 0.70)
         self.declare_parameter("safe_zone_right_r", 0.85)
+        self.declare_parameter("steer_speed", 0.06)
+        self.declare_parameter("steer_angular", 0.4)
+        self.declare_parameter("safe_zone_left_l", 0.15)
+        self.declare_parameter("safe_zone_left_r", 0.30)
+        self.declare_parameter("safe_zone_right_l", 0.70)
+        self.declare_parameter("safe_zone_right_r", 0.85)
 
         cam = cast(str, self.get_parameter("camera_topic").value)
         self.bridge = CvBridge()
@@ -82,6 +93,8 @@ class YellowAvoider(Node):
         self.back_end = 0.0
         self._steer_dir = 1
         self._safe_side = None
+        self._steer_dir = 1
+        self._safe_side = None
         self._spoke = False
         self._latest = None
 
@@ -94,6 +107,7 @@ class YellowAvoider(Node):
             self.robot_state = msg.data
             self._avoider_state = "CLEAR"
             self.back_end = 0.0
+            self._safe_side = None
             self._safe_side = None
             self._spoke = False
 
@@ -116,6 +130,12 @@ class YellowAvoider(Node):
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, MORPH_K)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, MORPH_K)
 
+        xc_l = int(w * cast(float, self.get_parameter("roi_left").value))
+        xc_r = int(w * cast(float, self.get_parameter("roi_right").value))
+        xl_l = int(w * cast(float, self.get_parameter("safe_zone_left_l").value))
+        xl_r = int(w * cast(float, self.get_parameter("safe_zone_left_r").value))
+        xr_l = int(w * cast(float, self.get_parameter("safe_zone_right_l").value))
+        xr_r = int(w * cast(float, self.get_parameter("safe_zone_right_r").value))
         xc_l = int(w * cast(float, self.get_parameter("roi_left").value))
         xc_r = int(w * cast(float, self.get_parameter("roi_right").value))
         xl_l = int(w * cast(float, self.get_parameter("safe_zone_left_l").value))
@@ -158,7 +178,9 @@ class YellowAvoider(Node):
 
         if self.robot_state in _INSPECT_STATES:
             self.yellow_seen.publish(Bool(data=c_reaches))
+            self.yellow_seen.publish(Bool(data=c_reaches))
         elif self.robot_state in _ACTIVE_STATES:
+            self._run_avoidance(c_reaches, safe_clear, now)
             self._run_avoidance(c_reaches, safe_clear, now)
 
         if cast(bool, self.get_parameter("publish_debug_image").value):
@@ -203,9 +225,20 @@ class YellowAvoider(Node):
     def _run_avoidance(self, c_reaches: bool, safe_clear: bool, now: float):
         if self._avoider_state == "STEERING":
             if not c_reaches:
+    def _run_avoidance(self, c_reaches: bool, safe_clear: bool, now: float):
+        if self._avoider_state == "STEERING":
+            if not c_reaches:
                 self._pub_vel(0.0, 0.0)
                 self._avoider_state = "CLEAR"
                 self._spoke = False
+                self.get_logger().info("Yellow cleared — CLEAR.")
+            elif not safe_clear:
+                self._avoider_state = "BACKING"
+                self.back_end = now + cast(
+                    float, self.get_parameter("back_duration").value
+                )
+                self._pub_vel(0.0, 0.0)
+                self.get_logger().warn("Safe zone blocked — BACKING.")
                 self.get_logger().info("Yellow cleared — CLEAR.")
             elif not safe_clear:
                 self._avoider_state = "BACKING"
@@ -218,7 +251,11 @@ class YellowAvoider(Node):
                 speed = cast(float, self.get_parameter("steer_speed").value)
                 ang = self._steer_dir * cast(
                     float, self.get_parameter("steer_angular").value
+                speed = cast(float, self.get_parameter("steer_speed").value)
+                ang = self._steer_dir * cast(
+                    float, self.get_parameter("steer_angular").value
                 )
+                self._pub_vel(speed, ang)
                 self._pub_vel(speed, ang)
         elif self._avoider_state == "BACKING":
             if now >= self.back_end:
@@ -226,8 +263,26 @@ class YellowAvoider(Node):
                 self._avoider_state = "CLEAR"
                 self._spoke = False
                 self.get_logger().info("Backing done — CLEAR.")
+                self._pub_vel(0.0, 0.0)
+                self._avoider_state = "CLEAR"
+                self._spoke = False
+                self.get_logger().info("Backing done — CLEAR.")
             else:
                 self._pub_vel(-cast(float, self.get_parameter("back_speed").value), 0.0)
+        elif c_reaches:
+            if safe_clear:
+                self._avoider_state = "STEERING"
+                self.get_logger().info(f"STEERING away ({self._steer_dir:+d}).")
+            else:
+                self._pub_vel(0.0, 0.0)
+                if not self._spoke:
+                    self.get_logger().warn("PROHIBITED — yellow line under robot.")
+                    self.speaker.speak("Prohibited zone!")
+                    self._spoke = True
+                    self._avoider_state = "BACKING"
+                    self.back_end = now + cast(
+                        float, self.get_parameter("back_duration").value
+                    )
         elif c_reaches:
             if safe_clear:
                 self._avoider_state = "STEERING"
@@ -299,6 +354,7 @@ class YellowAvoider(Node):
             else self._avoider_state
         )
         col = (0, 200, 0) if self._avoider_state == "CLEAR" else (0, 100, 255)
+        if self._avoider_state == "STEERING":
         if self._avoider_state == "STEERING":
             col = (255, 140, 0)
             self._label(debug, f"STEER {self._steer_dir:+d}", (8, 40), col)
