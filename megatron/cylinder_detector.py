@@ -37,6 +37,9 @@ from megatron.perception_utils import quaternion_to_rotation_matrix
 CLUSTER_RADIUS = 0.33  # m — vertical barrel merge radius
 CLUSTER_RADIUS_H = 0.70  # m — horizontal barrels vary more with viewing angle
 CONFIRM_THRESH = 10  # detections before confirming
+COMPACT_MIN = 6     # compact_enough threshold — decoupled from CONFIRM_THRESH because
+                    # compact_points only returns N inliers when N ≥ 60% of count, so
+                    # compact_enough(10) would effectively require ~17 sightings
 COMPACT_INLIER_RADIUS = 0.32
 MAX_RAW_PTS = 300
 SAME_COLOUR_SUPPRESS_RADIUS = 0.48
@@ -103,6 +106,7 @@ class Cluster:
         "colour_votes",
         "orientation_votes",
         "confirmed",
+        "suppressed",
         "cluster_id",
     )
 
@@ -112,6 +116,7 @@ class Cluster:
         self.colour_votes = Counter({colour: 1})
         self.orientation_votes = Counter({orientation: 1})
         self.confirmed = False
+        self.suppressed = False
         self.cluster_id = cluster_id
 
     def add(self, x, y, z, colour, orientation):
@@ -239,7 +244,7 @@ class CylinderDetector(Node):
         else:
             best.add(x, y, z, colour, orientation)
 
-        if best.count >= CONFIRM_THRESH and best.compact_enough(CONFIRM_THRESH):
+        if best.count >= CONFIRM_THRESH and best.compact_enough(COMPACT_MIN):
             just_confirmed = not best.confirmed
             if just_confirmed:
                 best.confirmed = True
@@ -275,7 +280,8 @@ class CylinderDetector(Node):
                 continue
             d = c.dist2d(cx, cy)
             if d < MIN_MARK_DIST or d < suppress_r:
-                c.confirmed = True  # silently suppress
+                c.confirmed = True   # guard: prevents re-confirmation in _marker_cb
+                c.suppressed = True  # guard: prevents republish in _republish_confirmed
 
     # ── Publishers ────────────────────────────────────────────────────────────
 
@@ -292,7 +298,7 @@ class CylinderDetector(Node):
 
     def _republish_confirmed(self):
         for c in self.clusters:
-            if c.confirmed:
+            if c.confirmed and not c.suppressed:
                 self._publish_pose(c)
 
     # ── /spill_check service ──────────────────────────────────────────────────

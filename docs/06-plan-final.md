@@ -381,8 +381,8 @@ Per frame:
   1. HSV threshold: red (H ∈ [0,10]∪[170,180]) or green (H ∈ [40,80]), S ≥ 80, V ≥ 60
   2. Morphological close (5×5 ellipse) → contours
   3. For each contour with area ≥ 2000 px²:
-       bounding rect aspect ratio ≥ 3.0 (long belt, not a ring or face)
-       → mask for that contour region
+       **minAreaRect** aspect ratio ≥ 3.0 (oriented — rotated belts would appear
+       near-square in a `boundingRect` and fail the filter; see §O)
   4. extract_3d_points_from_pc2(mask, latest_pc2_msg, max_range=4.0)
        → (N, 3) in top_camera_rgb_camera_optical_frame
   5. TF to map frame (tf_buffer, latest)
@@ -527,6 +527,36 @@ QoS incompatibility: the controller subscribes with default (VOLATILE) QoS and w
 latched buffer on connect. No late-joiner scenario exists here — the controller is always alive
 before the avoider publishes during inspection. Changed to default QoS on both sides.
 
+### L. Compactness check blocks barrel confirmation until ~17 sightings
+
+`compact_enough(CONFIRM_THRESH)` passed CONFIRM_THRESH=10 as the minimum compact inlier count, but
+`compact_points` only returns the inlier subset when it has ≥ 60% of all sightings. At 10 sightings
+with 7 inliers: 7 ≥ max(3, 6) → returns 7 inliers → 7 ≥ 10 → False. Confirmation required ~17
+sightings (17 × 0.6 ≈ 10 inliers). Decoupled with a separate **COMPACT_MIN=6** constant — same
+protection against dispersion, correct 10-sighting confirmation threshold.
+
+### M. `_suppress_duplicates` was undone by `_republish_confirmed`
+
+Suppressed clusters were marked `confirmed=True` to silence primary publication, but
+`_republish_confirmed` blindly re-broadcast all `confirmed` clusters every 3 s — including
+suppressed ones with noisy centroids. Controller could see duplicate barrels if suppressed
+cluster centroids were > 0.8 m apart (dedup) but < 1.5 m (horizontal suppress radius).
+Added `suppressed` flag to `Cluster`; `_republish_confirmed` skips suppressed clusters.
+
+### N. `yellow_avoider.py` never published `False` — latch effect across inspection phases
+
+Prior code published `Bool(data=True)` only on yellow detection; when yellow disappeared, nothing
+was published. Controller's `_yellow_seen` retained stale `True` from earlier phases. Phase 4's
+"reverse-to-yellow" would trigger instantly if yellow had ever been seen during inspection.
+Fixed: publish `Bool(data=danger_px >= thresh)` on **every** tick in INSPECT_WORKSTATION state,
+so `/yellow_line_seen` tracks instantaneous sensor state, not a one-shot latch.
+
+### O. `cv2.boundingRect` for workstation aspect ratio fails on rotated belts
+
+Conveyor belts may be at arbitrary orientations in the image. A belt rotated 35° has a near-square
+axis-aligned bounding box (e.g. 98×85, aspect 1.15) and would fail `MIN_ASPECT_RATIO=3.0`.
+Switched to `cv2.minAreaRect` which reports the true oriented dimensions regardless of rotation.
+
 ---
 
 ## Implementation phases
@@ -558,9 +588,9 @@ before the avoider publishes during inspection. Changed to default QoS on both s
 **Build order:** yellow_avoider → cylinder_detector → workstation_detector.
 **No C++ changes in this phase** (axis yaw encoding skipped — see §Cylinder encoding convention).
 
-- [ ] `yellow_avoider.py`: HSV yellow mask, danger-zone ROI (65–95%, 30–70%), dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH/INTERACT → stop+reverse; INSPECT_WORKSTATION → publish `/yellow_line_seen` (default QoS) on detection, no velocity; FOLLOW_BLUE_LINE/DONE → passive
-- [ ] `cylinder_detector.py`: subscribe `/cylinder_markers` + buffer `/oakd/rgb/preview/depth/points` (sensor_qos); Cluster dedup (adapted from teammate, orientation-dependent radii: 0.33 m vertical / 0.70 m horizontal, CONFIRM_THRESH=10); publish `/detected_cylinders` PoseStamped (`frame_id="map|{color}|{orientation}"`, identity quat); provide `/spill_check` Trigger service (see §Spill check design)
-- [ ] `workstation_detector.py`: subscribe `/top_camera/rgb/preview/image_raw` + `/top_camera/rgb/preview/depth/points`; HSV red/green mask → contour → aspect ≥ 3.0 → `extract_3d_points_from_pc2` → TF to map → ITM dedup (0.5 m, 5 votes) → publish `/detected_workstations` Marker (ns=color, pose=centroid)
+- [x] `yellow_avoider.py`: HSV yellow mask, danger-zone ROI (65–95%, 30–70%), dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH/INTERACT → stop+reverse; INSPECT_WORKSTATION → publish `/yellow_line_seen` (default QoS) True **and False** every tick (not just on detection — see §N)
+- [x] `cylinder_detector.py`: subscribe `/cylinder_markers` + buffer `/oakd/rgb/preview/depth/points` (sensor_qos); Cluster dedup (orientation-dependent radii: 0.33 m vertical / 0.70 m horizontal, CONFIRM_THRESH=10, COMPACT_MIN=6 — see §L); publish `/detected_cylinders` PoseStamped (`frame_id="map|{color}|{orientation}"`, identity quat); suppressed clusters excluded from republish (see §M); provide `/spill_check` Trigger service (see §Spill check design)
+- [x] `workstation_detector.py`: subscribe `/top_camera/rgb/preview/image_raw` + `/top_camera/rgb/preview/depth/points`; HSV red/green mask → contour → **minAreaRect** aspect ≥ 3.0 (not boundingRect — see §O) → `extract_3d_points_from_pc2` → TF to map → ITM dedup (0.5 m, 5 votes) → publish `/detected_workstations` Marker (ns=color, pose=centroid)
 
 ### Phase 3 — Room 1 completion
 

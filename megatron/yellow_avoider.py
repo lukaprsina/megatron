@@ -122,8 +122,9 @@ class YellowAvoider(Node):
         thresh = cast(int, self.get_parameter("danger_px_threshold").value)
 
         if self.robot_state in _INSPECT_STATES:
-            if danger_px >= thresh:
-                self.yellow_seen.publish(Bool(data=True))
+            # Publish on every tick so controller sees False when line disappears,
+            # not a stale True from a previous phase.
+            self.yellow_seen.publish(Bool(data=danger_px >= thresh))
         else:
             self._run_avoidance(danger_px, thresh, now)
 

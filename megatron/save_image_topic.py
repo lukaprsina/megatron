@@ -8,6 +8,7 @@ Usage:
 import cv2
 import rclpy
 from cv_bridge import CvBridge
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 
@@ -35,7 +36,7 @@ class ImageSaver(Node):
             topic,
             self._cb,
             10,
-            callback_group=rclpy.callback_groups.MutuallyExclusiveCallbackGroup(),  # type: ignore
+            callback_group=MutuallyExclusiveCallbackGroup(),
         )
         self.timer = self.create_timer(10.0, self._timeout)
 

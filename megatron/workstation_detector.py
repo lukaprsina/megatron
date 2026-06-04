@@ -142,8 +142,10 @@ class WorkstationDetector(Node):
         for cnt in contours:
             if cv2.contourArea(cnt) < MIN_CONTOUR_AREA:
                 continue
-            _, _, cw, ch = cv2.boundingRect(cnt)
-            if max(cw, ch) / (min(cw, ch) + 1e-6) < MIN_ASPECT_RATIO:
+            # minAreaRect gives the true oriented dimensions; boundingRect would
+            # give a near-square box for a rotated belt and fail the aspect filter.
+            _, (rw, rh), _ = cv2.minAreaRect(cnt)
+            if rw < 1 or rh < 1 or max(rw, rh) / min(rw, rh) < MIN_ASPECT_RATIO:
                 continue
 
             # Per-contour mask for extract_3d_points_from_pc2
