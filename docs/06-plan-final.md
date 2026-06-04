@@ -47,20 +47,20 @@ Locked 2026-06-03. Revised 2026-06-04. Revised 2026-06-04 (Phase 2 design sessio
 
 ## Topic inventory
 
-| Topic                    | Type               | Publisher                                            | QoS                                     | Notes                                                                   |
-| ------------------------ | ------------------ | ---------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------- |
-| `/robot_state`           | `String`           | task2_controller                                     | TRANSIENT_LOCAL, RELIABLE, KEEP_LAST(1) | Global state broadcast — every node reads this                          |
-| `/detected_faces`        | `PoseStamped`      | face_detector                                        | default                                 | frame_id = `"map"`, name in future field                                |
-| `/detected_rings`        | `PoseStamped`      | ring_detector                                        | default                                 | frame_id = `"map\|{color}"`                                             |
-| `/detected_cylinders`    | `PoseStamped`      | cylinder_detector                                    | default                                 | **frame_id = `"map\|{color}\|{orientation}"`** (see §Cylinder encoding) |
-| `/detected_workstations` | `Marker`           | workstation_detector                                 | default                                 | ns = `"red"` or `"green"`, pose = centroid                              |
+| Topic                    | Type               | Publisher                                            | QoS                                     | Notes                                                                                                                                    |
+| ------------------------ | ------------------ | ---------------------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `/robot_state`           | `String`           | task2_controller                                     | TRANSIENT_LOCAL, RELIABLE, KEEP_LAST(1) | Global state broadcast — every node reads this                                                                                           |
+| `/detected_faces`        | `PoseStamped`      | face_detector                                        | default                                 | frame_id = `"map"`, name in future field                                                                                                 |
+| `/detected_rings`        | `PoseStamped`      | ring_detector                                        | default                                 | frame_id = `"map\|{color}"`                                                                                                              |
+| `/detected_cylinders`    | `PoseStamped`      | cylinder_detector                                    | default                                 | **frame_id = `"map\|{color}\|{orientation}"`** (see §Cylinder encoding)                                                                  |
+| `/detected_workstations` | `Marker`           | workstation_detector                                 | default                                 | ns = `"red"` or `"green"`, pose = centroid                                                                                               |
 | `/yellow_line_seen`      | `Bool`             | yellow_avoider                                       | default (10)                            | True when yellow detected during INSPECT_WORKSTATION. Default QoS sufficient — controller is always subscribed before avoider publishes. |
-| `/spill_check`           | `std_srvs/Trigger` | cylinder_detector                                    | service                                 | Point-count in Z-slice [0.005, 0.15m]                                   |
-| `/qr_task`               | `String`           | qr_reader                                            | default                                 | Raw decoded QR text                                                     |
-| `/cmd_vel_unstamped`     | `Twist`            | task2_controller, blue_line_follower, yellow_avoider | default                                 | Direct drive                                                            |
-| `/cmd_vel`               | `TwistStamped`     | yellow_avoider                                       | default                                 | **Must also publish here** to override Nav2                             |
-| `/arm_command`           | `String`           | task2_controller                                     | default                                 | Arm pose names                                                          |
-| `/scan`                  | `LaserScan`        | robot                                                | sensor_qos                              | Inspection phases 0 + 3                                                 |
+| `/spill_check`           | `std_srvs/Trigger` | cylinder_detector                                    | service                                 | Point-count in Z-slice [0.005, 0.15m]                                                                                                    |
+| `/qr_task`               | `String`           | qr_reader                                            | default                                 | Raw decoded QR text                                                                                                                      |
+| `/cmd_vel_unstamped`     | `Twist`            | task2_controller, blue_line_follower, yellow_avoider | default                                 | Direct drive                                                                                                                             |
+| `/cmd_vel`               | `TwistStamped`     | yellow_avoider                                       | default                                 | **Must also publish here** to override Nav2                                                                                              |
+| `/arm_command`           | `String`           | task2_controller                                     | default                                 | Arm pose names                                                                                                                           |
+| `/scan`                  | `LaserScan`        | robot                                                | sensor_qos                              | Inspection phases 0 + 3                                                                                                                  |
 
 ---
 
@@ -311,14 +311,20 @@ at high frequency to win the last-write-wins race.
 **Design (in `yellow_avoider.py`):**
 
 ```
-Normal (PATROL / APPROACH_TARGET / INTERACT states):
+APPROACH_TARGET / INTERACT states:
   If yellow_pixel_count ≥ 300 in danger ROI (bottom 65–95%, center 30–70%):
-    enter AVOIDING state
+    enter BACKING state
     for 1.8 s: publish stop+reverse to BOTH at 50 Hz:
       /cmd_vel_unstamped (Twist, linear.x = -0.12, angular.z = 0)
       /cmd_vel (TwistStamped, same values)
     speak "Prohibited zone!"
-  Exit AVOIDING → resume publishing nothing (Nav2 takes over)
+  Exit BACKING → 3 s cooldown before another detection can trigger (prevents
+    oscillation on persistent yellow walls/boxes — see §P)
+
+PATROL state:
+  Fully passive. Nav2 + costmap are the sole navigation authority during
+  waypoint-following. Avoidance during PATROL caused a lockup at spawn
+  (§P) and provides no safety benefit over the costmap.
 
 INSPECT_WORKSTATION state:
   Skip stop+reverse logic entirely (controller owns cmd_vel during inspection)
@@ -326,7 +332,7 @@ INSPECT_WORKSTATION state:
     publish True to /yellow_line_seen (default QoS, depth=10)
     do NOT publish any velocity command
 
-FOLLOW_BLUE_LINE / DONE states:
+INIT / FOLLOW_BLUE_LINE / DONE states:
   Skip yellow detection entirely (avoider is passive)
 ```
 
@@ -557,6 +563,19 @@ Conveyor belts may be at arbitrary orientations in the image. A belt rotated 35�
 axis-aligned bounding box (e.g. 98×85, aspect 1.15) and would fail `MIN_ASPECT_RATIO=3.0`.
 Switched to `cv2.minAreaRect` which reports the true oriented dimensions regardless of rotation.
 
+### P. Yellow avoider blocks PATROL — arena has yellow boxes at spawn
+
+Plan specified stop+reverse in PATROL/APPROACH/INTERACT. Our task2 arena has a ~1 m yellow
+box right at the north-east spawn, filling the danger ROI immediately. Every 1.8 s back-up
+(0.22 m) cleared briefly, then yellow re-entered → CLEAR↔BACKING lockup. Controller couldn't
+reach waypoint 0 → oscillated PATROL/APPROACH_TARGET. `/yellow_line_seen` never fired
+because INSPECT_WORKSTATION was unreachable.
+
+Teammate's avoider has the same PATROL-active logic but their task1 arena has no yellow
+objects in patrol paths — the bug is environmental. Fix: removed PATROL from `_ACTIVE_STATES`
+(Nav2 + costmap handles patrol navigation), added 3 s `back_cooldown` after BACKING→CLEAR
+to prevent re-trigger oscillation in APPROACH_TARGET/INTERACT near persistent yellow.
+
 ---
 
 ## Implementation phases
@@ -588,7 +607,7 @@ Switched to `cv2.minAreaRect` which reports the true oriented dimensions regardl
 **Build order:** yellow_avoider → cylinder_detector → workstation_detector.
 **No C++ changes in this phase** (axis yaw encoding skipped — see §Cylinder encoding convention).
 
-- [x] `yellow_avoider.py`: HSV yellow mask, danger-zone ROI (65–95%, 30–70%), dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH/INTERACT → stop+reverse; INSPECT_WORKSTATION → publish `/yellow_line_seen` (default QoS) True **and False** every tick (not just on detection — see §N)
+- [x] `yellow_avoider.py`: HSV yellow mask, danger-zone ROI (65–95%, 30–70%), dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; **APPROACH_TARGET/INTERACT** → stop+reverse + 3 s cooldown after backing (PATROL is passive — see §P); INSPECT_WORKSTATION → publish `/yellow_line_seen` (default QoS) True **and False** every tick (not just on detection — see §N)
 - [x] `cylinder_detector.py`: subscribe `/cylinder_markers` + buffer `/oakd/rgb/preview/depth/points` (sensor_qos); Cluster dedup (orientation-dependent radii: 0.33 m vertical / 0.70 m horizontal, CONFIRM_THRESH=10, COMPACT_MIN=6 — see §L); publish `/detected_cylinders` PoseStamped (`frame_id="map|{color}|{orientation}"`, identity quat); suppressed clusters excluded from republish (see §M); provide `/spill_check` Trigger service (see §Spill check design)
 - [x] `workstation_detector.py`: subscribe `/top_camera/rgb/preview/image_raw` + `/top_camera/rgb/preview/depth/points`; HSV red/green mask → contour → **minAreaRect** aspect ≥ 3.0 (not boundingRect — see §O) → `extract_3d_points_from_pc2` → TF to map → ITM dedup (0.5 m, 5 votes) → publish `/detected_workstations` Marker (ns=color, pose=centroid)
 

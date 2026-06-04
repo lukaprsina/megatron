@@ -2,16 +2,18 @@
 """
 Yellow line avoider — camera-only, no costmap editing.
 
-PATROL / APPROACH_TARGET / INTERACT:
+APPROACH_TARGET / INTERACT:
   Yellow in danger ROI → stop + back-up at 50 Hz on BOTH /cmd_vel topics,
-  overrunning Nav2's ~10-20 Hz output.
+  overrunning Nav2's ~10-20 Hz output. A 3 s cooldown after backing prevents
+  immediate re-trigger on persistent yellow (e.g. a wall-like box).
 
 INSPECT_WORKSTATION:
   Yellow in danger ROI → publish True to /yellow_line_seen (default QoS).
   No velocity commands — controller owns cmd_vel during inspection.
 
-FOLLOW_BLUE_LINE / DONE / INIT:
-  Fully passive — images not processed, no publishing.
+PATROL / INIT / FOLLOW_BLUE_LINE / DONE:
+  Fully passive — images not processed, no publishing.  Nav2 + costmap
+  are the sole navigation authority during PATROL.
 """
 
 from typing import cast
@@ -38,7 +40,7 @@ YELLOW_LO = np.array([18, 100, 80], dtype=np.uint8)
 YELLOW_HI = np.array([35, 255, 255], dtype=np.uint8)
 MORPH_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
-_ACTIVE_STATES = frozenset(("PATROL", "APPROACH_TARGET", "INTERACT"))
+_ACTIVE_STATES = frozenset(("APPROACH_TARGET", "INTERACT"))
 _INSPECT_STATES = frozenset(("INSPECT_WORKSTATION",))
 
 
@@ -55,6 +57,7 @@ class YellowAvoider(Node):
         self.declare_parameter("danger_px_threshold", 300)
         self.declare_parameter("back_speed", 0.12)
         self.declare_parameter("back_duration", 1.8)
+        self.declare_parameter("back_cooldown", 3.0)
 
         cam = cast(str, self.get_parameter("camera_topic").value)
         self.bridge = CvBridge()
@@ -72,6 +75,7 @@ class YellowAvoider(Node):
         self.robot_state = "INIT"
         self._avoider_state = "CLEAR"
         self.back_end = 0.0
+        self._cool_down_until = 0.0
         self._spoke = False
         self._latest = None
 
@@ -83,6 +87,7 @@ class YellowAvoider(Node):
         if msg.data != self.robot_state:
             self.robot_state = msg.data
             self._avoider_state = "CLEAR"
+            self._cool_down_until = 0.0
             self._spoke = False
 
     def _image_cb(self, msg: Image):
@@ -136,11 +141,18 @@ class YellowAvoider(Node):
             if now >= self.back_end:
                 self._pub_vel(0.0, 0.0)
                 self._avoider_state = "CLEAR"
+                self._cool_down_until = now + cast(
+                    float, self.get_parameter("back_cooldown").value
+                )
                 self._spoke = False
-                self.get_logger().info("Backing done — CLEAR.")
+                self.get_logger().info(
+                    f"Backing done — CLEAR (cooldown {self._cool_down_until - now:.1f}s)."
+                )
             else:
                 self._pub_vel(-cast(float, self.get_parameter("back_speed").value), 0.0)
         elif danger_px >= thresh:
+            if now < self._cool_down_until:
+                return
             self._pub_vel(0.0, 0.0)
             if not self._spoke:
                 self.get_logger().warn(
