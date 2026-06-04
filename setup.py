@@ -44,6 +44,7 @@ setup(
             "controller = megatron.controller:main",
             "task2_controller = megatron.task2_controller:main",
             "perception_visualizer = megatron.perception_visualizer:main",
+            "save_image_topic = megatron.save_image_topic:main",
         ],
     },
 )
