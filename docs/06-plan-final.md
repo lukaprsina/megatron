@@ -312,25 +312,28 @@ at high frequency to win the last-write-wins race.
 
 ```
 PATROL / APPROACH_TARGET / INTERACT states:
-  Crop tight ROI (bottom 8 %, center 10 %) from yellow HSV mask.
-  Find contours; if any contour reaches the ROI bottom edge (within 3 px):
-    → yellow line is physically under the robot
-    enter BACKING state
-    for 1.8 s: publish stop+reverse to BOTH at 50 Hz:
-      /cmd_vel_unstamped (Twist, linear.x = -0.12, angular.z = 0)
-      /cmd_vel (TwistStamped, same values)
-    speak "Prohibited zone!"
+  Three ROIs along the bottom strip (92–100 % Y): CENTER (45–55 % X),
+  LEFT (15–30 % X), RIGHT (70–85 % X).  All check contour-bottom.
+
+  CENTER contour-bottom triggers → determine which side the line is on
+  (centroid left/right of ROI center).
+
+    Safe-zone ROI (opposite side) clear → STEERING:
+      publish forward + angular on BOTH cmd_vel topics at 50 Hz
+      (linear = steer_speed, angular = ±steer_angular)
+      Nav2 sees forward progress → local planner re-routes around line
+      Exit STEERING when CENTER clears
+
+    Safe-zone ROI ALSO has yellow → BACKING fallback:
+      speak "Prohibited zone!"
+      reverse 1.8 s → CLEAR
+
   Contours NOT reaching the bottom edge (yellow ahead/to the side) are
   ignored — Nav2 + costmap handle those.
 
-  This is a contour-bottom check, NOT a pixel-count threshold.  A yellow
-  box adjacent to the path produces yellow in the ROI but its contour
-  doesn't extend to the bottom — no false trigger (§P).
-
 INSPECT_WORKSTATION state:
   Skip velocity commands entirely (controller owns cmd_vel during inspection)
-  Same contour-bottom check → publish Bool to /yellow_line_seen every tick
-  (controller sees True when line is under the robot, False otherwise)
+  CENTER contour-bottom → publish Bool to /yellow_line_seen every tick
 
 INIT / FOLLOW_BLUE_LINE / DONE states:
   Skip yellow detection entirely (avoider is passive)
@@ -565,20 +568,22 @@ Switched to `cv2.minAreaRect` which reports the true oriented dimensions regardl
 
 ### P. Yellow avoider blocks PATROL — arena has yellow boxes at spawn
 
-Plan specified stop+reverse in PATROL/APPROACH/INTERACT. Our task2 arena has a ~1 m yellow
-box right at the north-east spawn, filling the danger ROI immediately. Every 1.8 s back-up
-(0.22 m) cleared briefly, then yellow re-entered → CLEAR↔BACKING lockup. Controller couldn't
-reach waypoint 0 → oscillated PATROL/APPROACH_TARGET. `/yellow_line_seen` never fired
-because INSPECT_WORKSTATION was unreachable.
+Plan specified pixel-count threshold stop+reverse. Our task2 arena has ~1 m yellow boxes
+at spawn, filling the danger ROI → CLEAR↔BACKING lockup. Controller oscillated
+PATROL/APPROACH_TARGET, robot never reached first waypoint, `/yellow_line_seen` never fired.
 
-Teammate's avoider has the same PATROL-active logic but their task1 arena has no yellow
-objects in patrol paths — the bug is environmental. Fix: replaced pixel-count threshold
-with a **contour-bottom** check. Tightened ROI to 40–60 %×80–95 % (75 % smaller area),
-then trigger only when a yellow contour reaches the ROI bottom edge (within 3 px).
-A yellow box alongside the path has yellow in the ROI but its contour doesn't extend
-to the bottom — ignored. A yellow line the robot is about to cross spans the full ROI
-height — contour reaches bottom → stop+reverse. Removed `danger_px_threshold` parameter
-entirely; contour presence is self-filtering.
+Fix iteration 1: contour-bottom + tight ROI (45–55 %×92–100 %). Fixed spawn-box false positives
+but pure backing on approach → Nav2 re-approached on same trajectory → endless BACKING loop.
+
+Fix iteration 2 (TURNING): BACKING → 1.2 s TURNING away → CLEAR. Nav2 immediately undid the
+turn (active NavigateToPose goal) and drove straight back into the line.
+
+Fix iteration 3 (lateral STEERING): three ROIs — CENTER, LEFT, RIGHT — computed every frame.
+CENTER contour-bottom triggers → check safe-zone ROI on the OPPOSITE side of the line.
+Safe-zone clear → publish forward + angular (away from line, toward clear side) at 50 Hz.
+Nav2 sees forward progress toward goal → local planner re-routes around line naturally.
+Safe-zone blocked → BACKING fallback. Removed `danger_px_threshold`, TURNING state,
+`turn_duration`, `_turn_end`. Added `steer_speed`, `steer_angular`, safe-zone params.
 
 ---
 
@@ -611,7 +616,7 @@ entirely; contour presence is self-filtering.
 **Build order:** yellow_avoider → cylinder_detector → workstation_detector.
 **No C++ changes in this phase** (axis yaw encoding skipped — see §Cylinder encoding convention).
 
-- [x] `yellow_avoider.py`: HSV yellow mask, contour-bottom trigger in tiny bottom-edge ROI (92–100% Y, 45–55% X); dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH_TARGET/INTERACT → stop+reverse only when a yellow contour reaches the ROI bottom edge; INSPECT_WORKSTATION → publish `/yellow_line_seen` True/False per tick based on same contour-bottom check (§P)
+- [x] `yellow_avoider.py`: HSV yellow mask, three contour-bottom ROIs (CENTER + LEFT + RIGHT) along 92–100% Y; dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH_TARGET/INTERACT → lateral STEERING (forward + angular away from line) when safe-zone is clear, BACKING fallback when blocked (§P); INSPECT_WORKSTATION → publish `/yellow_line_seen` True/False per tick based on CENTER contour-bottom
 - [x] `cylinder_detector.py`: subscribe `/cylinder_markers` + buffer `/oakd/rgb/preview/depth/points` (sensor_qos); Cluster dedup (orientation-dependent radii: 0.33 m vertical / 0.70 m horizontal, CONFIRM_THRESH=10, COMPACT_MIN=6 — see §L); publish `/detected_cylinders` PoseStamped (`frame_id="map|{color}|{orientation}"`, identity quat); suppressed clusters excluded from republish (see §M); provide `/spill_check` Trigger service (see §Spill check design)
 - [x] `workstation_detector.py`: subscribe `/top_camera/rgb/preview/image_raw` + `/top_camera/rgb/preview/depth/points`; HSV red/green mask → contour → **minAreaRect** aspect ≥ 3.0 (not boundingRect — see §O) → `extract_3d_points_from_pc2` → TF to map → ITM dedup (0.5 m, 5 votes) → publish `/detected_workstations` Marker (ns=color, pose=centroid)
 

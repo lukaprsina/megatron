@@ -3,13 +3,13 @@
 Yellow line avoider — camera-only, no costmap editing.
 
 APPROACH_TARGET / INTERACT / PATROL:
-  Find yellow contours in tight danger ROI (bottom 8 %, center 10 %).
-  Trigger only when a contour reaches the bottom edge of the ROI — i.e. the
-  yellow line is literally under the robot, not just visible ahead/to the side.
-  Stop → back-up → turn away → CLEAR (Nav2 re-plans from new angle).
+  Three tight ROIs along the bottom of the frame: CENTER, LEFT, RIGHT.
+  CENTER contour-bottom triggers detection.  If a safe-zone ROI (opposite
+  side of the line) is clear → STEER forward + angular away from the line
+  while Nav2 re-plans.  If both sides blocked → BACKING fallback.
 
 INSPECT_WORKSTATION:
-  Same contour-bottom check → publish True/False to /yellow_line_seen
+  CENTER contour-bottom → publish True/False to /yellow_line_seen
   (default QoS) every tick.  No velocity commands.
 
 INIT / FOLLOW_BLUE_LINE / DONE:
@@ -57,8 +57,12 @@ class YellowAvoider(Node):
         self.declare_parameter("roi_right", 0.55)
         self.declare_parameter("back_speed", 0.12)
         self.declare_parameter("back_duration", 1.8)
-        self.declare_parameter("turn_angular", 0.5)
-        self.declare_parameter("turn_duration", 1.2)
+        self.declare_parameter("steer_speed", 0.06)
+        self.declare_parameter("steer_angular", 0.4)
+        self.declare_parameter("safe_zone_left_l", 0.15)
+        self.declare_parameter("safe_zone_left_r", 0.30)
+        self.declare_parameter("safe_zone_right_l", 0.70)
+        self.declare_parameter("safe_zone_right_r", 0.85)
 
         cam = cast(str, self.get_parameter("camera_topic").value)
         self.bridge = CvBridge()
@@ -76,8 +80,8 @@ class YellowAvoider(Node):
         self.robot_state = "INIT"
         self._avoider_state = "CLEAR"
         self.back_end = 0.0
-        self._turn_end = 0.0
-        self._turn_dir = 1
+        self._steer_dir = 1
+        self._safe_side = None
         self._spoke = False
         self._latest = None
 
@@ -90,29 +94,16 @@ class YellowAvoider(Node):
             self.robot_state = msg.data
             self._avoider_state = "CLEAR"
             self.back_end = 0.0
-            self._turn_end = 0.0
+            self._safe_side = None
             self._spoke = False
 
     def _image_cb(self, msg: Image):
-        # TODO: CPU savings: why burn cycles on a downward cam when the avoider's off duty?
-        # however, the debug image then doesn't display.
-        # if (
-        #     self.robot_state not in _ACTIVE_STATES
-        #     and self.robot_state not in _INSPECT_STATES
-        # ):
-        #     return
         try:
             self._latest = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception:
             pass
 
     def _update(self):
-        # same as _image_cb
-        # if (
-        #     self.robot_state not in _ACTIVE_STATES
-        #     and self.robot_state not in _INSPECT_STATES
-        # ):
-        #     return
         if self._latest is None:
             return
 
@@ -125,33 +116,71 @@ class YellowAvoider(Node):
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, MORPH_K)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, MORPH_K)
 
-        xl = int(w * cast(float, self.get_parameter("roi_left").value))
-        xr = int(w * cast(float, self.get_parameter("roi_right").value))
+        xc_l = int(w * cast(float, self.get_parameter("roi_left").value))
+        xc_r = int(w * cast(float, self.get_parameter("roi_right").value))
+        xl_l = int(w * cast(float, self.get_parameter("safe_zone_left_l").value))
+        xl_r = int(w * cast(float, self.get_parameter("safe_zone_left_r").value))
+        xr_l = int(w * cast(float, self.get_parameter("safe_zone_right_l").value))
+        xr_r = int(w * cast(float, self.get_parameter("safe_zone_right_r").value))
         dt = int(h * cast(float, self.get_parameter("danger_zone_top").value))
         db = int(h * cast(float, self.get_parameter("danger_zone_bottom").value))
-        roi_mask = mask[dt:db, xl:xr]
-        danger_px = int(cv2.countNonZero(roi_mask))
-        reaches_bottom, centroid_x = self._analyze_contours(roi_mask)
 
-        if reaches_bottom and centroid_x is not None:
-            crop_w = roi_mask.shape[1]
-            self._turn_dir = -1 if centroid_x < crop_w / 2 else 1
+        roi_c = mask[dt:db, xc_l:xc_r]
+        roi_l = (
+            mask[dt:db, xl_l:xl_r]
+            if xl_r > xl_l
+            else np.zeros((db - dt, 1), dtype=np.uint8)
+        )
+        roi_r = (
+            mask[dt:db, xr_l:xr_r]
+            if xr_r > xr_l
+            else np.zeros((db - dt, 1), dtype=np.uint8)
+        )
+
+        c_reaches, centroid_x = self._analyze_contours(roi_c)
+        l_reaches, _ = self._analyze_contours(roi_l)
+        r_reaches, _ = self._analyze_contours(roi_r)
+        danger_px = int(cv2.countNonZero(roi_c))
+
+        safe_clear = True
+        if c_reaches and centroid_x is not None:
+            crop_w = roi_c.shape[1]
+            if centroid_x < crop_w / 2:
+                self._steer_dir = -1  # line on left → steer right
+                self._safe_side = "R"
+                safe_clear = not r_reaches
+            else:
+                self._steer_dir = 1  # line on right → steer left
+                self._safe_side = "L"
+                safe_clear = not l_reaches
+        else:
+            self._safe_side = None
 
         if self.robot_state in _INSPECT_STATES:
-            self.yellow_seen.publish(Bool(data=reaches_bottom))
+            self.yellow_seen.publish(Bool(data=c_reaches))
         elif self.robot_state in _ACTIVE_STATES:
-            self._run_avoidance(reaches_bottom, now)
+            self._run_avoidance(c_reaches, safe_clear, now)
 
         if cast(bool, self.get_parameter("publish_debug_image").value):
-            self._publish_debug(img, mask, xl, xr, dt, db, danger_px, reaches_bottom)
+            self._publish_debug(
+                img,
+                mask,
+                xc_l,
+                xc_r,
+                xl_l,
+                xl_r,
+                xr_l,
+                xr_r,
+                dt,
+                db,
+                danger_px,
+                c_reaches,
+                l_reaches,
+                r_reaches,
+            )
 
     @staticmethod
     def _analyze_contours(mask_crop):
-        """Return (reaches_bottom, centroid_x) for the largest bottom-reaching contour.
-
-        centroid_x is in crop coordinates (pixels from left crop edge).
-        Returns (False, None) if no contour reaches the bottom edge.
-        """
         contours, _ = cv2.findContours(
             mask_crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
@@ -171,64 +200,108 @@ class YellowAvoider(Node):
             return True, best_cx
         return False, None
 
-    def _run_avoidance(self, reaches_bottom: bool, now: float):
-        if self._avoider_state == "TURNING":
-            if now >= self._turn_end:
+    def _run_avoidance(self, c_reaches: bool, safe_clear: bool, now: float):
+        if self._avoider_state == "STEERING":
+            if not c_reaches:
                 self._pub_vel(0.0, 0.0)
                 self._avoider_state = "CLEAR"
                 self._spoke = False
-                self.get_logger().info("Turn done — CLEAR.")
-            else:
-                ang = self._turn_dir * cast(
-                    float, self.get_parameter("turn_angular").value
-                )
-                self._pub_vel(0.0, ang)
-        elif self._avoider_state == "BACKING":
-            if now >= self.back_end:
-                self._avoider_state = "TURNING"
-                self._turn_end = now + cast(
-                    float, self.get_parameter("turn_duration").value
-                )
-                ang = self._turn_dir * cast(
-                    float, self.get_parameter("turn_angular").value
-                )
-                self._pub_vel(0.0, ang)
-                self.get_logger().info(f"Backing done — TURNING ({ang:+.1f} rad/s).")
-            else:
-                self._pub_vel(-cast(float, self.get_parameter("back_speed").value), 0.0)
-        elif reaches_bottom:
-            self._pub_vel(0.0, 0.0)
-            if not self._spoke:
-                self.get_logger().warn("PROHIBITED — yellow line under robot.")
-                self.speaker.speak("Prohibited zone!")
-                self._spoke = True
+                self.get_logger().info("Yellow cleared — CLEAR.")
+            elif not safe_clear:
                 self._avoider_state = "BACKING"
                 self.back_end = now + cast(
                     float, self.get_parameter("back_duration").value
                 )
+                self._pub_vel(0.0, 0.0)
+                self.get_logger().warn("Safe zone blocked — BACKING.")
+            else:
+                speed = cast(float, self.get_parameter("steer_speed").value)
+                ang = self._steer_dir * cast(
+                    float, self.get_parameter("steer_angular").value
+                )
+                self._pub_vel(speed, ang)
+        elif self._avoider_state == "BACKING":
+            if now >= self.back_end:
+                self._pub_vel(0.0, 0.0)
+                self._avoider_state = "CLEAR"
+                self._spoke = False
+                self.get_logger().info("Backing done — CLEAR.")
+            else:
+                self._pub_vel(-cast(float, self.get_parameter("back_speed").value), 0.0)
+        elif c_reaches:
+            if safe_clear:
+                self._avoider_state = "STEERING"
+                self.get_logger().info(f"STEERING away ({self._steer_dir:+d}).")
+            else:
+                self._pub_vel(0.0, 0.0)
+                if not self._spoke:
+                    self.get_logger().warn("PROHIBITED — yellow line under robot.")
+                    self.speaker.speak("Prohibited zone!")
+                    self._spoke = True
+                    self._avoider_state = "BACKING"
+                    self.back_end = now + cast(
+                        float, self.get_parameter("back_duration").value
+                    )
         else:
             self._avoider_state = "CLEAR"
 
-    def _publish_debug(self, img, mask, xl, xr, dt, db, danger_px, reaches_bottom):
+    def _publish_debug(
+        self,
+        img,
+        mask,
+        xc_l,
+        xc_r,
+        xl_l,
+        xl_r,
+        xr_l,
+        xr_r,
+        dt,
+        db,
+        danger_px,
+        c_reaches,
+        l_reaches,
+        r_reaches,
+    ):
         debug = img.copy()
         overlay = debug.copy()
         overlay[mask > 0] = (0, 220, 255)
         cv2.addWeighted(overlay, 0.40, debug, 0.60, 0, debug)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(debug, contours, -1, (0, 180, 255), 2)
-        d_col = (0, 0, 255) if reaches_bottom else (80, 80, 80)
-        cv2.rectangle(debug, (xl, dt), (xr, db), d_col, 2)
-        status = f"DANGER {danger_px}px FEET" if reaches_bottom else f"{danger_px}px"
-        self._label(debug, status, (xl + 4, dt + 16), d_col)
+
+        dim = (80, 80, 80)
+        red = (0, 0, 255)
+        grn = (0, 198, 0)
+
+        # Center ROI — red when triggered
+        col_c = red if c_reaches else dim
+        cv2.rectangle(debug, (xc_l, dt), (xc_r, db), col_c, 2)
+
+        # Safe-zone ROIs — green when clear, red when blocked (only if relevant)
+        col_l = (
+            grn
+            if self._safe_side == "L" and not l_reaches
+            else (red if self._safe_side == "L" else dim)
+        )
+        cv2.rectangle(debug, (xl_l, dt), (xl_r, db), col_l, 2)
+        col_r = (
+            grn
+            if self._safe_side == "R" and not r_reaches
+            else (red if self._safe_side == "R" else dim)
+        )
+        cv2.rectangle(debug, (xr_l, dt), (xr_r, db), col_r, 2)
+
+        status = f"{danger_px}px FEET" if c_reaches else f"{danger_px}px"
+        self._label(debug, status, (xc_l + 4, dt + 16), col_c)
         mode = (
             f"INSPECT|{self._avoider_state}"
             if self.robot_state in _INSPECT_STATES
             else self._avoider_state
         )
         col = (0, 200, 0) if self._avoider_state == "CLEAR" else (0, 100, 255)
-        if self._avoider_state == "TURNING":
+        if self._avoider_state == "STEERING":
             col = (255, 140, 0)
-            self._label(debug, f"TURN {self._turn_dir:+d}", (8, 40), col)
+            self._label(debug, f"STEER {self._steer_dir:+d}", (8, 40), col)
         self._label(debug, mode, (8, 20), col)
         try:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, "bgr8"))
