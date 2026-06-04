@@ -6,7 +6,7 @@ APPROACH_TARGET / INTERACT / PATROL:
   Find yellow contours in tight danger ROI (bottom 8 %, center 10 %).
   Trigger only when a contour reaches the bottom edge of the ROI — i.e. the
   yellow line is literally under the robot, not just visible ahead/to the side.
-  Stop + back-up at 50 Hz on BOTH /cmd_vel topics.
+  Stop → back-up → turn away → CLEAR (Nav2 re-plans from new angle).
 
 INSPECT_WORKSTATION:
   Same contour-bottom check → publish True/False to /yellow_line_seen
@@ -57,6 +57,8 @@ class YellowAvoider(Node):
         self.declare_parameter("roi_right", 0.55)
         self.declare_parameter("back_speed", 0.12)
         self.declare_parameter("back_duration", 1.8)
+        self.declare_parameter("turn_angular", 0.5)
+        self.declare_parameter("turn_duration", 1.2)
 
         cam = cast(str, self.get_parameter("camera_topic").value)
         self.bridge = CvBridge()
@@ -74,6 +76,8 @@ class YellowAvoider(Node):
         self.robot_state = "INIT"
         self._avoider_state = "CLEAR"
         self.back_end = 0.0
+        self._turn_end = 0.0
+        self._turn_dir = 1
         self._spoke = False
         self._latest = None
 
@@ -85,6 +89,8 @@ class YellowAvoider(Node):
         if msg.data != self.robot_state:
             self.robot_state = msg.data
             self._avoider_state = "CLEAR"
+            self.back_end = 0.0
+            self._turn_end = 0.0
             self._spoke = False
 
     def _image_cb(self, msg: Image):
@@ -125,7 +131,11 @@ class YellowAvoider(Node):
         db = int(h * cast(float, self.get_parameter("danger_zone_bottom").value))
         roi_mask = mask[dt:db, xl:xr]
         danger_px = int(cv2.countNonZero(roi_mask))
-        reaches_bottom = danger_px > 0 and self._reaches_bottom(roi_mask)
+        reaches_bottom, centroid_x = self._analyze_contours(roi_mask)
+
+        if reaches_bottom and centroid_x is not None:
+            crop_w = roi_mask.shape[1]
+            self._turn_dir = -1 if centroid_x < crop_w / 2 else 1
 
         if self.robot_state in _INSPECT_STATES:
             self.yellow_seen.publish(Bool(data=reaches_bottom))
@@ -136,26 +146,54 @@ class YellowAvoider(Node):
             self._publish_debug(img, mask, xl, xr, dt, db, danger_px, reaches_bottom)
 
     @staticmethod
-    def _reaches_bottom(mask_crop):
-        """Return True if any contour in the cropped ROI touches the bottom edge."""
+    def _analyze_contours(mask_crop):
+        """Return (reaches_bottom, centroid_x) for the largest bottom-reaching contour.
+
+        centroid_x is in crop coordinates (pixels from left crop edge).
+        Returns (False, None) if no contour reaches the bottom edge.
+        """
         contours, _ = cv2.findContours(
             mask_crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         if not contours:
-            return False
+            return False, None
         bottom_y = mask_crop.shape[0] - 1
+        best_cx = None
+        best_n = 0
         for cnt in contours:
-            if any(int(p[0][1]) >= bottom_y - 3 for p in cnt):
-                return True
-        return False
+            pts = cnt[:, 0, :]
+            if np.any(pts[:, 1] >= bottom_y - 3):
+                cx = float(np.mean(pts[:, 0]))
+                n = len(pts)
+                if n > best_n:
+                    best_cx, best_n = cx, n
+        if best_n > 0:
+            return True, best_cx
+        return False, None
 
     def _run_avoidance(self, reaches_bottom: bool, now: float):
-        if self._avoider_state == "BACKING":
-            if now >= self.back_end:
+        if self._avoider_state == "TURNING":
+            if now >= self._turn_end:
                 self._pub_vel(0.0, 0.0)
                 self._avoider_state = "CLEAR"
                 self._spoke = False
-                self.get_logger().info("Backing done — CLEAR.")
+                self.get_logger().info("Turn done — CLEAR.")
+            else:
+                ang = self._turn_dir * cast(
+                    float, self.get_parameter("turn_angular").value
+                )
+                self._pub_vel(0.0, ang)
+        elif self._avoider_state == "BACKING":
+            if now >= self.back_end:
+                self._avoider_state = "TURNING"
+                self._turn_end = now + cast(
+                    float, self.get_parameter("turn_duration").value
+                )
+                ang = self._turn_dir * cast(
+                    float, self.get_parameter("turn_angular").value
+                )
+                self._pub_vel(0.0, ang)
+                self.get_logger().info(f"Backing done — TURNING ({ang:+.1f} rad/s).")
             else:
                 self._pub_vel(-cast(float, self.get_parameter("back_speed").value), 0.0)
         elif reaches_bottom:
@@ -188,6 +226,9 @@ class YellowAvoider(Node):
             else self._avoider_state
         )
         col = (0, 200, 0) if self._avoider_state == "CLEAR" else (0, 100, 255)
+        if self._avoider_state == "TURNING":
+            col = (255, 140, 0)
+            self._label(debug, f"TURN {self._turn_dir:+d}", (8, 40), col)
         self._label(debug, mode, (8, 20), col)
         try:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, "bgr8"))
