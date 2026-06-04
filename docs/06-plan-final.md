@@ -2,7 +2,7 @@
 
 **Supersedes** 05-plan.md, 05-plan-revision.md, 05-plan-revision2.md.
 All prior revision decisions are incorporated. Revised 2026-06-04 (grill-with-docs, Phase 2 split).
-Locked 2026-06-03. Revised 2026-06-04.
+Locked 2026-06-03. Revised 2026-06-04. Revised 2026-06-04 (Phase 2 design session).
 
 ---
 
@@ -54,7 +54,7 @@ Locked 2026-06-03. Revised 2026-06-04.
 | `/detected_rings`        | `PoseStamped`      | ring_detector                                        | default                                 | frame_id = `"map\|{color}"`                                             |
 | `/detected_cylinders`    | `PoseStamped`      | cylinder_detector                                    | default                                 | **frame_id = `"map\|{color}\|{orientation}"`** (see §Cylinder encoding) |
 | `/detected_workstations` | `Marker`           | workstation_detector                                 | default                                 | ns = `"red"` or `"green"`, pose = centroid                              |
-| `/yellow_line_seen`      | `Bool`             | yellow_avoider                                       | TRANSIENT_LOCAL, RELIABLE, KEEP_LAST(1) | Latched; True when yellow under robot during INSPECT_WORKSTATION        |
+| `/yellow_line_seen`      | `Bool`             | yellow_avoider                                       | default (10)                            | True when yellow detected during INSPECT_WORKSTATION. Default QoS sufficient — controller is always subscribed before avoider publishes. |
 | `/spill_check`           | `std_srvs/Trigger` | cylinder_detector                                    | service                                 | Point-count in Z-slice [0.005, 0.15m]                                   |
 | `/qr_task`               | `String`           | qr_reader                                            | default                                 | Raw decoded QR text                                                     |
 | `/cmd_vel_unstamped`     | `Twist`            | task2_controller, blue_line_follower, yellow_avoider | default                                 | Direct drive                                                            |
@@ -73,15 +73,18 @@ Locked 2026-06-03. Revised 2026-06-04.
   - `{orientation}` = `"vertical"` or `"horizontal"` (from C++ `marker.text`)
   - `{color}` from average RGB → nearest HSV bucket
 - `pose.position` = barrel centroid in map frame
-- `pose.orientation` = quaternion encoding **cylinder axis yaw in XY plane**
-  - `yaw = atan2(axis_y, axis_x)` where `(axis_x, axis_y)` = RANSAC axis projected to XY
-  - For vertical barrels: axis is (0,0,1), yaw = 0.0 (ignored by controller)
-  - For horizontal barrels: controller reads yaw to compute perpendicular approach
+- `pose.orientation` = **identity quaternion (w=1)** — axis yaw is NOT encoded
 
-Controller approach:
+**Axis yaw encoding skipped (decided Phase 2 design session):** The C++ already has the RANSAC
+axis vector in `coefficients_cylinder->values[3..5]`, so encoding it would be a 5-line addition.
+Skipped because Nav2 + costmap resolves the approach path without a preferred direction; the
+perpendicular offset provides no measurable benefit. Barrel orientation is still conveyed via
+`marker.text` → frame_id → `barrel_report`.
 
-- **vertical barrel** → approach from current robot→barrel direction, 0.5 m offset
-- **horizontal barrel** → perpendicular to axis in XY + 0.5 m offset + 0.3 m lateral shift (robot-right)
+Controller approach (both vertical and horizontal):
+
+- Approach from current robot→barrel direction, 0.5 m offset
+- Lateral shift parameter retained in code but unused for horizontal barrels
 
 ---
 
@@ -308,21 +311,91 @@ at high frequency to win the last-write-wins race.
 **Design (in `yellow_avoider.py`):**
 
 ```
-Normal (PATROL state):
+Normal (PATROL / APPROACH_TARGET / INTERACT states):
   If yellow_pixel_count ≥ 300 in danger ROI (bottom 65–95%, center 30–70%):
     enter AVOIDING state
-    for 1.8 s: publish stop+reverse to BOTH:
+    for 1.8 s: publish stop+reverse to BOTH at 50 Hz:
       /cmd_vel_unstamped (Twist, linear.x = -0.12, angular.z = 0)
       /cmd_vel (TwistStamped, same values)
-    at 50 Hz
     speak "Prohibited zone!"
   Exit AVOIDING → resume publishing nothing (Nav2 takes over)
 
 INSPECT_WORKSTATION state:
-  Skip danger-zone logic entirely
-  Instead: monitor same ROI; when yellow_pixel_count ≥ 300:
-    publish True to /yellow_line_seen (TRANSIENT_LOCAL, KEEP_LAST(1))
+  Skip stop+reverse logic entirely (controller owns cmd_vel during inspection)
+  Monitor same ROI; when yellow_pixel_count ≥ 300:
+    publish True to /yellow_line_seen (default QoS, depth=10)
+    do NOT publish any velocity command
+
+FOLLOW_BLUE_LINE / DONE states:
+  Skip yellow detection entirely (avoider is passive)
 ```
+
+**QoS note:** `/yellow_line_seen` uses default QoS (not TRANSIENT_LOCAL). The controller is always
+subscribed before the avoider publishes during inspection; no late-joiner scenario exists.
+Default QoS on both sides avoids a TRANSIENT_LOCAL/VOLATILE incompatibility.
+
+---
+
+## Spill check design
+
+Service: `/spill_check` (`std_srvs/Trigger`) provided by `cylinder_detector.py`.
+
+Called by controller during INTERACT when `current_target["type"] == "barrel"`.
+At that point the robot is stationary at approach pose (~0.5 m from barrel), OAK-D facing it.
+
+```
+On service call:
+  grab latest buffered /oakd/rgb/preview/depth/points PC2
+  for each point in PC2 (unorganized OK here — we iterate all points):
+    TF transform point camera_frame → map frame (tf_buffer, latest available)
+    if abs(z_map - ground_z) ∈ [0.005, 0.15]:          # Z-slice near ground
+      if dist_xy(point_map, barrel_centroid_map) < 0.5:  # XY radius guard
+        count += 1
+  return leaking = (count >= 4000)
+```
+
+`ground_z` = 0.0 (map frame ground is at z=0 in Gazebo).
+
+**Subscriber:** `cylinder_detector.py` subscribes to `/oakd/rgb/preview/depth/points` with
+`sensor_qos` (BEST_EFFORT, KEEP_LAST 1) and stores `self._latest_pc2`. The same topic feeds
+`cylinder_segmentation` C++ for RANSAC — no extra overhead.
+
+---
+
+## Workstation detector design
+
+Node: `workstation_detector.py`. Publishes to `/detected_workstations` (Marker, ns=color).
+
+**Confirmed topic (Phase 2 design session):**
+`/top_camera/rgb/preview/depth/points` — organized PC2, height=240, width=320,
+frame `top_camera_rgb_camera_optical_frame`. Verified in sim.
+
+**Pipeline per frame:**
+
+```
+Subscribe:
+  /top_camera/rgb/preview/image_raw       → color mask
+  /top_camera/rgb/preview/depth/points    → organized PC2 (loosely synced by latest-buffer)
+
+Per frame:
+  1. HSV threshold: red (H ∈ [0,10]∪[170,180]) or green (H ∈ [40,80]), S ≥ 80, V ≥ 60
+  2. Morphological close (5×5 ellipse) → contours
+  3. For each contour with area ≥ 2000 px²:
+       bounding rect aspect ratio ≥ 3.0 (long belt, not a ring or face)
+       → mask for that contour region
+  4. extract_3d_points_from_pc2(mask, latest_pc2_msg, max_range=4.0)
+       → (N, 3) in top_camera_rgb_camera_optical_frame
+  5. TF to map frame (tf_buffer, latest)
+  6. centroid = mean XY of valid points
+  7. ITM dedup: if any confirmed workstation of same color within 0.5 m → skip
+  8. vote_count += 1; if vote_count ≥ 5 → confirm, publish Marker
+```
+
+**Imports from existing code:** `extract_3d_points_from_pc2` from `megatron.perception_utils`.
+
+**Risk:** top camera FOV during PATROL (garage arm pose) sees floor ~0.5–2 m ahead.
+Workstations are large (multi-meter belts) so any close pass should trigger detection.
+Ensure waypoints include a pass within 2 m of each workstation's edge.
 
 ---
 
@@ -439,6 +512,21 @@ If intersections cause wrong-branch behavior, add 3-ROI split-mode state machine
 warp+SSIM on 512×512 ≈ 5 ms — acceptable inline. If upgraded to PatchCore (~50 ms), move to
 executor thread. Document in §Inspection phases.
 
+### J. C++ axis yaw encoding not needed
+
+Prior plan proposed encoding RANSAC axis yaw into `marker.pose.orientation` to give `cylinder_detector`
+the horizontal barrel's axis direction for perpendicular approach. Skipped: Nav2 + costmap already
+resolves a valid approach path regardless of direction; perpendicular offset provides no measurable
+benefit. The C++ already has the vector (`coefficients_cylinder->values[3..5]`) — can be added later
+if perpendicular approach proves necessary in sim.
+
+### K. `/yellow_line_seen` QoS — TRANSIENT_LOCAL unnecessary
+
+Prior plan marked `/yellow_line_seen` as TRANSIENT_LOCAL, RELIABLE, KEEP_LAST(1). This creates a
+QoS incompatibility: the controller subscribes with default (VOLATILE) QoS and won't receive the
+latched buffer on connect. No late-joiner scenario exists here — the controller is always alive
+before the avoider publishes during inspection. Changed to default QoS on both sides.
+
 ---
 
 ## Implementation phases
@@ -451,6 +539,8 @@ executor thread. Document in §Inspection phases.
 - [x] Verify `/top_camera/rgb/preview/image_raw` publishes — 1 pub, `sensor_msgs/Image`
 - [x] Verify `arm_mover` accepts `look_at_belt_right` / `look_at_belt_left` — `ros2 topic pub` succeeded
 - [x] Capture SSIM reference tile → `src/megatron/assets/tile_reference/reference.png` (_save_image_topic.py_)
+- [x] Verify `/top_camera/rgb/preview/depth/points` — organized PC2, height=240, width=320, frame `top_camera_rgb_camera_optical_frame`
+- [x] Verify `/oakd/rgb/preview/depth/points` — available for cylinder spill check buffer
 
 ### Phase 1 — Controller skeleton (done)
 
@@ -466,11 +556,11 @@ executor thread. Document in §Inspection phases.
 ### Phase 2 — New detectors
 
 **Build order:** yellow_avoider → cylinder_detector → workstation_detector.
+**No C++ changes in this phase** (axis yaw encoding skipped — see §Cylinder encoding convention).
 
-- [ ] C++ `cylinder_segmentation`: encode RANSAC axis yaw in `marker.pose.orientation` for horizontal barrels (identity for vertical)
-- [ ] `cylinder_detector.py`: subscribe to `/cylinder_markers` + OAK-D PC2 buffer, ITM dedup, publish `/detected_cylinders` using encoding convention, provide `/spill_check` Trigger service
-- [ ] `yellow_avoider.py`: HSL yellow mask, danger-zone ROI, dual-topic `/cmd_vel` + `/cmd_vel_unstamped` override at 50 Hz, PATROL → stop+reverse, INSPECT_WORKSTATION → publish `/yellow_line_seen`
-- [ ] `workstation_detector.py`: red/green color blob in floor ROI, aspect > 4:1, ITM confirmation, publish `/detected_workstations` Marker (ns=color, pose=centroid)
+- [ ] `yellow_avoider.py`: HSV yellow mask, danger-zone ROI (65–95%, 30–70%), dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH/INTERACT → stop+reverse; INSPECT_WORKSTATION → publish `/yellow_line_seen` (default QoS) on detection, no velocity; FOLLOW_BLUE_LINE/DONE → passive
+- [ ] `cylinder_detector.py`: subscribe `/cylinder_markers` + buffer `/oakd/rgb/preview/depth/points` (sensor_qos); ITM dedup (CLUSTER_RADIUS=0.33 m vertical, 0.70 m horizontal, CONFIRM_THRESH=10); publish `/detected_cylinders` PoseStamped (`frame_id="map|{color}|{orientation}"`, identity quat); provide `/spill_check` Trigger service (see §Spill check design)
+- [ ] `workstation_detector.py`: subscribe `/top_camera/rgb/preview/image_raw` + `/top_camera/rgb/preview/depth/points`; HSV red/green mask → contour → aspect ≥ 3.0 → `extract_3d_points_from_pc2` → TF to map → ITM dedup (0.5 m, 5 votes) → publish `/detected_workstations` Marker (ns=color, pose=centroid)
 
 ### Phase 3 — Room 1 completion
 

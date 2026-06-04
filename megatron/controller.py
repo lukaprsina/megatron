@@ -25,7 +25,7 @@ from irobot_create_msgs.msg import DockStatus
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose, Spin
 from nav_msgs.msg import OccupancyGrid  # new
-from rclpy.action import ActionClient
+from rclpy.action.client import ActionClient
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -790,12 +790,16 @@ class MissionController(Node):
             self.state = State.APPROACHING_OBJECT
             sent = False
             for i, (ax, ay, yaw) in enumerate(candidates):
-                self._publish_approaching_object(ax, ay, attempt=i, total=len(candidates))
+                self._publish_approaching_object(
+                    ax, ay, attempt=i, total=len(candidates)
+                )
                 if self._send_nav_goal(ax, ay, yaw):
                     sent = True
                     break
             if not sent:
-                self.get_logger().warn("All approach candidates blocked by costmap, requeuing.")
+                self.get_logger().warn(
+                    "All approach candidates blocked by costmap, requeuing."
+                )
                 self.pending_approaches.insert(0, approach)
                 self.current_approach = None
                 self.state = State.EXPLORING
@@ -974,7 +978,9 @@ class MissionController(Node):
         self.get_logger().info(f"Heading to waypoint {self.waypoint_index}")
         x, y, yaw = self.waypoints[self.waypoint_index]
         if not self._send_nav_goal(x, y, yaw):
-            self.get_logger().warn(f"Waypoint {self.waypoint_index} blocked by costmap, skipping.")
+            self.get_logger().warn(
+                f"Waypoint {self.waypoint_index} blocked by costmap, skipping."
+            )
             self.waypoint_index += 1
             if self.waypoint_index >= len(self.waypoints):
                 self.waypoint_index = 0

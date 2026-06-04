@@ -20,7 +20,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
-from rclpy.action import ActionClient
+from rclpy.action.client import ActionClient
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -170,7 +170,9 @@ def _parse_qr_task(text: str) -> str | None:
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.8  # metres — two detections within this are the same object
-    MAX_RETRY_CYCLES = 3  # bump distance up to 3× approach_retry_offset before giving up
+    MAX_RETRY_CYCLES = (
+        3  # bump distance up to 3× approach_retry_offset before giving up
+    )
 
     def __init__(self):
         super().__init__("task2_controller")
@@ -188,7 +190,9 @@ class Task2Controller(Node):
         self.get_logger().info(f"Loaded {len(self.waypoints)} waypoints from {wp_file}")
         self.manual_mode = cast(bool, self.get_parameter("manual_mode").value)
         if self.manual_mode:
-            self.get_logger().info("MANUAL MODE — perception only, no navigation. Drive with keyboard.")
+            self.get_logger().info(
+                "MANUAL MODE — perception only, no navigation. Drive with keyboard."
+            )
 
         # --- State ---
         self.state = State.INIT
@@ -208,7 +212,7 @@ class Task2Controller(Node):
         self.nav_result_future = None
         self.nav_in_flight = False
         self._nav_ever_sent = False
-        self._nav_seq = 0        # incremented on cancel; filters stale callbacks
+        self._nav_seq = 0  # incremented on cancel; filters stale callbacks
         self._nav_rejected = False  # True when server rejected the last goal
 
         # --- Costmap ---
@@ -564,12 +568,19 @@ class Task2Controller(Node):
         if _type == "face":
             n_candidates = 8
             base_dist = cast(float, self.get_parameter("face_approach_distance").value)
-            def _gen(d): return self._face_approach_candidates(
-                target["pos"], target["normal"], distance=d)
+
+            def _gen(d):
+                return self._face_approach_candidates(
+                    target["pos"], target["normal"], distance=d
+                )
         else:
             n_candidates = 1
-            base_dist = cast(float, self.get_parameter("barrel_approach_distance").value)
-            def _gen(d): return self._barrel_approach_candidates(target, distance=d)
+            base_dist = cast(
+                float, self.get_parameter("barrel_approach_distance").value
+            )
+
+            def _gen(d):
+                return self._barrel_approach_candidates(target, distance=d)
 
         retry_offset = cast(float, self.get_parameter("approach_retry_offset").value)
         remaining_cycles = self.MAX_RETRY_CYCLES - (attempt // n_candidates)
@@ -596,7 +607,11 @@ class Task2Controller(Node):
 
     def _face_approach_candidates(self, pos, normal, distance=None):
         """Fan of 8 from surface normal — same as controller.py."""
-        dist = distance if distance is not None else cast(float, self.get_parameter("face_approach_distance").value)
+        dist = (
+            distance
+            if distance is not None
+            else cast(float, self.get_parameter("face_approach_distance").value)
+        )
         nx, ny = normal
         base = math.atan2(ny, nx)
         px, py = float(pos[0]), float(pos[1])
@@ -622,7 +637,11 @@ class Task2Controller(Node):
     def _barrel_approach_candidates(self, target: dict, distance=None):
         """Single approach candidate — position-based (no fanout)."""
         pos = target["pos"]
-        dist = distance if distance is not None else cast(float, self.get_parameter("barrel_approach_distance").value)
+        dist = (
+            distance
+            if distance is not None
+            else cast(float, self.get_parameter("barrel_approach_distance").value)
+        )
         lateral = cast(float, self.get_parameter("barrel_lateral_offset").value)
         px, py = float(pos[0]), float(pos[1])
 
@@ -939,6 +958,7 @@ class Task2Controller(Node):
         if self._nav_rejected:
             return False
         try:
+            assert self.nav_result_future is not None
             result = self.nav_result_future.result()
         except Exception:
             return False
@@ -950,6 +970,7 @@ class Task2Controller(Node):
         if self._nav_rejected:
             return True
         try:
+            assert self.nav_result_future is not None
             result = self.nav_result_future.result()
         except Exception:
             return True
@@ -976,6 +997,7 @@ class Task2Controller(Node):
         return True
 
     def _world_to_map(self, x: float, y: float):
+        assert self.costmap is not None
         res = self.costmap.info.resolution
         ox, oy = (
             self.costmap.info.origin.position.x,
