@@ -439,25 +439,25 @@ executor thread. Document in §Inspection phases.
 
 ## Implementation phases
 
-### Phase 0 — Infra verification (prerequisite for everything)
+### Phase 0 — Infra verification (done)
 
 - [x] `cylinder_segmentation` C++ package in `src/cylinder_segmentation/` (done)
 - [x] `cylinder_segmentation` in `task2.launch.py` (done)
-- [ ] Verify `/cylinder_markers` publishes in sim (ros2 topic echo)
-- [ ] Verify `/top_camera/rgb/preview/image_raw` publishes
-- [ ] Verify `arm_mover` accepts `look_at_belt_right` / `look_at_belt_left`
-- [ ] Capture SSIM reference tile → `src/megatron/assets/tile_reference/reference.png`
+- [x] Verify `/cylinder_markers` publishes in sim (ros2 topic echo) — 1 pub, `visualization_msgs/Marker`
+- [x] Verify `/top_camera/rgb/preview/image_raw` publishes — 1 pub, `sensor_msgs/Image`
+- [x] Verify `arm_mover` accepts `look_at_belt_right` / `look_at_belt_left` — `ros2 topic pub` succeeded
+- [x] Capture SSIM reference tile → `src/megatron/assets/tile_reference/reference.png` (_save_image_topic.py_)
 
-### Phase 1 — Controller skeleton (unblocks integration testing)
+### Phase 1 — Controller skeleton (done)
 
 - [x] `task2_controller.py`: INIT + PATROL states
-- [ ] Subscribe to `/detected_faces`, `/detected_rings`, `/detected_cylinders`
-- [ ] Waypoint loading from `waypoints/task.yaml`
-- [ ] Publish `/robot_state` (TRANSIENT_LOCAL) on every transition
-- [ ] APPROACH_TARGET state (face fan-of-8, barrel position-based)
-- [ ] INTERACT stub (log only, resume PATROL)
-- [ ] Add `task2_controller` to `setup.py` entry_points
-- [ ] Smoke test: robot completes patrol loop in sim
+- [x] Subscribe to `/detected_faces`, `/detected_rings`, `/detected_cylinders`
+- [x] Waypoint loading from `waypoints/task.yaml`
+- [x] Publish `/robot_state` (TRANSIENT_LOCAL) on every transition
+- [x] APPROACH_TARGET state (face fan-of-8, barrel position-based)
+- [x] INTERACT stub (log only, resume PATROL)
+- [x] Add `task2_controller` to `setup.py` entry_points
+- [x] Smoke test: robot completes patrol loop in sim (waypoints recorded 2026-06-04)
 
 ### Phase 2 — New detectors (parallel with Phase 1)
 
