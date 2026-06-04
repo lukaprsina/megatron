@@ -566,24 +566,32 @@ Conveyor belts may be at arbitrary orientations in the image. A belt rotated 35�
 axis-aligned bounding box (e.g. 98×85, aspect 1.15) and would fail `MIN_ASPECT_RATIO=3.0`.
 Switched to `cv2.minAreaRect` which reports the true oriented dimensions regardless of rotation.
 
-### P. Yellow avoider blocks PATROL — arena has yellow boxes at spawn
+### P. Yellow avoider — from reactive ROI to geometric TTI steering
 
-Plan specified pixel-count threshold stop+reverse. Our task2 arena has ~1 m yellow boxes
-at spawn, filling the danger ROI → CLEAR↔BACKING lockup. Controller oscillated
-PATROL/APPROACH_TARGET, robot never reached first waypoint, `/yellow_line_seen` never fired.
+Original design: three ROIs at bottom 8% of image, contour-bottom detection, lateral
+STEERING/BACKING state machine. Worked but was reactive (only senses line at robot's feet)
+and open-loop (fixed steer_angular regardless of line angle).
 
-Fix iteration 1: contour-bottom + tight ROI (45–55 %×92–100 %). Fixed spawn-box false positives
-but pure backing on approach → Nav2 re-approached on same trajectory → endless BACKING loop.
+v2 rewrite (yellow_avoider2.py): bird's-eye warp from camera_info intrinsics +
+TF transform — zero manual calibration. Homography computed once at startup from
+`/top_camera/rgb/preview/camera_info` (K matrix) + TF lookup
+(`camera_optical_frame` → `base_link`). Warp yellow mask → `cv2.fitLine` →
+line equation in base_link: ax + by + c = 0.
 
-Fix iteration 2 (TURNING): BACKING → 1.2 s TURNING away → CLEAR. Nav2 immediately undid the
-turn (active NavigateToPose goal) and drove straight back into the line.
+TTI = -c/a (intersection of robot's forward X-axis with the line). Steering is
+proportional: angular = steer_dir * kp / max(d_x, 0.05), clamped to max_angular.
+Panic BACKING at d_x < 0.2 m if steering can't suffice. No state machine beyond
+_backing flag.
 
-Fix iteration 3 (lateral STEERING): three ROIs — CENTER, LEFT, RIGHT — computed every frame.
-CENTER contour-bottom triggers → check safe-zone ROI on the OPPOSITE side of the line.
-Safe-zone clear → publish forward + angular (away from line, toward clear side) at 50 Hz.
-Nav2 sees forward progress toward goal → local planner re-routes around line naturally.
-Safe-zone blocked → BACKING fallback. Removed `danger_px_threshold`, TURNING state,
-`turn_duration`, `_turn_end`. Added `steer_speed`, `steer_angular`, safe-zone params.
+INSPECT_WORKSTATION: `/yellow_line_seen` → True when d_x < inspection_threshold
+(0.15 m), replacing the contour-bottom check.
+
+Barrel approach distance bumped from 0.50 m to 0.80 m — reduces off-angle
+approaches near boundaries, making BACKING panic a true emergency-only fallback.
+
+RViz: MarkerArray in base_link frame — LINE_STRIP (detected yellow line),
+SPHERE (intersection point), ARROW (repulsive direction), TEXT_VIEW_FACING
+(distance + yaw readout). Debug image shows original + BEV side-by-side.
 
 ---
 
@@ -616,7 +624,7 @@ Safe-zone blocked → BACKING fallback. Removed `danger_px_threshold`, TURNING s
 **Build order:** yellow_avoider → cylinder_detector → workstation_detector.
 **No C++ changes in this phase** (axis yaw encoding skipped — see §Cylinder encoding convention).
 
-- [x] `yellow_avoider.py`: HSV yellow mask, three contour-bottom ROIs (CENTER + LEFT + RIGHT) along 92–100% Y; dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH_TARGET/INTERACT → lateral STEERING (forward + angular away from line) when safe-zone is clear, BACKING fallback when blocked (§P); INSPECT_WORKSTATION → publish `/yellow_line_seen` True/False per tick based on CENTER contour-bottom
+- [x] `yellow_avoider2.py` (v2 rewrite): bird's-eye warp from camera_info + TF homography (zero calibration); cv2.fitLine on warped yellow mask → TTI proportional steering (angular = kp / d_x, clamped); BACKING panic at d_x < 0.2 m; dual-topic `/cmd_vel` + `/cmd_vel_unstamped` at 50 Hz; PATROL/APPROACH_TARGET/INTERACT → avoidance; INSPECT_WORKSTATION → `/yellow_line_seen` from d_x < inspection_threshold (§P); RViz MarkerArray (line, intersection sphere, repulsive arrow, distance/angle text); BEV+original debug image. Replaces original yellow_avoider.py.
 - [x] `cylinder_detector.py`: subscribe `/cylinder_markers` + buffer `/oakd/rgb/preview/depth/points` (sensor_qos); Cluster dedup (orientation-dependent radii: 0.33 m vertical / 0.70 m horizontal, CONFIRM_THRESH=10, COMPACT_MIN=6 — see §L); publish `/detected_cylinders` PoseStamped (`frame_id="map|{color}|{orientation}"`, identity quat); suppressed clusters excluded from republish (see §M); provide `/spill_check` Trigger service (see §Spill check design)
 - [x] `workstation_detector.py`: subscribe `/top_camera/rgb/preview/image_raw` + `/top_camera/rgb/preview/depth/points`; HSV red/green mask → contour → **minAreaRect** aspect ≥ 3.0 (not boundingRect — see §O) → `extract_3d_points_from_pc2` → TF to map → ITM dedup (0.5 m, 5 votes) → publish `/detected_workstations` Marker (ns=color, pose=centroid)
 
