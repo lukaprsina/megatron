@@ -179,7 +179,7 @@ class Task2Controller(Node):
 
         # --- Parameters ---
         self.declare_parameter("waypoints_file", "waypoints/task.yaml")
-        self.declare_parameter("face_approach_distance", 0.55)
+        self.declare_parameter("face_approach_distance", 0.85)
         self.declare_parameter("barrel_approach_distance", 0.80)
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.25)
@@ -511,7 +511,7 @@ class Task2Controller(Node):
 
         if self.waypoint_index >= len(self.waypoints):
             self.get_logger().info("Patrol loop complete.")
-            self._on_patrol_complete()
+            # self._on_patrol_complete()
             return
 
         self._send_next_waypoint()
@@ -731,6 +731,7 @@ class Task2Controller(Node):
 
         # Face: wait for QR
         if self._qr_task_raw is None:
+            self.get_logger().info("Waitting for qr task")
             return
 
         task_token = _parse_qr_task(self._qr_task_raw)
