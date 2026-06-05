@@ -172,7 +172,7 @@ class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.8  # metres — two detections within this are the same object
     MAX_RETRY_CYCLES = (
-        3  # bump distance up to 3× approach_retry_offset before giving up
+        20  # bump distance up to 3× approach_retry_offset before giving up
     )
 
     def __init__(self):
@@ -543,7 +543,7 @@ class Task2Controller(Node):
             return
 
         if self._nav_succeeded():
-            self._publish_approaching_object(0.0,0.0, none=True)
+            self._publish_approaching_object(0.0, 0.0, none=True)
             self._transition(State.INTERACT)
             self._start_interact()
             return
@@ -587,8 +587,8 @@ class Task2Controller(Node):
                 return self._barrel_approach_candidates(target, distance=d)
 
         retry_offset = cast(float, self.get_parameter("approach_retry_offset").value)
+        total = self.MAX_RETRY_CYCLES* n_candidates
         remaining_cycles = self.MAX_RETRY_CYCLES - (attempt // n_candidates)
-
         while remaining_cycles > 0:
             cycle = attempt // n_candidates
             distance = base_dist + retry_offset * cycle
@@ -597,7 +597,9 @@ class Task2Controller(Node):
 
             while idx < len(candidates):
                 ax, ay, yaw = candidates[idx]
-                self._publish_approaching_object(ax,ay, attempt, remaining_cycles*n_candidates)
+                self._publish_approaching_object(
+                    ax, ay, yaw, attempt, total=total
+                )
                 if self._cost_at_goal_ok(ax, ay):
                     self._send_nav_goal(ax, ay, yaw)
                     self._approach_attempt = attempt  # sync for next abort
@@ -628,8 +630,8 @@ class Task2Controller(Node):
             5,           -5,
             10,          -10,
             15,          -15,
-            20,          -20,
-            25,          -25,
+            #20,          -20,
+            #25,          -25,
             #30,          -30,
             #35,          -35,
             #40,          -40,
@@ -994,11 +996,14 @@ class Task2Controller(Node):
         )
 
     # ── Costmap check ──────────────────────────────────────────────────
-    def _publish_approaching_object(self, ax, ay, attempt=0, total=8, none=False):
+    def _publish_approaching_object(
+        self, ax, ay, yaw=None, attempt=0, total=8, none=False
+    ):
         """
-        Publish a downward arrow + label at the current Nav2 approach goal position.
+        Publish an approach marker at the current Nav2 approach goal position.
 
         ax, ay  — goal position in map frame
+        yaw     — if provided, orient the small arrow using this heading
         attempt — 0-indexed candidate number being tried (shown in label)
         total   — total candidates available (shown in label)
         none    — if True, delete both markers
@@ -1016,27 +1021,40 @@ class Task2Controller(Node):
                 self.approaching_object_pub.publish(m)
             return
 
-        # Downward arrow pinned to exact goal position
-        arrow = Marker()
-        arrow.header.frame_id = "map"
-        arrow.header.stamp = now
-        arrow.ns = "approaching_object"
-        arrow.id = 0
-        arrow.type = Marker.ARROW
-        arrow.action = Marker.ADD
-        arrow.points = [
-            Point(x=float(ax), y=float(ay), z=0.8),
-            Point(x=float(ax), y=float(ay), z=0.05),
-        ]
-        arrow.scale.x = 0.06  # shaft diameter
-        arrow.scale.y = 0.12  # head diameter
-        arrow.scale.z = 0.0
-        arrow.color.r = 1.0
-        arrow.color.g = 0.55
-        arrow.color.b = 0.0
-        arrow.color.a = 1.0
-        arrow.lifetime.sec = 0
-        self.approaching_object_pub.publish(arrow)
+        if yaw is not None:
+            # Small arrow centered on the goal and oriented by yaw.
+            arrow = Marker()
+            arrow.header.frame_id = "map"
+            arrow.header.stamp = now
+            arrow.ns = "approaching_object"
+            arrow.id = 0
+            arrow.type = Marker.ARROW
+            arrow.action = Marker.ADD
+            arrow.pose.position.x = float(ax)
+            arrow.pose.position.y = float(ay)
+            arrow.pose.position.z = 0.12
+            q = quaternion_from_euler(0.0, 0.0, float(yaw))
+            arrow.pose.orientation.x = q[0]
+            arrow.pose.orientation.y = q[1]
+            arrow.pose.orientation.z = q[2]
+            arrow.pose.orientation.w = q[3]
+            arrow.scale.x = 0.18
+            arrow.scale.y = 0.05
+            arrow.scale.z = 0.05
+            arrow.color.r = 1.0
+            arrow.color.g = 0.55
+            arrow.color.b = 0.0
+            arrow.color.a = 1.0
+            arrow.lifetime.sec = 0
+            self.approaching_object_pub.publish(arrow)
+        else:
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = now
+            m.ns = "approaching_object"
+            m.id = 0
+            m.action = Marker.DELETE
+            self.approaching_object_pub.publish(m)
 
         # Text label above the arrow
         label = Marker()
