@@ -513,7 +513,7 @@ class Task2Controller(Node):
 
         if self.waypoint_index >= len(self.waypoints):
             self.get_logger().info("Patrol loop complete.")
-            self._on_patrol_complete()
+            # self._on_patrol_complete()
             return
 
         self._send_next_waypoint()
@@ -746,9 +746,10 @@ class Task2Controller(Node):
             return  # handled fully in _start_interact
 
         # Face: wait for QR
-        if self._qr_task_raw is None:
+        if self._qr_task_raw is None or self._qr_task_raw == "": # if qr_task is not seen it is failed 
+            self.get_logger().info("Waitting for qr task")
             return
-
+        
         task_token = _parse_qr_task(self._qr_task_raw)
         self._qr_task_raw = None
 
