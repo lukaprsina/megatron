@@ -180,7 +180,7 @@ class Task2Controller(Node):
 
         # --- Parameters ---
         self.declare_parameter("waypoints_file", "waypoints/task.yaml")
-        self.declare_parameter("face_approach_distance", 0.35)
+        self.declare_parameter("face_approach_distance", 0.50)
         self.declare_parameter("barrel_approach_distance", 0.60)
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.20)
@@ -627,7 +627,11 @@ class Task2Controller(Node):
         # degrees = [val for i in range(0,30,5) for val in (i, -i)]
         degrees = [
             0,
+            2,           -2,
+            3,           -3,
             5,           -5,
+            7,           -7,
+            9,           -9,
             10,          -10,
             15,          -15,
             #20,          -20,
