@@ -16,7 +16,7 @@ import numpy as np
 import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist, Point
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
@@ -29,6 +29,7 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
+
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
@@ -263,6 +264,7 @@ class Task2Controller(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel_unstamped", 10)
         self.arm_pub = self.create_publisher(String, "/arm_command", 10)
         self.goal_marker_pub = self.create_publisher(MarkerArray, "/goal_markers", 10)
+        self.approaching_object_pub = self.create_publisher(Marker, "/approaching_object", 10)
 
         # --- Subscribers ---
         self.create_subscription(
@@ -564,6 +566,7 @@ class Task2Controller(Node):
         Returns True if a nav goal was sent, False if all candidates at all
         retry distances have been exhausted.
         """
+
         _type = target["type"]
         if _type == "face":
             n_candidates = 8
@@ -595,6 +598,7 @@ class Task2Controller(Node):
                 ax, ay, yaw = candidates[idx]
                 if self._cost_at_goal_ok(ax, ay):
                     self._send_nav_goal(ax, ay, yaw)
+                    self._publish_approaching_object(ax,ay, attempt, remaining_cycles*n_candidates)
                     self._approach_attempt = attempt  # sync for next abort
                     return True
                 idx += 1
@@ -978,6 +982,72 @@ class Task2Controller(Node):
             GoalStatus.STATUS_ABORTED,
             GoalStatus.STATUS_CANCELED,
         )
+
+    # ── Costmap check ──────────────────────────────────────────────────
+    def _publish_approaching_object(self, ax, ay, attempt=0, total=8, none=False):
+        """
+        Publish a downward arrow + label at the current Nav2 approach goal position.
+
+        ax, ay  — goal position in map frame
+        attempt — 0-indexed candidate number being tried (shown in label)
+        total   — total candidates available (shown in label)
+        none    — if True, delete both markers
+        """
+        now = self.get_clock().now().to_msg()
+
+        if none:
+            for mid in (0, 1):
+                m = Marker()
+                m.header.frame_id = "map"
+                m.header.stamp = now
+                m.ns = "approaching_object"
+                m.id = mid
+                m.action = Marker.DELETE
+                self.approaching_object_pub.publish(m)
+            return
+
+        # Downward arrow pinned to exact goal position
+        arrow = Marker()
+        arrow.header.frame_id = "map"
+        arrow.header.stamp = now
+        arrow.ns = "approaching_object"
+        arrow.id = 0
+        arrow.type = Marker.ARROW
+        arrow.action = Marker.ADD
+        arrow.points = [
+            Point(x=float(ax), y=float(ay), z=0.8),
+            Point(x=float(ax), y=float(ay), z=0.05),
+        ]
+        arrow.scale.x = 0.06  # shaft diameter
+        arrow.scale.y = 0.12  # head diameter
+        arrow.scale.z = 0.0
+        arrow.color.r = 1.0
+        arrow.color.g = 0.55
+        arrow.color.b = 0.0
+        arrow.color.a = 1.0
+        arrow.lifetime.sec = 0
+        self.approaching_object_pub.publish(arrow)
+
+        # Text label above the arrow
+        label = Marker()
+        label.header.frame_id = "map"
+        label.header.stamp = now
+        label.ns = "approaching_object"
+        label.id = 1
+        label.type = Marker.TEXT_VIEW_FACING
+        label.action = Marker.ADD
+        label.pose.position.x = float(ax)
+        label.pose.position.y = float(ay)
+        label.pose.position.z = 1.05
+        label.pose.orientation.w = 1.0
+        label.scale.z = 0.15
+        label.color.r = 1.0
+        label.color.g = 0.55
+        label.color.b = 0.0
+        label.color.a = 1.0
+        label.text = f"GOAL {attempt + 1}/{total}"
+        label.lifetime.sec = 0
+        self.approaching_object_pub.publish(label)
 
     # ── Costmap check ──────────────────────────────────────────────────
 
