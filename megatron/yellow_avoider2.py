@@ -168,6 +168,11 @@ class YellowAvoider2(Node):
         if best_contour is None:
             return None
 
+        # Y-extent of the contour (image rows: 0=top, h=bottom)
+        cnt_ys = best_contour[:, 0, 1]
+        cnt_top = float(cnt_ys.min())
+        cnt_bot = float(cnt_ys.max())
+
         cnt_mask = np.zeros_like(scan_mask)
         cv2.drawContours(cnt_mask, [best_contour], -1, (255,), cv2.FILLED)
         ys, xs = np.where(cnt_mask > 0)
@@ -185,6 +190,16 @@ class YellowAvoider2(Node):
         else:
             t = (cx - x0) / vx
             v_cross = y0 + t * vy
+
+        # Reject pure extrapolation — v_cross must lie within the contour's
+        # vertical extent plus a 30% margin.  A box corner spanning rows
+        # 80-110 whose extrapolated line crosses the center column at row 200
+        # is not a real threat; the physical line ends at the box corner.
+        cfg_margin = 0.3
+        extent = max(cnt_bot - cnt_top, 1.0)
+        margin = extent * cfg_margin
+        if v_cross < cnt_top - margin or v_cross > cnt_bot + margin:
+            return None
 
         v_cross = float(np.clip(v_cross, 0, h))
         return (vx, vy, x0, y0, v_cross)
@@ -238,7 +253,7 @@ class YellowAvoider2(Node):
         B = -vx
         C = vx * y0 - vy * x0
         cx = w / 2.0
-        # Distance from (cx, h) to line — positive means steer negative angular (right)
+        # Distance from (cx, h) to line — positive means line on right, steer left
         dist_sign = float(np.sign(A * cx + B * h + C))
         if dist_sign == 0.0:
             dist_sign = 1.0
