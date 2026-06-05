@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Yellow line avoider v2 — Bird's-eye-view warp + Time-To-Intersection.
+Yellow line avoider v2 — image-space TTI (Time-To-Intersection).
 
-Geometric redesign of yellow_avoider.py:
-  - Compute a homography H from camera intrinsics + TF (once at startup).
-  - Warp the yellow HSV mask into a metric bird's-eye view (BEV).
-  - Fit a line in BEV pixel space; convert to base_link meters.
-  - Compute x_int = X-axis intersection distance (TTI).
-  - Proportional angular control: steer harder the closer the line is.
+Improvement over v1: instead of looking only at the bottom 8% of the frame,
+fit a line through ALL yellow pixels in the lower 70% of the image, then
+compute where that line intersects the robot's forward path (center column).
+The row of this intersection is a direct proxy for "how close is the crossing
+point" — closer → lower row value remaining → steer harder.
 
-State machine (same roles as v1):
+No TF, no BEV warp, no camera_info required.
+
+State machine (same as v1):
   PATROL / APPROACH_TARGET / INTERACT → proportional STEERING, BACKING fallback
-  INSPECT_WORKSTATION                  → publish /yellow_line_seen True/False per tick
+  INSPECT_WORKSTATION                  → publish /yellow_line_seen per tick
   INIT / FOLLOW_BLUE_LINE / DONE       → fully passive
 """
 
@@ -23,25 +24,12 @@ import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist, TwistStamped
 from rclpy.node import Node
-from rclpy.qos import (
-    QoSDurabilityPolicy,
-    QoSHistoryPolicy,
-    QoSProfile,
-    QoSReliabilityPolicy,
-)
-from sensor_msgs.msg import CameraInfo, Image
+from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
+from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, String
-import tf2_ros
 
 SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
-    history=QoSHistoryPolicy.KEEP_LAST,
-    depth=1,
-)
-
-TRANSIENT_QOS = QoSProfile(
-    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-    reliability=QoSReliabilityPolicy.RELIABLE,
     history=QoSHistoryPolicy.KEEP_LAST,
     depth=1,
 )
@@ -53,20 +41,6 @@ MORPH_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 _ACTIVE_STATES = frozenset(("PATROL", "APPROACH_TARGET", "INTERACT"))
 _INSPECT_STATES = frozenset(("INSPECT_WORKSTATION",))
 
-# BEV canvas covers [0.5, 2.5] m forward × [-1.0, 1.0] m lateral in base_link.
-_BEV_X_NEAR = 0.5   # nearest forward distance (m)
-_BEV_X_FAR  = 2.5   # farthest forward distance (m)
-_BEV_Y_HALF = 1.0   # half lateral width (m)
-
-
-def _quat_to_rot(x, y, z, w) -> np.ndarray:
-    """Quaternion → 3×3 rotation matrix."""
-    return np.array([
-        [1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w)],
-        [    2*(x*y + z*w), 1 - 2*(x*x + z*z),     2*(y*z - x*w)],
-        [    2*(x*z - y*w),     2*(y*z + x*w), 1 - 2*(x*x + y*y)],
-    ])
-
 
 class YellowAvoider2(Node):
     def __init__(self):
@@ -74,14 +48,21 @@ class YellowAvoider2(Node):
 
         self.declare_parameter("camera_topic", "/top_camera/rgb/preview/image_raw")
         self.declare_parameter("publish_debug_image", True)
-        self.declare_parameter("forward_limit", _BEV_X_FAR)
-        self.declare_parameter("near_limit", _BEV_X_NEAR)
-        self.declare_parameter("lateral_half", _BEV_Y_HALF)
-        self.declare_parameter("pix_per_m", 200)
+
+        # Fraction of image height below which we look for yellow pixels [0..1]
+        # 0.3 = lower 70% of image
+        self.declare_parameter("scan_top_frac", 0.3)
+
+        # Line must cross center column below this row fraction to start steering
+        # 0.45 = below 45% from top (upper 55% = no threat)
+        self.declare_parameter("trigger_frac", 0.45)
+
+        # Fraction of image height remaining (h - v_cross)/h below which BACKING
+        # 0.08 = line crossing is within bottom 8% of image = very close
+        self.declare_parameter("panic_frac", 0.08)
+
         self.declare_parameter("min_pixels", 30)
-        self.declare_parameter("danger_threshold", 0.8)
-        self.declare_parameter("panic_threshold", 0.15)
-        self.declare_parameter("kp", 0.3)
+        self.declare_parameter("kp", 30.0)  # gain in pixel units
         self.declare_parameter("max_angular", 0.6)
         self.declare_parameter("steer_speed", 0.06)
         self.declare_parameter("back_speed", 0.12)
@@ -90,25 +71,6 @@ class YellowAvoider2(Node):
         cam = cast(str, self.get_parameter("camera_topic").value)
         self.bridge = CvBridge()
 
-        # TF
-        self.tf_buffer = tf2_ros.Buffer()
-        self._tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
-        # Homography state
-        self._K: np.ndarray | None = None
-        self._H: np.ndarray | None = None
-        self._bev_w = 0
-        self._bev_h = 0
-
-        # Camera info subscriber (unsubscribed after first message)
-        self._info_sub = self.create_subscription(
-            CameraInfo,
-            "/top_camera/rgb/preview/camera_info",
-            self._info_cb,
-            TRANSIENT_QOS,
-        )
-
-        # Image subscriber (active always)
         self.create_subscription(Image, cam, self._image_cb, SENSOR_QOS)
         self.create_subscription(String, "/robot_state", self._state_cb, 10)
 
@@ -123,101 +85,7 @@ class YellowAvoider2(Node):
         self._latest: np.ndarray | None = None
 
         self.create_timer(0.02, self._update)  # 50 Hz
-        self.get_logger().info("YellowAvoider2 starting — waiting for camera_info + TF.")
-
-    # ------------------------------------------------------------------
-    # Camera info → K matrix
-    # ------------------------------------------------------------------
-
-    def _info_cb(self, msg: CameraInfo):
-        if self._K is not None:
-            return
-        self._K = np.array(msg.k, dtype=np.float64).reshape(3, 3)
-        self.get_logger().info(
-            f"Camera K received: fx={self._K[0,0]:.1f} fy={self._K[1,1]:.1f}"
-        )
-        self.destroy_subscription(self._info_sub)
-
-    # ------------------------------------------------------------------
-    # Homography computation
-    # ------------------------------------------------------------------
-
-    def _try_build_homography(self):
-        """Try to compute H once K and TF are both available."""
-        if self._K is None:
-            return
-        try:
-            tf_stamped = self.tf_buffer.lookup_transform(
-                "top_camera_rgb_camera_optical_frame",
-                "base_link",
-                rclpy.time.Time(),
-            )
-        except (
-            tf2_ros.LookupException,
-            tf2_ros.ConnectivityException,
-            tf2_ros.ExtrapolationException,
-        ):
-            return
-
-        t = tf_stamped.transform.translation
-        q = tf_stamped.transform.rotation
-        R = _quat_to_rot(q.x, q.y, q.z, q.w)
-        T = np.array([t.x, t.y, t.z])
-
-        ppm = cast(int, self.get_parameter("pix_per_m").value)
-        x_near = cast(float, self.get_parameter("near_limit").value)
-        x_far = cast(float, self.get_parameter("forward_limit").value)
-        y_half = cast(float, self.get_parameter("lateral_half").value)
-
-        # 4 ground-plane corners in base_link frame (x=forward, y=left, z=0)
-        #   order: far-left, far-right, near-right, near-left
-        src_3d = np.array([
-            [x_far,  -y_half, 0.0],
-            [x_far,   y_half, 0.0],
-            [x_near,  y_half, 0.0],
-            [x_near, -y_half, 0.0],
-        ], dtype=np.float64)
-
-        # Transform to camera optical frame: p_cam = R @ p_base + T
-        pts_cam = (R @ src_3d.T).T + T  # (4, 3)
-
-        # Project to pixels
-        K = self._K
-        src_pts = []
-        for Xc, Yc, Zc in pts_cam:
-            if Zc <= 0:
-                self.get_logger().warn("Ground point behind camera — TF may be wrong.")
-                return
-            u = K[0, 0] * Xc / Zc + K[0, 2]
-            v = K[1, 1] * Yc / Zc + K[1, 2]
-            src_pts.append([u, v])
-        src_pts = np.array(src_pts, dtype=np.float32)
-
-        # BEV canvas dimensions
-        w = int(2.0 * y_half * ppm)
-        h = int((x_far - x_near) * ppm)
-
-        # BEV layout:
-        #   rows: top=x_far (far), bottom=x_near (near)
-        #   cols: left=y=-y_half, right=y=+y_half
-        dst_pts = np.array([
-            [0,     0    ],   # far-left  → top-left
-            [w - 1, 0    ],   # far-right → top-right
-            [w - 1, h - 1],   # near-right → bottom-right
-            [0,     h - 1],   # near-left  → bottom-left
-        ], dtype=np.float32)
-
-        self._H = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        self._bev_w = w
-        self._bev_h = h
-        self.get_logger().info(
-            f"Homography computed. BEV canvas: {w}×{h} px "
-            f"({x_near}–{x_far} m forward, ±{y_half} m lateral)"
-        )
-
-    # ------------------------------------------------------------------
-    # Subscribers
-    # ------------------------------------------------------------------
+        self.get_logger().info(f"YellowAvoider2 ready on {cam}.")
 
     def _state_cb(self, msg: String):
         if msg.data != self.robot_state:
@@ -231,20 +99,12 @@ class YellowAvoider2(Node):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # Main 50 Hz tick
-    # ------------------------------------------------------------------
-
     def _update(self):
         if self._latest is None:
             return
 
-        if self._H is None:
-            self._try_build_homography()
-            if self._H is None:
-                return
-
         img = self._latest
+        h, w = img.shape[:2]
         now = self.get_clock().now().nanoseconds / 1e9
 
         # Yellow mask
@@ -253,95 +113,77 @@ class YellowAvoider2(Node):
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, MORPH_K)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, MORPH_K)
 
-        # BEV warp
-        bev = cv2.warpPerspective(mask, self._H, (self._bev_w, self._bev_h))
+        # Restrict to lower scan zone
+        scan_top = int(h * cast(float, self.get_parameter("scan_top_frac").value))
+        scan_mask = mask.copy()
+        scan_mask[:scan_top, :] = 0
 
-        # Line fit
-        line_result = self._fit_line_bev(bev)
+        # Fit line
+        line_result = self._fit_line(scan_mask, w, h)
 
-        # Dispatch by robot state
+        # Dispatch by state
         if self.robot_state in _INSPECT_STATES:
             if line_result is not None:
-                _, _, x_int = line_result
-                in_range = 0.0 < x_int < cast(float, self.get_parameter("forward_limit").value)
+                _vx, _vy, _x0, _y0, v_cross = line_result
+                trigger_row = int(
+                    h * cast(float, self.get_parameter("trigger_frac").value)
+                )
+                in_range = v_cross > trigger_row
                 self.yellow_seen.publish(Bool(data=in_range))
             else:
                 self.yellow_seen.publish(Bool(data=False))
         elif self.robot_state in _ACTIVE_STATES:
-            self._run_avoidance(line_result, now)
+            self._run_avoidance(line_result, h, w, now)
 
         if cast(bool, self.get_parameter("publish_debug_image").value):
-            self._publish_debug(img, mask, bev, line_result)
+            self._publish_debug(img, scan_mask, line_result, h, w)
 
     # ------------------------------------------------------------------
-    # Line fitting in BEV
+    # Line fitting
     # ------------------------------------------------------------------
 
-    def _fit_line_bev(self, bev: np.ndarray):
-        """Return (vx_m, vy_m, x_int) or None if no line detected.
+    def _fit_line(self, scan_mask, w, h):
+        """Return (vx, vy, x0, y0, v_cross) or None.
 
-        vx_m, vy_m: line direction unit vector in base_link meters (x=forward, y=lateral)
-        x_int: X-axis intersection distance (TTI) in meters
+        v_cross: row where fitted line crosses center column (cx = w/2).
+        All values in image pixel coordinates.
         """
         min_px = cast(int, self.get_parameter("min_pixels").value)
-        ys, xs = np.where(bev > 0)
+        ys, xs = np.where(scan_mask > 0)
         if len(xs) < min_px:
             return None
 
         pts = np.column_stack([xs, ys]).astype(np.float32)
-        # fitLine returns [vx, vy, x0, y0] — direction vector + point on line (pixel space)
         result = cv2.fitLine(pts, cv2.DIST_HUBER, 0, 0.01, 0.01)
-        vx_px, vy_px, x0_px, y0_px = float(result[0]), float(result[1]), float(result[2]), float(result[3])
+        vx = float(result[0][0])
+        vy = float(result[1][0])
+        x0 = float(result[2][0])
+        y0 = float(result[3][0])
 
-        ppm = cast(int, self.get_parameter("pix_per_m").value)
-        x_near = cast(float, self.get_parameter("near_limit").value)
-        y_half = cast(float, self.get_parameter("lateral_half").value)
+        cx = w / 2.0
 
-        # Convert BEV pixel point → base_link meters
-        # BEV rows: top=x_far, bottom=x_near → x_m = x_near + (bev_h - y0_px) / ppm
-        # BEV cols: left=y=-y_half, right=y=+y_half → y_m = (x0_px / ppm) - y_half
-        x0_m = x_near + (self._bev_h - y0_px) / ppm
-        y0_m = (x0_px / ppm) - y_half
+        # Line: parametric P = (x0 + t*vx, y0 + t*vy)
+        # Intersection with column u = cx: x0 + t*vx = cx → t = (cx - x0) / vx
+        # Then v_cross = y0 + t*vy
+        if abs(vx) < 1e-6:
+            # Nearly vertical line at x ≈ x0; crossing is at the fitted center
+            v_cross = y0
+        else:
+            t = (cx - x0) / vx
+            v_cross = y0 + t * vy
 
-        # Direction in BEV pixel space → base_link meters
-        # BEV col increases → y increases; BEV row increases → x decreases
-        # vx_bev (col direction) → +y in base_link
-        # vy_bev (row direction) → -x in base_link
-        # So: (vx_m, vy_m) direction in base_link (forward=x, left=y):
-        vx_m = -vy_px   # row direction flipped to forward
-        vy_m =  vx_px   # col direction is lateral
+        # Clamp to image bounds
+        v_cross = float(np.clip(v_cross, 0, h))
 
-        # Normalize
-        mag = max(np.hypot(vx_m, vy_m), 1e-6)
-        vx_m /= mag
-        vy_m /= mag
-
-        # Line equation: A*x + B*y + C = 0
-        # A = vy_m, B = -vx_m, C = vx_m*y0_m - vy_m*x0_m
-        A = vy_m
-        B = -vx_m
-        C = vx_m * y0_m - vy_m * x0_m
-
-        forward_limit = cast(float, self.get_parameter("forward_limit").value)
-
-        if abs(A) < 1e-6:
-            # Line parallel to X-axis → no forward intersection
-            return None
-
-        x_int = -C / A
-
-        if x_int < 0 or x_int > forward_limit:
-            return None
-
-        return (vx_m, vy_m, x_int)
+        return (vx, vy, x0, y0, v_cross)
 
     # ------------------------------------------------------------------
     # Avoidance state machine
     # ------------------------------------------------------------------
 
-    def _run_avoidance(self, line_result, now: float):
-        danger = cast(float, self.get_parameter("danger_threshold").value)
-        panic = cast(float, self.get_parameter("panic_threshold").value)
+    def _run_avoidance(self, line_result, h: int, w: int, now: float):
+        trigger_row = int(h * cast(float, self.get_parameter("trigger_frac").value))
+        panic_remain = int(h * cast(float, self.get_parameter("panic_frac").value))
         kp = cast(float, self.get_parameter("kp").value)
         max_ang = cast(float, self.get_parameter("max_angular").value)
         steer_spd = cast(float, self.get_parameter("steer_speed").value)
@@ -355,41 +197,52 @@ class YellowAvoider2(Node):
                 self._pub_vel(-cast(float, self.get_parameter("back_speed").value), 0.0)
             return
 
-        if line_result is None:
+        if line_result is None or line_result[4] < trigger_row:
+            # No threatening line detected
             if self._avoider_state == "STEERING":
                 self._pub_vel(0.0, 0.0)
                 self._avoider_state = "CLEAR"
                 self.get_logger().info("Yellow cleared — CLEAR.")
             return
 
-        vx_m, vy_m, x_int = line_result
+        vx, vy, x0, y0, v_cross = line_result
+        remaining = h - v_cross  # pixels remaining before line is "at robot"
 
-        if x_int > danger:
-            # Far enough — let Nav2 drive
-            if self._avoider_state == "STEERING":
-                self._pub_vel(0.0, 0.0)
-                self._avoider_state = "CLEAR"
-            return
-
-        if x_int < panic:
+        if remaining < panic_remain:
             self._avoider_state = "BACKING"
-            self._back_end = now + cast(float, self.get_parameter("back_duration").value)
+            self._back_end = now + cast(
+                float, self.get_parameter("back_duration").value
+            )
             self._pub_vel(0.0, 0.0)
-            self.get_logger().warn(f"PANIC x_int={x_int:.2f}m — BACKING.")
+            self.get_logger().warn(
+                f"PANIC v_cross={v_cross:.0f} (remain={remaining:.0f}px) — BACKING."
+            )
             return
 
-        # Proportional steering
-        # Cross product vx*y0 - vy*x0 → positive = line to the left → steer right (neg angular)
-        # We need a point on the line: use (0 + t*vx_m, 0 + ...) but we have (x0_m, y0_m)
-        # side = sign of perpendicular distance from origin to line
-        # = sign(A*0 + B*0 + C) = sign(C) = sign(vx_m*y0_m - vy_m*x0_m)
-        # But we don't have y0_m here — recompute from A,B,C:
-        # Actually: angular sign = -sign(A) since A = vy_m and line is at y>0 (left)
-        # Simpler: use A itself. If A>0 (vy_m>0), line intercepts at positive X from left → steer right
-        A = vy_m
-        angular = float(np.clip(-np.sign(A) * kp / max(x_int, 0.05), -max_ang, max_ang))
-        linear = steer_spd * float(np.clip(x_int / 1.5, 0.2, 1.0))
+        # Steering sign: which side of the robot's forward path (center column) is the line?
+        # Use signed perpendicular distance from center-bottom (cx, h) to the fitted line.
+        # Line eq: A*u + B*v + C = 0 where A=vy, B=-vx, C=vx*y0 - vy*x0
+        A = vy
+        B = -vx
+        C = vx * y0 - vy * x0
+        cx = w / 2.0
+        # Distance from (cx, h) to line — positive means steer negative angular (right)
+        dist_sign = float(np.sign(A * cx + B * h + C))
+        if dist_sign == 0.0:
+            dist_sign = 1.0
 
+        # TTI-proportional angular: closer → harder steer
+        # dist_sign > 0: line passes on the right → steer left (pos angular)
+        # dist_sign < 0: line passes on the left  → steer right (neg angular)
+        angular = float(
+            np.clip(dist_sign * kp / max(remaining, 1.0), -max_ang, max_ang)
+        )
+        linear = steer_spd * float(np.clip(remaining / (h * 0.4), 0.15, 1.0))
+
+        if self._avoider_state != "STEERING":
+            self.get_logger().info(
+                f"STEERING v_cross={v_cross:.0f}px remain={remaining:.0f}px ang={angular:.2f}"
+            )
         self._avoider_state = "STEERING"
         self._pub_vel(linear, angular)
 
@@ -413,34 +266,55 @@ class YellowAvoider2(Node):
     # Debug image
     # ------------------------------------------------------------------
 
-    def _publish_debug(self, img, mask, bev, line_result):
-        h_img, w_img = img.shape[:2]
+    def _publish_debug(self, img, scan_mask, line_result, h, w):
+        debug = img.copy()
 
-        # Left panel: BEV mask (jet colormap)
-        bev_color = cv2.applyColorMap(bev, cv2.COLORMAP_JET)
-        bev_resized = cv2.resize(bev_color, (w_img // 2, h_img))
+        # Yellow overlay
+        overlay = debug.copy()
+        overlay[scan_mask > 0] = (0, 220, 255)
+        cv2.addWeighted(overlay, 0.40, debug, 0.60, 0, debug)
 
-        # Right panel: raw image with yellow overlay
-        right = img.copy()
-        overlay = right.copy()
-        overlay[mask > 0] = (0, 220, 255)
-        cv2.addWeighted(overlay, 0.35, right, 0.65, 0, right)
+        # Scan zone boundary
+        scan_top = int(h * cast(float, self.get_parameter("scan_top_frac").value))
+        cv2.line(debug, (0, scan_top), (w, scan_top), (80, 80, 80), 1)
 
-        # Status text
+        cx = w // 2
+
         if line_result is not None:
-            vx_m, vy_m, x_int = line_result
-            angle_deg = float(np.degrees(np.arctan2(vy_m, vx_m)))
+            vx, vy, x0, y0, v_cross = line_result
+
+            # Draw fitted line across the image
+            if abs(vx) > 1e-6:
+                t_left = (0 - x0) / vx
+                t_right = (w - x0) / vx
+                y_left = int(y0 + t_left * vy)
+                y_right = int(y0 + t_right * vy)
+                cv2.line(debug, (0, y_left), (w, y_right), (255, 100, 0), 2)
+
+            # Draw intersection point with center column
+            v_cross_i = int(np.clip(v_cross, 0, h - 1))
+            cv2.circle(debug, (cx, v_cross_i), 6, (0, 0, 255), -1)
+            cv2.line(debug, (cx, v_cross_i), (cx, h), (0, 0, 200), 1)
+
+            remaining = h - v_cross
+            trigger_row = int(h * cast(float, self.get_parameter("trigger_frac").value))
+            in_range = v_cross > trigger_row
             state_str = self._avoider_state
-            txt = f"d={x_int:.2f}m a={angle_deg:.0f}d {state_str}"
-            col = (0, 100, 255) if self._avoider_state != "CLEAR" else (0, 200, 0)
+            col = (0, 100, 255) if state_str != "CLEAR" else (0, 200, 0)
+            _label(
+                debug,
+                f"v={v_cross:.0f} rem={remaining:.0f}px {state_str}",
+                (8, 20),
+                col,
+            )
+            if in_range:
+                _label(debug, "THREAT", (8, 38), (0, 0, 255))
         else:
-            txt = "CLEAR (no line)"
-            col = (0, 200, 0)
+            _label(debug, "NO LINE", (8, 20), (0, 200, 0))
 
-        _label(right, txt, (8, 20), col)
-        right_resized = cv2.resize(right, (w_img // 2, h_img))
+        # Center column marker
+        cv2.line(debug, (cx, h - 20), (cx, h), (200, 200, 200), 1)
 
-        debug = np.concatenate([bev_resized, right_resized], axis=1)
         try:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, "bgr8"))
         except Exception:
