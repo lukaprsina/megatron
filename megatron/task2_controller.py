@@ -185,6 +185,7 @@ class Task2Controller(Node):
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.25)
         self.declare_parameter("manual_mode", False)
+        self.declare_parameter("avoidance_blind_distance", 0.40)
 
         wp_file = cast(str, self.get_parameter("waypoints_file").value)
         self.waypoints = load_waypoints_from_yaml(wp_file)
@@ -215,6 +216,8 @@ class Task2Controller(Node):
         self._nav_ever_sent = False
         self._nav_seq = 0  # incremented on cancel; filters stale callbacks
         self._nav_rejected = False  # True when server rejected the last goal
+        self._last_feedback_distance: float | None = None
+        self._last_feedback_time: float | None = None
 
         # --- Costmap ---
         self.costmap = None
@@ -445,6 +448,7 @@ class Task2Controller(Node):
             self._handle_patrol()
         elif self.state == State.APPROACH_TARGET:
             self._handle_approach()
+            self._publish_approach_state()
         elif self.state == State.INTERACT:
             self._handle_interact()
         elif self.state == State.INSPECT_WORKSTATION:
@@ -919,7 +923,9 @@ class Task2Controller(Node):
         self._nav_ever_sent = True
         self._nav_rejected = False
         seq = self._nav_seq
-        future = self.nav_client.send_goal_async(goal)
+        future = self.nav_client.send_goal_async(
+            goal, feedback_callback=self._nav_feedback_cb
+        )
         future.add_done_callback(lambda f: self._nav_goal_response(f, seq))
         return True
 
@@ -935,6 +941,10 @@ class Task2Controller(Node):
             return
         self.nav_result_future = self.nav_goal_handle.get_result_async()
 
+    def _nav_feedback_cb(self, feedback_msg):
+        self._last_feedback_distance = feedback_msg.feedback.distance_remaining
+        self._last_feedback_time = self.get_clock().now().nanoseconds / 1e9
+
     def _cancel_nav(self):
         self._nav_seq += 1  # invalidates any in-flight callback
         if self.nav_goal_handle is not None:
@@ -943,6 +953,22 @@ class Task2Controller(Node):
         self.nav_result_future = None
         self.nav_in_flight = False
         self._nav_rejected = False
+        self._last_feedback_distance = None
+        self._last_feedback_time = None
+
+    def _is_near_goal(self) -> bool:
+        if self._last_feedback_distance is None or self._last_feedback_time is None:
+            return False
+        now = self.get_clock().now().nanoseconds / 1e9
+        if now - self._last_feedback_time > 2.0:
+            return False  # feedback stale
+        threshold = cast(float, self.get_parameter("avoidance_blind_distance").value)
+        return self._last_feedback_distance < threshold
+
+    def _publish_approach_state(self):
+        msg = String()
+        msg.data = "APPROACH_TARGET_FINAL" if self._is_near_goal() else "APPROACH_TARGET"
+        self.robot_state_pub.publish(msg)
 
     def _is_nav_complete(self) -> bool:
         if not self._nav_ever_sent or self.nav_in_flight:

@@ -82,6 +82,8 @@ class YellowAvoider2(Node):
         self.robot_state = "INIT"
         self._avoider_state = "CLEAR"
         self._back_end = 0.0
+        self._clear_ticks = 0
+        self._last_avoidance_ang = 0.0
         self._latest: np.ndarray | None = None
 
         self.create_timer(0.02, self._update)  # 50 Hz
@@ -92,6 +94,8 @@ class YellowAvoider2(Node):
             self.robot_state = msg.data
             self._avoider_state = "CLEAR"
             self._back_end = 0.0
+            self._clear_ticks = 0
+            self._last_avoidance_ang = 0.0
 
     def _image_cb(self, msg: Image):
         try:
@@ -219,21 +223,32 @@ class YellowAvoider2(Node):
             if now >= self._back_end:
                 self._pub_vel(0.0, 0.0)
                 self._avoider_state = "CLEAR"
+                self._clear_ticks = 0
                 self.get_logger().info("Backing done — CLEAR.")
             else:
                 self._pub_vel(-cast(float, self.get_parameter("back_speed").value), 0.0)
             return
 
-        if line_result is None or line_result[4] < trigger_row:
-            # No threatening line detected
+        threat = line_result is not None and line_result[4] >= trigger_row
+
+        if not threat:
+            # No threat this tick
             if self._avoider_state == "STEERING":
-                self._pub_vel(0.0, 0.0)
-                self._avoider_state = "CLEAR"
-                self.get_logger().info("Yellow cleared — CLEAR.")
+                self._clear_ticks += 1
+                if self._clear_ticks >= 30:  # TODO: tweak
+                    self._pub_vel(0.0, 0.0)
+                    self._avoider_state = "CLEAR"
+                    self.get_logger().info("Yellow cleared (hysteresis) — CLEAR.")
+                else:
+                    # Keep pushing the last steering to resist Nav2 counter-steer
+                    self._pub_vel(steer_spd, self._last_avoidance_ang)
             return
 
+        # Threat is active — reset clear counter
+        self._clear_ticks = 0
+
         vx, vy, x0, y0, v_cross = line_result
-        remaining = h - v_cross  # pixels remaining before line is "at robot"
+        remaining = h - v_cross
 
         if remaining < panic_remain:
             self._avoider_state = "BACKING"
@@ -246,9 +261,6 @@ class YellowAvoider2(Node):
             )
             return
 
-        # Steering direction: where is the line at the image bottom?
-        # x_bottom > cx → line on RIGHT at bottom → steer LEFT  (positive angular)
-        # x_bottom < cx → line on LEFT  at bottom → steer RIGHT (negative angular)
         cx = w / 2.0
         if abs(vy) > 1e-6:
             x_bottom = x0 + (h - y0) * vx / vy
@@ -259,14 +271,14 @@ class YellowAvoider2(Node):
         angular = float(
             np.clip(steer_dir * kp / max(remaining, 1.0), -max_ang, max_ang)
         )
-        linear = steer_spd * float(np.clip(remaining / (h * 0.4), 0.15, 1.0))
+        self._last_avoidance_ang = angular
 
         if self._avoider_state != "STEERING":
             self.get_logger().info(
                 f"STEERING v_cross={v_cross:.0f}px remain={remaining:.0f}px ang={angular:.2f}"
             )
         self._avoider_state = "STEERING"
-        self._pub_vel(linear, angular)
+        self._pub_vel(steer_spd, angular)
 
     # ------------------------------------------------------------------
     # Velocity publishing
