@@ -145,15 +145,34 @@ class YellowAvoider2(Node):
     def _fit_line(self, scan_mask, w, h):
         """Return (vx, vy, x0, y0, v_cross) or None.
 
-        v_cross: row where fitted line crosses center column (cx = w/2).
-        All values in image pixel coordinates.
+        Finds the lowest-reaching yellow contour and fits a line through its
+        filled pixels — ignores disconnected noise (sky cubes, far boxes).
         """
-        min_px = cast(int, self.get_parameter("min_pixels").value)
-        ys, xs = np.where(scan_mask > 0)
-        if len(xs) < min_px:
+        contours, _ = cv2.findContours(
+            scan_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
             return None
 
+        min_px = cast(int, self.get_parameter("min_pixels").value)
+        best_contour = None
+        best_bottom = -1
+        for cnt in contours:
+            if cv2.contourArea(cnt) < min_px:
+                continue
+            max_y = int(cnt[:, 0, 1].max())
+            if max_y > best_bottom:
+                best_bottom = max_y
+                best_contour = cnt
+
+        if best_contour is None:
+            return None
+
+        cnt_mask = np.zeros_like(scan_mask)
+        cv2.drawContours(cnt_mask, [best_contour], -1, (255,), cv2.FILLED)
+        ys, xs = np.where(cnt_mask > 0)
         pts = np.column_stack([xs, ys]).astype(np.float32)
+
         result = cv2.fitLine(pts, cv2.DIST_HUBER, 0, 0.01, 0.01)
         vx = float(result[0][0])
         vy = float(result[1][0])
@@ -161,20 +180,13 @@ class YellowAvoider2(Node):
         y0 = float(result[3][0])
 
         cx = w / 2.0
-
-        # Line: parametric P = (x0 + t*vx, y0 + t*vy)
-        # Intersection with column u = cx: x0 + t*vx = cx → t = (cx - x0) / vx
-        # Then v_cross = y0 + t*vy
         if abs(vx) < 1e-6:
-            # Nearly vertical line at x ≈ x0; crossing is at the fitted center
             v_cross = y0
         else:
             t = (cx - x0) / vx
             v_cross = y0 + t * vy
 
-        # Clamp to image bounds
         v_cross = float(np.clip(v_cross, 0, h))
-
         return (vx, vy, x0, y0, v_cross)
 
     # ------------------------------------------------------------------
