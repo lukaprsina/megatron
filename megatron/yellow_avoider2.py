@@ -16,7 +16,12 @@ import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point, Twist, TwistStamped
 from rclpy.node import Node
-from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+)
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, ColorRGBA, String
 from tf2_ros import Buffer, TransformListener
@@ -26,6 +31,13 @@ from megatron.speech import Speaker
 
 SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=1,
+)
+
+CAM_INFO_QOS = QoSProfile(
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
     history=QoSHistoryPolicy.KEEP_LAST,
     depth=1,
 )
@@ -66,7 +78,7 @@ class YellowAvoiderV2(Node):
         self.create_subscription(Image, cam_topic, self._image_cb, SENSOR_QOS)
         self.create_subscription(
             CameraInfo, "/top_camera/rgb/preview/camera_info",
-            self._cam_info_cb, 10,
+            self._cam_info_cb, CAM_INFO_QOS,
         )
         self.create_subscription(String, "/robot_state", self._state_cb, 10)
 
@@ -83,6 +95,8 @@ class YellowAvoiderV2(Node):
         self._spoke = False
         self._last_marker_pub = 0.0
         self._no_line_published = False
+        self._h_warned = False
+        self._start_time = self.get_clock().now()
 
         self.create_timer(0.02, self._update)
         self.get_logger().info(f"YellowAvoiderV2 ready on {cam_topic}.")
@@ -210,25 +224,39 @@ class YellowAvoiderV2(Node):
     # ── main loop ───────────────────────────────────────────────────────
 
     def _update(self):
-        if self._latest is None or self.H is None:
+        if self._latest is None:
             return
 
         img = self._latest
         now = self.get_clock().now().nanoseconds / 1e9
 
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, MORPH_K)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, MORPH_K)
+        if self.H is None:
+            self._try_compute_homography()
+            if not self._h_warned and (self.get_clock().now() - self._start_time).nanoseconds > 5e9:
+                self._h_warned = True
+                self.get_logger().warn(
+                    "Homography not ready after 5s — check /top_camera/rgb/preview/camera_info "
+                    "and TF top_camera_rgb_camera_optical_frame → base_link."
+                )
 
-        bev = cv2.warpPerspective(mask, self.H, (self._bev_w, self._bev_h))
+        mask = None
+        bev = None
+        line = None
 
-        line = self._fit_line(bev)
+        if self.H is not None:
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, MORPH_K)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, MORPH_K)
 
-        if self.robot_state in _INSPECT_STATES:
-            self._handle_inspect(line)
-        elif self.robot_state in _ACTIVE_STATES:
-            self._handle_avoid(line, now)
+            bev = cv2.warpPerspective(mask, self.H, (self._bev_w, self._bev_h))
+
+            line = self._fit_line(bev)
+
+            if self.robot_state in _INSPECT_STATES:
+                self._handle_inspect(line)
+            elif self.robot_state in _ACTIVE_STATES:
+                self._handle_avoid(line, now)
 
         if cast(bool, self.get_parameter("publish_debug_image").value):
             self._publish_debug(img, mask, bev, line)
@@ -355,12 +383,13 @@ class YellowAvoiderV2(Node):
 
     def _publish_debug(self, img, mask, bev, line):
         debug = img.copy()
-        overlay = debug.copy()
-        overlay[mask > 0] = (0, 220, 255)
-        cv2.addWeighted(overlay, 0.35, debug, 0.65, 0, debug)
+        if mask is not None:
+            overlay = debug.copy()
+            overlay[mask > 0] = (0, 220, 255)
+            cv2.addWeighted(overlay, 0.35, debug, 0.65, 0, debug)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(debug, contours, -1, (0, 180, 255), 1)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(debug, contours, -1, (0, 180, 255), 1)
 
         if line is not None:
             self._label(debug, f"{line['d_x']:.2f}m", (8, 20), (0, 255, 0))
@@ -368,35 +397,42 @@ class YellowAvoiderV2(Node):
                         f"yaw {math.degrees(line['line_yaw']):+.0f}deg",
                         (8, 38), (180, 180, 0))
 
-        bev_col = cv2.cvtColor(bev, cv2.COLOR_GRAY2BGR)
-        if line is not None:
-            h_bev, w_bev = bev.shape
-            vx, vy = line["vx"], line["vy"]
-            x0, y0 = line["x0"], line["y0"]
-            le = 1000.0
-            p1 = (int(x0 - vx * le), int(y0 - vy * le))
-            p2 = (int(x0 + vx * le), int(y0 + vy * le))
-            cv2.line(bev_col, p1, p2, (0, 255, 255), 2)
+        if bev is not None:
+            bev_col = cv2.cvtColor(bev, cv2.COLOR_GRAY2BGR)
+            if line is not None:
+                vx, vy = line["vx"], line["vy"]
+                x0, y0 = line["x0"], line["y0"]
+                le = 1000.0
+                p1 = (int(x0 - vx * le), int(y0 - vy * le))
+                p2 = (int(x0 + vx * le), int(y0 + vy * le))
+                cv2.line(bev_col, p1, p2, (0, 255, 255), 2)
 
-            cx = int(w_bev / 2)
-            robot_row = int(
-                (cast(float, self.get_parameter("bev_x_max").value) - 0.0)
-                / cast(float, self.get_parameter("bev_scale").value)
+                w_bev = bev.shape[1]
+                cx = int(w_bev / 2)
+                robot_row = int(
+                    (cast(float, self.get_parameter("bev_x_max").value) - 0.0)
+                    / cast(float, self.get_parameter("bev_scale").value)
+                )
+                cv2.circle(bev_col, (cx, robot_row), 4, (0, 255, 0), -1)
+
+                if not math.isinf(line["d_x"]) and line["d_x"] > 0:
+                    ix = int(
+                        (0.0 - cast(float, self.get_parameter("bev_y_min").value))
+                        / cast(float, self.get_parameter("bev_scale").value)
+                    )
+                    iy = int(
+                        (cast(float, self.get_parameter("bev_x_max").value) - line["d_x"])
+                        / cast(float, self.get_parameter("bev_scale").value)
+                    )
+                    cv2.circle(bev_col, (ix, iy), 6, (0, 0, 255), -1)
+
+            side_panel = np.pad(bev_col, ((0, 0), (4, 4), (0, 0)), constant_values=60)
+        else:
+            side_panel = np.full(
+                (max(1, debug.shape[0]), 100, 3), 40, dtype=np.uint8
             )
-            cv2.circle(bev_col, (cx, robot_row), 4, (0, 255, 0), -1)
-
-            if not math.isinf(line["d_x"]) and line["d_x"] > 0:
-                ix = int(
-                    (0.0 - cast(float, self.get_parameter("bev_y_min").value))
-                    / cast(float, self.get_parameter("bev_scale").value)
-                )
-                iy = int(
-                    (cast(float, self.get_parameter("bev_x_max").value) - line["d_x"])
-                    / cast(float, self.get_parameter("bev_scale").value)
-                )
-                cv2.circle(bev_col, (ix, iy), 6, (0, 0, 255), -1)
-
-        side_panel = np.pad(bev_col, ((0, 0), (4, 4), (0, 0)), constant_values=60)
+            cv2.putText(side_panel, "No H", (8, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 255), 1)
 
         if debug.shape[0] != side_panel.shape[0]:
             total_h = min(debug.shape[0], side_panel.shape[0])
