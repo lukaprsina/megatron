@@ -50,19 +50,19 @@ class YellowAvoider2(Node):
         self.declare_parameter("publish_debug_image", True)
 
         # Fraction of image height below which we look for yellow pixels [0..1]
-        # 0.3 = lower 70% of image
-        self.declare_parameter("scan_top_frac", 0.3)
+        # It's inverted, we scan 1-scan_top_frac from the bottom, so smaller
+        self.declare_parameter("scan_top_frac", 0.7)
 
         # Line must cross center column below this row fraction to start steering
-        # 0.45 = below 45% from top (upper 55% = no threat)
-        self.declare_parameter("trigger_frac", 0.45)
+        # Only react when crossing is in bottom 1-trigger_frac of frame
+        self.declare_parameter("trigger_frac", 0.75)
 
         # Fraction of image height remaining (h - v_cross)/h below which BACKING
-        # 0.08 = line crossing is within bottom 8% of image = very close
-        self.declare_parameter("panic_frac", 0.08)
+        # line crossing is within bottom panic_frac of image = very close
+        self.declare_parameter("panic_frac", 0.05)
 
-        self.declare_parameter("min_pixels", 30)
-        self.declare_parameter("kp", 30.0)  # gain in pixel units
+        self.declare_parameter("min_pixels", 150)
+        self.declare_parameter("kp", 15.0)  # gain in pixel units
         self.declare_parameter("max_angular", 0.6)
         self.declare_parameter("steer_speed", 0.06)
         self.declare_parameter("back_speed", 0.12)
