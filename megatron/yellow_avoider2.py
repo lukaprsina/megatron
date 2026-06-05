@@ -67,6 +67,8 @@ class YellowAvoider2(Node):
         self.declare_parameter("steer_speed", 0.06)
         self.declare_parameter("back_speed", 0.12)
         self.declare_parameter("back_duration", 1.8)
+        self.declare_parameter("bot_check_size", 20)
+        self.declare_parameter("bot_check_min_px", 8)
 
         cam = cast(str, self.get_parameter("camera_topic").value)
         self.bridge = CvBridge()
@@ -128,7 +130,7 @@ class YellowAvoider2(Node):
         # Dispatch by state
         if self.robot_state in _INSPECT_STATES:
             if line_result is not None:
-                _vx, _vy, _x0, _y0, v_cross = line_result
+                _vx, _vy, _x0, _y0, v_cross, _x_bottom = line_result
                 trigger_row = int(
                     h * cast(float, self.get_parameter("trigger_frac").value)
                 )
@@ -147,7 +149,7 @@ class YellowAvoider2(Node):
     # ------------------------------------------------------------------
 
     def _fit_line(self, scan_mask, w, h):
-        """Return (vx, vy, x0, y0, v_cross) or None.
+        """Return (vx, vy, x0, y0, v_cross, x_bottom) or None.
 
         Finds the lowest-reaching yellow contour and fits a line through its
         filled pixels — ignores disconnected noise (sky cubes, far boxes).
@@ -205,8 +207,27 @@ class YellowAvoider2(Node):
         if v_cross < cnt_top - margin or v_cross > cnt_bot + margin:
             return None
 
+        # Where does the fitted line intersect the bottom edge?
+        if abs(vy) > 1e-6:
+            x_bottom = x0 + (h - y0) * vx / vy
+        else:
+            x_bottom = x0
+
+        # Bottom-pixel verification — reject phantom corners where the
+        # extrapolated line claims to intersect the image bottom but no
+        # yellow pixels actually exist there.
+        bot_size = cast(int, self.get_parameter("bot_check_size").value)
+        bot_min = cast(int, self.get_parameter("bot_check_min_px").value)
+        xb = int(np.clip(x_bottom, 0, w - 1))
+        y1 = max(0, h - bot_size * 2)
+        x1 = max(0, xb - bot_size)
+        x2 = min(w, xb + bot_size)
+        roi = scan_mask[y1:h, x1:x2]
+        if cv2.countNonZero(roi) < bot_min:
+            return None
+
         v_cross = float(np.clip(v_cross, 0, h))
-        return (vx, vy, x0, y0, v_cross)
+        return (vx, vy, x0, y0, v_cross, float(x_bottom))
 
     # ------------------------------------------------------------------
     # Avoidance state machine
@@ -247,7 +268,7 @@ class YellowAvoider2(Node):
         # Threat is active — reset clear counter
         self._clear_ticks = 0
 
-        vx, vy, x0, y0, v_cross = line_result
+        vx, vy, x0, y0, v_cross, x_bottom = line_result
         remaining = h - v_cross
 
         if remaining < panic_remain:
@@ -262,10 +283,6 @@ class YellowAvoider2(Node):
             return
 
         cx = w / 2.0
-        if abs(vy) > 1e-6:
-            x_bottom = x0 + (h - y0) * vx / vy
-        else:
-            x_bottom = x0
         steer_dir = 1.0 if x_bottom > cx else -1.0
 
         angular = float(
@@ -315,7 +332,7 @@ class YellowAvoider2(Node):
         cx = w // 2
 
         if line_result is not None:
-            vx, vy, x0, y0, v_cross = line_result
+            vx, vy, x0, y0, v_cross, x_bottom = line_result
 
             # Draw fitted line across the image
             if abs(vx) > 1e-6:
@@ -329,6 +346,15 @@ class YellowAvoider2(Node):
             v_cross_i = int(np.clip(v_cross, 0, h - 1))
             cv2.circle(debug, (cx, v_cross_i), 6, (0, 0, 255), -1)
             cv2.line(debug, (cx, v_cross_i), (cx, h), (0, 0, 200), 1)
+
+            # Draw bottom check ROI
+            bot_size = cast(int, self.get_parameter("bot_check_size").value)
+            xb = int(np.clip(x_bottom, 0, w - 1))
+            y1 = max(0, h - bot_size * 2)
+            x1 = max(0, xb - bot_size)
+            x2 = min(w, xb + bot_size)
+            cv2.rectangle(debug, (x1, y1), (x2, h), (0, 255, 255), 1)
+            cv2.circle(debug, (xb, h - bot_size), 3, (0, 255, 255), -1)
 
             remaining = h - v_cross
             trigger_row = int(h * cast(float, self.get_parameter("trigger_frac").value))
