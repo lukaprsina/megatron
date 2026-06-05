@@ -105,7 +105,7 @@ class PerceptionVisualizer(Node):
         self.face_count = 0
         self.ring_count = 0
         self.last_ring_color = "—"
-        self.mission_status = "WAITING_FOR_NAV2"
+        self.robot_state = "None"
         self._face_positions: set[tuple[float, float]] = set()
         self._ring_positions: set[tuple[float, float]] = set()
 
@@ -130,7 +130,7 @@ class PerceptionVisualizer(Node):
         )
         self.create_subscription(PoseStamped, "/detected_faces", self._face_pose_cb, 10)
         self.create_subscription(PoseStamped, "/detected_rings", self._ring_pose_cb, 10)
-        self.create_subscription(String, "/mission_status", self._mission_status_cb, 10)
+        self.create_subscription(String, "/robot_state", self._robot_state_cb, 10)
 
         # Subscriptions — ring debug
         self.create_subscription(Image, "/ring_debug/binary", self._rd_binary_cb, 10)
@@ -172,8 +172,8 @@ class PerceptionVisualizer(Node):
         else:
             self.last_ring_color = "unknown"
 
-    def _mission_status_cb(self, msg: String) -> None:
-        self.mission_status = msg.data or "unknown"
+    def _robot_state_cb(self, msg: String) -> None:
+        self.robot_state = msg.data or "unknown"
 
     def _rd_binary_cb(self, msg: Image) -> None:
         self.ring_debug_binary = self._to_any(msg)
@@ -242,7 +242,7 @@ class PerceptionVisualizer(Node):
             2,
             cv2.LINE_AA,
         )
-        status = f"{self.mission_status}"
+        status = f"{self.robot_state}"
         cv2.putText(
             header,
             status,
