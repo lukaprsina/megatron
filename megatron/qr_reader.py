@@ -77,7 +77,7 @@ class QRReader(Node):
         msg = self.handle_qr(cv_image)
         if msg is None:
             msg = String()
-            msg.data = "None"
+            msg.data = ""
 
         self.publish_task.publish(msg)
         self.get_logger().info(f"DEBUG published {msg.data}")
