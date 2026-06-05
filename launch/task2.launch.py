@@ -176,7 +176,7 @@ def generate_launch_description():
     ld.add_action(face_detector)
     ld.add_action(ring_detector)
     ld.add_action(arm_mover)
-    ld.add_action(yellow_avoider)
+    # ld.add_action(yellow_avoider)
     ld.add_action(cylinder_detector)
     ld.add_action(workstation_detector)
     ld.add_action(controller)
