@@ -180,7 +180,8 @@ class Task2Controller(Node):
         # --- Parameters ---
         self.declare_parameter("waypoints_file", "waypoints/task.yaml")
         self.declare_parameter("face_approach_distance", 0.55)
-        self.declare_parameter("barrel_approach_distance", 0.80)
+        # self.declare_parameter("barrel_approach_distance", 0.80)
+        self.declare_parameter("barrel_approach_distance", 1.50)
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.25)
         self.declare_parameter("manual_mode", False)

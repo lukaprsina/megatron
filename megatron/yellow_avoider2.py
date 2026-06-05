@@ -246,23 +246,18 @@ class YellowAvoider2(Node):
             )
             return
 
-        # Steering sign: which side of the robot's forward path (center column) is the line?
-        # Use signed perpendicular distance from center-bottom (cx, h) to the fitted line.
-        # Line eq: A*u + B*v + C = 0 where A=vy, B=-vx, C=vx*y0 - vy*x0
-        A = vy
-        B = -vx
-        C = vx * y0 - vy * x0
+        # Steering direction: where is the line at the image bottom?
+        # x_bottom > cx → line on RIGHT at bottom → steer LEFT  (positive angular)
+        # x_bottom < cx → line on LEFT  at bottom → steer RIGHT (negative angular)
         cx = w / 2.0
-        # Distance from (cx, h) to line — positive means line on right, steer left
-        dist_sign = float(np.sign(A * cx + B * h + C))
-        if dist_sign == 0.0:
-            dist_sign = 1.0
+        if abs(vy) > 1e-6:
+            x_bottom = x0 + (h - y0) * vx / vy
+        else:
+            x_bottom = x0
+        steer_dir = 1.0 if x_bottom > cx else -1.0
 
-        # TTI-proportional angular: closer → harder steer
-        # dist_sign > 0: line passes on the right → steer left (pos angular)
-        # dist_sign < 0: line passes on the left  → steer right (neg angular)
         angular = float(
-            np.clip(dist_sign * kp / max(remaining, 1.0), -max_ang, max_ang)
+            np.clip(steer_dir * kp / max(remaining, 1.0), -max_ang, max_ang)
         )
         linear = steer_spd * float(np.clip(remaining / (h * 0.4), 0.15, 1.0))
 
