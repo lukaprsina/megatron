@@ -369,7 +369,7 @@ class Task2Controller(Node):
             if np.linalg.norm(pos - b["pos"]) < self.DEDUP_DISTANCE:
                 b["pos"] = pos
                 b["last_seen"] = now
-                if not b.get("approached", False) and self.state == State.PATROL:
+                if b["orientation"] == "horizontal" and not b.get("approached", False) and self.state == State.PATROL:
                     self._requeue_if_not_pending("barrel", b)
                 return
 
