@@ -464,6 +464,8 @@ class Task2Controller(Node):
         msg = String()
         msg.data = new_state.name
         self.robot_state_pub.publish(msg)
+        if new_state == State.PATROL:
+            self._pub_arm("look_down")
         if new_state == State.DONE:
             self._cancel_nav()
             self.cmd_vel_pub.publish(Twist())
