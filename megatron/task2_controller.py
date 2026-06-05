@@ -180,10 +180,10 @@ class Task2Controller(Node):
 
         # --- Parameters ---
         self.declare_parameter("waypoints_file", "waypoints/task.yaml")
-        self.declare_parameter("face_approach_distance", 0.55)
-        self.declare_parameter("barrel_approach_distance", 0.80)
+        self.declare_parameter("face_approach_distance", 0.35)
+        self.declare_parameter("barrel_approach_distance", 0.60)
         self.declare_parameter("barrel_lateral_offset", 0.30)
-        self.declare_parameter("approach_retry_offset", 0.25)
+        self.declare_parameter("approach_retry_offset", 0.20)
         self.declare_parameter("manual_mode", False)
 
         wp_file = cast(str, self.get_parameter("waypoints_file").value)
@@ -532,7 +532,7 @@ class Task2Controller(Node):
                 self.get_logger().warn(
                     f"Workstation '{color}' pose not known — skipping inspection."
                 )
-        self._transition(State.FOLLOW_BLUE_LINE)
+        # self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── APPROACH_TARGET ───────────────────────────────────────────────
 
@@ -543,6 +543,7 @@ class Task2Controller(Node):
             return
 
         if self._nav_succeeded():
+            self._publish_approaching_object(0.0,0.0, none=True)
             self._transition(State.INTERACT)
             self._start_interact()
             return
@@ -596,9 +597,9 @@ class Task2Controller(Node):
 
             while idx < len(candidates):
                 ax, ay, yaw = candidates[idx]
+                self._publish_approaching_object(ax,ay, attempt, remaining_cycles*n_candidates)
                 if self._cost_at_goal_ok(ax, ay):
                     self._send_nav_goal(ax, ay, yaw)
-                    self._publish_approaching_object(ax,ay, attempt, remaining_cycles*n_candidates)
                     self._approach_attempt = attempt  # sync for next abort
                     return True
                 idx += 1
@@ -619,23 +620,31 @@ class Task2Controller(Node):
         nx, ny = normal
         base = math.atan2(ny, nx)
         px, py = float(pos[0]), float(pos[1])
-        offsets = [
+        def f(x):
+            return (x**2)/25**2
+        # degrees = [val for i in range(0,30,5) for val in (i, -i)]
+        degrees = [
             0,
-            math.pi / 4,
-            -math.pi / 4,
-            math.pi / 2,
-            -math.pi / 2,
-            3 * math.pi / 4,
-            -3 * math.pi / 4,
-            math.pi,
-        ]
+            5,           -5,
+            10,          -10,
+            15,          -15,
+            20,          -20,
+            25,          -25,
+            #30,          -30,
+            #35,          -35,
+            #40,          -40,
+            #50,          -50,
+            #60,          -60,
+            #70,          -70,
+            ]
+        offsets = [math.radians(d) for d in degrees]
         return [
             (
-                px + math.cos(base + o) * dist,
-                py + math.sin(base + o) * dist,
+                px + math.cos(base + o) * dist*f(degrees[i]),
+                py + math.sin(base + o) * dist*f(degrees[i]),
                 math.atan2(-math.sin(base + o), -math.cos(base + o)),
             )
-            for o in offsets
+            for i, o in enumerate(offsets)
         ]
 
     def _barrel_approach_candidates(self, target: dict, distance=None):
@@ -712,6 +721,7 @@ class Task2Controller(Node):
                 self.speaker.speak("Alert! Alert! This barrel is leaking!")
             else:
                 self.speaker.speak("Barrel OK.")
+
             self.barrel_report.append(
                 {
                     "id": len(self.barrel_report) + 1,
