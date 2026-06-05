@@ -97,6 +97,10 @@ class YellowAvoiderV2(Node):
         self._no_line_published = False
         self._h_warned = False
         self._start_time = self.get_clock().now()
+        self._cam_ground_x = 0.0
+        self._cam_ground_y = 0.0
+        self._bev_x0 = 0.0
+        self._bev_y0 = 0.0
 
         self.create_timer(0.02, self._update)
         self.get_logger().info(f"YellowAvoiderV2 ready on {cam_topic}.")
@@ -107,7 +111,7 @@ class YellowAvoiderV2(Node):
         p("publish_debug_image", True)
         p("publish_markers", True)
 
-        p("bev_x_min", 0.0)
+        p("bev_x_min", 0.3)
         p("bev_x_max", 2.0)
         p("bev_y_min", -1.0)
         p("bev_y_max", 1.0)
@@ -158,18 +162,6 @@ class YellowAvoiderV2(Node):
             )
 
     def _compute_homography(self, K, transform):
-        x_min = cast(float, self.get_parameter("bev_x_min").value)
-        x_max = cast(float, self.get_parameter("bev_x_max").value)
-        y_min = cast(float, self.get_parameter("bev_y_min").value)
-        y_max = cast(float, self.get_parameter("bev_y_max").value)
-
-        base_pts = np.array([
-            [x_min, y_min, 0.0],
-            [x_min, y_max, 0.0],
-            [x_max, y_max, 0.0],
-            [x_max, y_min, 0.0],
-        ], dtype=np.float64)
-
         t = transform.transform.translation
         q = transform.transform.rotation
         tx, ty, tz = t.x, t.y, t.z
@@ -182,6 +174,34 @@ class YellowAvoiderV2(Node):
         ], dtype=np.float64)
         t_vec = np.array([tx, ty, tz], dtype=np.float64)
 
+        cam_in_base = -R.T @ t_vec
+        self._cam_ground_x = float(cam_in_base[0])
+        self._cam_ground_y = float(cam_in_base[1])
+
+        self.get_logger().info(
+            f"Camera ground projection: x={self._cam_ground_x:.3f}, "
+            f"y={self._cam_ground_y:.3f}"
+        )
+
+        x_rel = cast(float, self.get_parameter("bev_x_min").value)
+        y_rel = cast(float, self.get_parameter("bev_y_min").value)
+        x_range = cast(float, self.get_parameter("bev_x_max").value) - x_rel
+        y_range = cast(float, self.get_parameter("bev_y_max").value) - y_rel
+
+        self._bev_x0 = self._cam_ground_x + x_rel
+        self._bev_y0 = self._cam_ground_y + y_rel
+        x_min = self._bev_x0
+        x_max = self._bev_x0 + x_range
+        y_min = self._bev_y0
+        y_max = self._bev_y0 + y_range
+
+        base_pts = np.array([
+            [x_min, y_min, 0.0],
+            [x_min, y_max, 0.0],
+            [x_max, y_max, 0.0],
+            [x_max, y_min, 0.0],
+        ], dtype=np.float64)
+
         cam_pts = (R @ base_pts.T).T + t_vec
 
         fx, fy = K[0, 0], K[1, 1]
@@ -192,7 +212,8 @@ class YellowAvoiderV2(Node):
             X, Y, Z = cam_pts[i]
             if Z <= 0:
                 self.get_logger().error(
-                    f"Ground point {i} Z={Z:.3f} behind camera — wrong TF frame?"
+                    f"Ground point {i} Z={Z:.3f} behind camera — "
+                    f"region too far back (camera at x={self._cam_ground_x:.3f})"
                 )
                 return None
             src_pts[i] = [fx * X / Z + cx, fy * Y / Z + cy]
@@ -276,8 +297,11 @@ class YellowAvoiderV2(Node):
         x0, y0 = float(result[2][0]), float(result[3][0])
 
         scale = cast(float, self.get_parameter("bev_scale").value)
-        x_max = cast(float, self.get_parameter("bev_x_max").value)
-        y_min = cast(float, self.get_parameter("bev_y_min").value)
+        x_max = self._bev_x0 + (
+            cast(float, self.get_parameter("bev_x_max").value)
+            - cast(float, self.get_parameter("bev_x_min").value)
+        )
+        y_min = self._bev_y0
 
         dx_base = -vy * scale
         dy_base = vx * scale
@@ -399,6 +423,13 @@ class YellowAvoiderV2(Node):
 
         if bev is not None:
             bev_col = cv2.cvtColor(bev, cv2.COLOR_GRAY2BGR)
+            scale = cast(float, self.get_parameter("bev_scale").value)
+            x_range = (
+                cast(float, self.get_parameter("bev_x_max").value)
+                - cast(float, self.get_parameter("bev_x_min").value)
+            )
+            x_max = self._bev_x0 + x_range
+
             if line is not None:
                 vx, vy = line["vx"], line["vy"]
                 x0, y0 = line["x0"], line["y0"]
@@ -407,24 +438,17 @@ class YellowAvoiderV2(Node):
                 p2 = (int(x0 + vx * le), int(y0 + vy * le))
                 cv2.line(bev_col, p1, p2, (0, 255, 255), 2)
 
-                w_bev = bev.shape[1]
-                cx = int(w_bev / 2)
-                robot_row = int(
-                    (cast(float, self.get_parameter("bev_x_max").value) - 0.0)
-                    / cast(float, self.get_parameter("bev_scale").value)
-                )
-                cv2.circle(bev_col, (cx, robot_row), 4, (0, 255, 0), -1)
+                robot_row = int((x_max - 0.0) / scale)
+                robot_col = int((0.0 - self._bev_y0) / scale)
+                h_bev, w_bev = bev.shape
+                if 0 <= robot_col < w_bev and 0 <= robot_row < h_bev:
+                    cv2.circle(bev_col, (robot_col, robot_row), 4, (0, 255, 0), -1)
 
                 if not math.isinf(line["d_x"]) and line["d_x"] > 0:
-                    ix = int(
-                        (0.0 - cast(float, self.get_parameter("bev_y_min").value))
-                        / cast(float, self.get_parameter("bev_scale").value)
-                    )
-                    iy = int(
-                        (cast(float, self.get_parameter("bev_x_max").value) - line["d_x"])
-                        / cast(float, self.get_parameter("bev_scale").value)
-                    )
-                    cv2.circle(bev_col, (ix, iy), 6, (0, 0, 255), -1)
+                    ix = int((0.0 - self._bev_y0) / scale)
+                    iy = int((x_max - line["d_x"]) / scale)
+                    if 0 <= ix < w_bev and 0 <= iy < h_bev:
+                        cv2.circle(bev_col, (ix, iy), 6, (0, 0, 255), -1)
 
             side_panel = np.pad(bev_col, ((0, 0), (4, 4), (0, 0)), constant_values=60)
         else:
@@ -545,7 +569,10 @@ class YellowAvoiderV2(Node):
         cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
 
     def destroy_node(self):
-        self._pub_vel(0.0, 0.0)
+        try:
+            self._pub_vel(0.0, 0.0)
+        except Exception:
+            pass
         super().destroy_node()
 
 

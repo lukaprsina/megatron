@@ -592,8 +592,10 @@ and open-loop (fixed steer_angular regardless of line angle).
 v2 rewrite (yellow_avoider2.py): bird's-eye warp from camera_info intrinsics +
 TF transform — zero manual calibration. Homography computed once at startup from
 `/top_camera/rgb/preview/camera_info` (K matrix) + TF lookup
-(`camera_optical_frame` → `base_link`). Warp yellow mask → `cv2.fitLine` →
-line equation in base_link: ax + by + c = 0.
+(`top_camera_rgb_camera_optical_frame` → `base_link`). Ground region parameters
+(`bev_x_min` etc.) are relative to the camera's ground-projected position
+(computed from TF), not absolute base_link coordinates. Warp yellow mask →
+`cv2.fitLine` → line equation in base_link: ax + by + c = 0.
 
 TTI = -c/a (intersection of robot's forward X-axis with the line). Steering is
 proportional: angular = steer_dir \* kp / max(d_x, 0.05), clamped to max_angular.
