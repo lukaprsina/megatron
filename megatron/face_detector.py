@@ -295,7 +295,7 @@ class FaceDetectorNode(Node):
                     update_count = track.get("_update_count_since_publish", 0)
                     if (
                         last_pos is None
-                        or np.linalg.norm(pos - last_pos) > 0.05
+                        or np.linalg.norm(pos - last_pos) > 0.1
                         or update_count >= 5
                     ):
                         self.get_logger().info("approaching face update")
