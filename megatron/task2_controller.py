@@ -543,7 +543,7 @@ class Task2Controller(Node):
 
         if self.waypoint_index >= len(self.waypoints):
             self.get_logger().info("Patrol loop complete.")
-            # self._on_patrol_complete()
+            # self._on_patrol_complete() # TODO
             return
 
         self._send_next_waypoint()

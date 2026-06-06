@@ -139,7 +139,7 @@ def generate_launch_description():
         ],
     )
 
-    yellow_avoider = Node(
+    yellow_line_injector = Node(
         package="megatron",
         executable="yellow_line_injector",
         name="yellow_line_injector",
@@ -185,7 +185,7 @@ def generate_launch_description():
     ld.add_action(ring_detector)
     ld.add_action(qr_reader)
     ld.add_action(arm_mover)
-    #ld.add_action(yellow_avoider)
+    ld.add_action(yellow_line_injector)
     ld.add_action(cylinder_detector)
     ld.add_action(workstation_detector)
     ld.add_action(controller)
