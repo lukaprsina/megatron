@@ -109,8 +109,8 @@ def generate_launch_description():
     )
 
     arm_mover = Node(
-        package="dis_tutorial7",
-        executable="arm_mover_actions.py",
+        package="megatron",
+        executable="arm_mover",
         name="arm_mover",
         output="screen",
     )
@@ -141,8 +141,8 @@ def generate_launch_description():
 
     yellow_avoider = Node(
         package="megatron",
-        executable="yellow_avoider2",
-        name="yellow_avoider",
+        executable="yellow_line_injector",
+        name="yellow_line_injector",
         output="screen",
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
     )

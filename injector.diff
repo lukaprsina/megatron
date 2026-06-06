@@ -1,0 +1,68 @@
+diff --git a/megatron/yellow_line_injector.py b/megatron/yellow_line_injector.py
+index 47d04ce..2568cc9 100644
+--- a/megatron/yellow_line_injector.py
++++ b/megatron/yellow_line_injector.py
+@@ -15,10 +15,15 @@ from typing import cast
+ 
+ import numpy as np
+ import rclpy
++import rclpy.time
++import tf2_ros
++from rclpy.duration import Duration
+ from rclpy.node import Node
+ from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
+ from sensor_msgs.msg import PointCloud2, PointField
+-from std_msgs.msg import String
++from std_msgs.msg import Header, String
++
++from megatron.perception_utils import quaternion_to_rotation_matrix
+ 
+ SENSOR_QOS = QoSProfile(
+     reliability=QoSReliabilityPolicy.BEST_EFFORT,
+@@ -57,6 +62,9 @@ class YellowLineInjector(Node):
+ 
+         self._active = False
+ 
++        self.tf_buffer = tf2_ros.Buffer()
++        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
++
+         self.create_subscription(
+             PointCloud2,
+             "/top_camera/rgb/preview/depth/points",
+@@ -106,7 +114,35 @@ class YellowLineInjector(Node):
+             [pts_v["x"][yellow], pts_v["y"][yellow], pts_v["z"][yellow]],
+             axis=1,
+         )
+-        self._pub.publish(_make_cloud(xyz, msg.header))
++
++        try:
++            tf = self.tf_buffer.lookup_transform(
++                "map",
++                msg.header.frame_id,
++                rclpy.time.Time(),
++                timeout=Duration(seconds=0.5),
++            )
++        except Exception as e:
++            self.get_logger().warn(
++                f"Cannot transform yellow cloud to map: {e}",
++                throttle_duration_sec=5.0,
++            )
++            return
++
++        R = quaternion_to_rotation_matrix(tf.transform.rotation)
++        T = np.array(
++            [
++                tf.transform.translation.x,
++                tf.transform.translation.y,
++                tf.transform.translation.z,
++            ]
++        )
++        xyz_map = (R @ xyz.T).T + T
++
++        header = Header()
++        header.frame_id = "map"
++        header.stamp = self.get_clock().now().to_msg()
++        self._pub.publish(_make_cloud(xyz_map, header))
+ 
+ 
+ def _is_yellow(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray:
