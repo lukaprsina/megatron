@@ -8,8 +8,10 @@ and publishes confirmed detections as PoseStamped (with normal as orientation).
 from typing import cast
 
 import cv2
+import face_recognition
 import message_filters
 import numpy as np
+import os
 import rclpy
 import tf2_ros
 from cv_bridge import CvBridge, CvBridgeError
@@ -30,6 +32,14 @@ from megatron.perception_utils import (
 )
 
 
+def parse_personnel_filename(filename):
+    """Parse 'firstname_he_him_job_title.png' -> name."""
+    stem = os.path.splitext(filename)[0]
+    parts = stem.split("_")
+    name = parts[0].capitalize()
+    return name
+
+
 class FaceDetectorNode(Node):
     def __init__(self):
         super().__init__("face_detector")
@@ -43,6 +53,11 @@ class FaceDetectorNode(Node):
         self.declare_parameter("roi_shrink", 0.3)
         self.declare_parameter("track_max_age", 30.0)
         self.declare_parameter("lateral_offset", 0.2)
+        self.declare_parameter("recognition_tolerance", 0.6)
+        self.declare_parameter(
+            "personnel_dir",
+            "/home/iota/dis/src/vendor/teammate-project/src/task1/config/personnel",
+        )
 
         self.device = cast(str, self.get_parameter("device").value)
         self.confidence_threshold = cast(
@@ -58,9 +73,18 @@ class FaceDetectorNode(Node):
         self.roi_shrink = cast(float, self.get_parameter("roi_shrink").value)
         self.track_max_age = cast(float, self.get_parameter("track_max_age").value)
         self.lateral_offset = cast(float, self.get_parameter("lateral_offset").value)
+        self.recognition_tolerance = cast(
+            float, self.get_parameter("recognition_tolerance").value
+        )
+        self.personnel_dir = cast(str, self.get_parameter("personnel_dir").value)
 
         self.bridge = CvBridge()
         self.model = YOLO("yolov8n-face.pt")
+
+        # Face recognition bank
+        self.known_encodings = []
+        self.known_names = []
+        self._load_personnel()
 
         # TF2
         self.tf_buffer = tf2_ros.Buffer()
@@ -100,6 +124,70 @@ class FaceDetectorNode(Node):
 
         self.get_logger().info("Face detector initialized (PointCloud2 mode).")
 
+    def _load_personnel(self):
+        if not os.path.isdir(self.personnel_dir):
+            self.get_logger().error(
+                f"Personnel directory not found: {self.personnel_dir}"
+            )
+            return
+
+        for filename in sorted(os.listdir(self.personnel_dir)):
+            if not filename.lower().endswith(".png"):
+                continue
+
+            filepath = os.path.join(self.personnel_dir, filename)
+            name = parse_personnel_filename(filename)
+
+            try:
+                img = face_recognition.load_image_file(filepath)
+                encodings = face_recognition.face_encodings(img)
+                if encodings:
+                    self.known_encodings.append(encodings[0])
+                    self.known_names.append(name)
+                    self.get_logger().info(f"Loaded personnel:  <{name}>")
+                else:
+                    self.get_logger().warn(f"No face found in {filename}")
+            except Exception as e:
+                self.get_logger().error(f"Failed to load {filename}: {e}")
+
+    def _recognize_face(self, face_crop) -> str:
+        """Run face recognition on a BGR image crop. Returns 'Unknown' or name."""
+        if face_crop.size == 0 or not self.known_encodings:
+            return "Unknown"
+
+        try:
+            # Convert BGR to RGB
+            face_crop_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+            ch, cw = face_crop_rgb.shape[:2]
+
+            # Use whole crop as the face location (top, right, bottom, left)
+            face_locs = [(0, cw, ch, 0)]
+            encodings = face_recognition.face_encodings(
+                face_crop_rgb, known_face_locations=face_locs
+            )
+
+            if not encodings:
+                return "Unknown"
+
+            matches = face_recognition.compare_faces(
+                self.known_encodings,
+                encodings[0],
+                tolerance=self.recognition_tolerance,
+            )
+
+            if True in matches:
+                # Use distance to find the best match among confirmed candidates
+                distances = face_recognition.face_distance(
+                    self.known_encodings, encodings[0]
+                )
+                best_idx = np.argmin(distances)
+                if matches[best_idx]:
+                    return self.known_names[best_idx]
+        except Exception as e:
+            self.get_logger().error(f"Face recognition error: {e}")
+
+        return "Unknown"
+
     # ------------------------------------------------------------------
     # Synced RGB + PointCloud2 callback
     # ------------------------------------------------------------------
@@ -119,7 +207,7 @@ class FaceDetectorNode(Node):
             return
 
         h, w = cv_image.shape[:2]
-
+        self.model.embed
         # Run YOLO
         results = self.model.predict(
             cv_image,
@@ -185,11 +273,15 @@ class FaceDetectorNode(Node):
                     centroid, normal, tf_stamped
                 )
 
+                # Face Recognition
+                face_crop = cv_image[ry1:ry2, rx1:rx2]
+                person_name = self._recognize_face(face_crop)
+
                 cam_dist = float(np.linalg.norm(centroid))
 
                 # Feed to tracker
                 status, track = self.track_manager.add_observation(
-                    map_point, map_normal, cam_dist, rgb_msg.header.stamp
+                    map_point, map_normal, cam_dist, rgb_msg.header.stamp,label=person_name,
                 )
 
                 if status == "confirmed":
@@ -233,6 +325,7 @@ class FaceDetectorNode(Node):
 
     def _publish_detection(self, track, stamp):
         pos, normal = self.track_manager.get_best_estimate(track)
+        label = track.get("label", "Unknown")
 
         # Shift the published position to the left (relative to surface normal).
         # Normal points AWAY from the surface. Vector to the left is (ny, -nx).
@@ -241,13 +334,13 @@ class FaceDetectorNode(Node):
         pos[1] += -nx * self.lateral_offset
 
         self.get_logger().info(
-            f"Face #{track['id']} at "
+            f"Face #{track['id']} ({label}) at "
             f"({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
         )
 
         # PoseStamped: position + normal encoded as orientation
         pose = PoseStamped()
-        pose.header.frame_id = f"map|{track['id']}"
+        pose.header.frame_id = f"map|{label}"
         pose.header.stamp = stamp
         pose.pose.position.x = float(pos[0])
         pose.pose.position.y = float(pos[1])
@@ -301,13 +394,21 @@ class FaceDetectorNode(Node):
             t.id = i
             t.type = Marker.TEXT_VIEW_FACING
             t.action = Marker.ADD
-            t.pose.position.x = float(pos[0])
+            t.pose.position.x = float(pos[0]) + 0.3
             t.pose.position.y = float(pos[1])
             t.pose.position.z = float(pos[2]) + 0.2
             t.pose.orientation.w = 1.0
-            t.scale.z = 0.12
-            t.color.r = t.color.g = t.color.b = t.color.a = 1.0
-            t.text = f"Face {track['id']}"
+
+            t.scale.x = t.scale.y = t.scale.z = 0.12
+            
+            # 2. MAKE IT YELLOW: Red + Green light (Full opacity alpha)
+            t.color.r = 0.0
+            t.color.g = 1.0
+            t.color.b = 0.0
+            t.color.a = 1.0
+
+            label = track.get("label", "Unknown")
+            t.text = f"{label} (ID: {track['id']})"
             t.lifetime.sec = 0
             markers.append(t)
 
