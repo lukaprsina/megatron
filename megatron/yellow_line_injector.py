@@ -11,8 +11,6 @@ cmd_vel fight.
 Active in PATROL / APPROACH_TARGET / INTERACT states only.
 """
 
-from typing import cast
-
 import numpy as np
 import rclpy
 import rclpy.time
@@ -56,8 +54,6 @@ class YellowLineInjector(Node):
     def __init__(self):
         super().__init__("yellow_line_injector")
 
-        self.declare_parameter("min_depth", 0.5)  # metres
-        self.declare_parameter("max_depth", 6.0)  # metres
         self.declare_parameter("min_points", 20)  # reject sparse noise
 
         self._active = False
@@ -90,30 +86,17 @@ class YellowLineInjector(Node):
 
         pts = np.frombuffer(msg.data, dtype=_CLOUD_DTYPE)
 
-        # Keep only points in a sane depth range
-        z = pts["z"]
-        min_d = cast(float, self.get_parameter("min_depth").value)
-        max_d = cast(float, self.get_parameter("max_depth").value)
-        valid = np.isfinite(z) & (z > min_d) & (z < max_d)
-        if not np.any(valid):
-            return
-
-        pts_v = pts[valid]
-
         # Unpack RGB from little-endian uint32 (0x00RRGGBB)
-        rgb = pts_v["rgb"]
+        rgb = pts["rgb"]
         r = ((rgb >> 16) & 0xFF).astype(np.float32)
         g = ((rgb >> 8) & 0xFF).astype(np.float32)
         b = (rgb & 0xFF).astype(np.float32)
 
-        yellow = _is_yellow(r, g, b)
-        if int(np.sum(yellow)) < cast(int, self.get_parameter("min_points").value):
+        mask = _is_yellow(r, g, b) & np.isfinite(pts["z"])
+        if int(mask.sum()) < int(self.get_parameter("min_points").value):
             return
 
-        xyz = np.stack(
-            [pts_v["x"][yellow], pts_v["y"][yellow], pts_v["z"][yellow]],
-            axis=1,
-        )
+        xyz = np.stack([pts["x"][mask], pts["y"][mask], pts["z"][mask]], axis=1)
 
         try:
             tf = self.tf_buffer.lookup_transform(
@@ -130,13 +113,8 @@ class YellowLineInjector(Node):
             return
 
         R = quaternion_to_rotation_matrix(tf.transform.rotation)
-        T = np.array(
-            [
-                tf.transform.translation.x,
-                tf.transform.translation.y,
-                tf.transform.translation.z,
-            ]
-        )
+        t = tf.transform.translation
+        T = np.array([t.x, t.y, t.z])
         xyz_map = (R @ xyz.T).T + T
 
         header = Header()

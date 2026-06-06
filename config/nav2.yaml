@@ -92,6 +92,7 @@ local_costmap:
         yellow_line_source:
           topic: /yellow_line_cloud
           data_type: PointCloud2
+          sensor_frame: top_camera_rgb_camera_optical_frame
           marking: true
           clearing: true
           min_obstacle_height: -0.1
