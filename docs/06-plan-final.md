@@ -649,8 +649,8 @@ SPHERE (intersection point), ARROW (repulsive direction), TEXT_VIEW_FACING
 
 ### Phase 3 — Room 1 completion
 
-- [ ] `face_detector.py`: load personnel photos, precompute encodings, run every 5th hit, update label
-- [ ] `qr_reader.py`: OAK-D forward camera, dual-engine (WeChatQR + cv2), mode via `/robot_state`, publish `/qr_task`
+- [x] `face_detector.py`: load personnel photos, precompute encodings, run every 5th hit, update label
+- [x] `qr_reader.py`: OAK-D forward camera, dual-engine (WeChatQR + cv2), mode via `/robot_state`, publish `/qr_task`
 - [ ] `task2_controller.py`: INTERACT state — face (QR wait + task assignment + speech) + barrel (/spill_check + speech)
 - [ ] `blue_line_follower.py`: HSL blue mask, centroid P-controller, EMA smoothing, edge-detect `/robot_state`
 
