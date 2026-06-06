@@ -100,6 +100,14 @@ def generate_launch_description():
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
     )
 
+    qr_reader = Node(
+        package="megatron",
+        executable="qr_reader",
+        name="qr_reader",
+        output="screen",
+        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+    )
+
     arm_mover = Node(
         package="dis_tutorial7",
         executable="arm_mover_actions.py",
@@ -124,7 +132,7 @@ def generate_launch_description():
             {
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
                 "waypoints_file": PathJoinSubstitution(
-                    [pkg_megatron, "waypoints", "task2-first.yaml"]
+                    [pkg_megatron, "waypoints", "empty.yaml"]
                 ),
                 "manual_mode": LaunchConfiguration("manual_mode"),
             }
@@ -175,8 +183,9 @@ def generate_launch_description():
     ld.add_action(cylinder_segmentation)
     ld.add_action(face_detector)
     ld.add_action(ring_detector)
+    ld.add_action(qr_reader)
     ld.add_action(arm_mover)
-    ld.add_action(yellow_avoider)
+    #ld.add_action(yellow_avoider)
     ld.add_action(cylinder_detector)
     ld.add_action(workstation_detector)
     ld.add_action(controller)

@@ -16,7 +16,7 @@ import numpy as np
 import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist, Point
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
@@ -29,6 +29,7 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
+
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
@@ -171,7 +172,7 @@ class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.8  # metres — two detections within this are the same object
     MAX_RETRY_CYCLES = (
-        3  # bump distance up to 3× approach_retry_offset before giving up
+        20  # bump distance up to 3× approach_retry_offset before giving up
     )
 
     def __init__(self):
@@ -179,10 +180,10 @@ class Task2Controller(Node):
 
         # --- Parameters ---
         self.declare_parameter("waypoints_file", "waypoints/task.yaml")
-        self.declare_parameter("face_approach_distance", 0.55)
-        self.declare_parameter("barrel_approach_distance", 0.80)
+        self.declare_parameter("face_approach_distance", 0.50)
+        self.declare_parameter("barrel_approach_distance", 0.60)
         self.declare_parameter("barrel_lateral_offset", 0.30)
-        self.declare_parameter("approach_retry_offset", 0.25)
+        self.declare_parameter("approach_retry_offset", 0.20)
         self.declare_parameter("manual_mode", False)
 
         wp_file = cast(str, self.get_parameter("waypoints_file").value)
@@ -263,6 +264,7 @@ class Task2Controller(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel_unstamped", 10)
         self.arm_pub = self.create_publisher(String, "/arm_command", 10)
         self.goal_marker_pub = self.create_publisher(MarkerArray, "/goal_markers", 10)
+        self.approaching_object_pub = self.create_publisher(Marker, "/approaching_object", 10)
 
         # --- Subscribers ---
         self.create_subscription(
@@ -511,7 +513,7 @@ class Task2Controller(Node):
 
         if self.waypoint_index >= len(self.waypoints):
             self.get_logger().info("Patrol loop complete.")
-            self._on_patrol_complete()
+            # self._on_patrol_complete()
             return
 
         self._send_next_waypoint()
@@ -530,7 +532,7 @@ class Task2Controller(Node):
                 self.get_logger().warn(
                     f"Workstation '{color}' pose not known — skipping inspection."
                 )
-        self._transition(State.FOLLOW_BLUE_LINE)
+        # self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── APPROACH_TARGET ───────────────────────────────────────────────
 
@@ -541,6 +543,7 @@ class Task2Controller(Node):
             return
 
         if self._nav_succeeded():
+            self._publish_approaching_object(0.0, 0.0, none=True)
             self._transition(State.INTERACT)
             self._start_interact()
             return
@@ -564,6 +567,7 @@ class Task2Controller(Node):
         Returns True if a nav goal was sent, False if all candidates at all
         retry distances have been exhausted.
         """
+
         _type = target["type"]
         if _type == "face":
             n_candidates = 8
@@ -583,8 +587,8 @@ class Task2Controller(Node):
                 return self._barrel_approach_candidates(target, distance=d)
 
         retry_offset = cast(float, self.get_parameter("approach_retry_offset").value)
+        total = self.MAX_RETRY_CYCLES* n_candidates
         remaining_cycles = self.MAX_RETRY_CYCLES - (attempt // n_candidates)
-
         while remaining_cycles > 0:
             cycle = attempt // n_candidates
             distance = base_dist + retry_offset * cycle
@@ -593,6 +597,9 @@ class Task2Controller(Node):
 
             while idx < len(candidates):
                 ax, ay, yaw = candidates[idx]
+                self._publish_approaching_object(
+                    ax, ay, yaw, attempt, total=total
+                )
                 if self._cost_at_goal_ok(ax, ay):
                     self._send_nav_goal(ax, ay, yaw)
                     self._approach_attempt = attempt  # sync for next abort
@@ -615,23 +622,35 @@ class Task2Controller(Node):
         nx, ny = normal
         base = math.atan2(ny, nx)
         px, py = float(pos[0]), float(pos[1])
-        offsets = [
+        def f(x):
+            return (x**2)/25**2
+        # degrees = [val for i in range(0,30,5) for val in (i, -i)]
+        degrees = [
             0,
-            math.pi / 4,
-            -math.pi / 4,
-            math.pi / 2,
-            -math.pi / 2,
-            3 * math.pi / 4,
-            -3 * math.pi / 4,
-            math.pi,
-        ]
+            2,           -2,
+            3,           -3,
+            5,           -5,
+            7,           -7,
+            9,           -9,
+            10,          -10,
+            15,          -15,
+            #20,          -20,
+            #25,          -25,
+            #30,          -30,
+            #35,          -35,
+            #40,          -40,
+            #50,          -50,
+            #60,          -60,
+            #70,          -70,
+            ]
+        offsets = [math.radians(d) for d in degrees]
         return [
             (
-                px + math.cos(base + o) * dist,
-                py + math.sin(base + o) * dist,
+                px + math.cos(base + o) * dist*f(degrees[i]),
+                py + math.sin(base + o) * dist*f(degrees[i]),
                 math.atan2(-math.sin(base + o), -math.cos(base + o)),
             )
-            for o in offsets
+            for i, o in enumerate(offsets)
         ]
 
     def _barrel_approach_candidates(self, target: dict, distance=None):
@@ -708,6 +727,7 @@ class Task2Controller(Node):
                 self.speaker.speak("Alert! Alert! This barrel is leaking!")
             else:
                 self.speaker.speak("Barrel OK.")
+
             self.barrel_report.append(
                 {
                     "id": len(self.barrel_report) + 1,
@@ -730,9 +750,10 @@ class Task2Controller(Node):
             return  # handled fully in _start_interact
 
         # Face: wait for QR
-        if self._qr_task_raw is None:
+        if self._qr_task_raw is None or self._qr_task_raw == "": # if qr_task is not seen it is failed 
+            self.get_logger().info("Waitting for qr task")
             return
-
+        
         task_token = _parse_qr_task(self._qr_task_raw)
         self._qr_task_raw = None
 
@@ -978,6 +999,88 @@ class Task2Controller(Node):
             GoalStatus.STATUS_ABORTED,
             GoalStatus.STATUS_CANCELED,
         )
+
+    # ── Costmap check ──────────────────────────────────────────────────
+    def _publish_approaching_object(
+        self, ax, ay, yaw=None, attempt=0, total=8, none=False
+    ):
+        """
+        Publish an approach marker at the current Nav2 approach goal position.
+
+        ax, ay  — goal position in map frame
+        yaw     — if provided, orient the small arrow using this heading
+        attempt — 0-indexed candidate number being tried (shown in label)
+        total   — total candidates available (shown in label)
+        none    — if True, delete both markers
+        """
+        now = self.get_clock().now().to_msg()
+
+        if none:
+            for mid in (0, 1):
+                m = Marker()
+                m.header.frame_id = "map"
+                m.header.stamp = now
+                m.ns = "approaching_object"
+                m.id = mid
+                m.action = Marker.DELETE
+                self.approaching_object_pub.publish(m)
+            return
+
+        if yaw is not None:
+            # Small arrow centered on the goal and oriented by yaw.
+            arrow = Marker()
+            arrow.header.frame_id = "map"
+            arrow.header.stamp = now
+            arrow.ns = "approaching_object"
+            arrow.id = 0
+            arrow.type = Marker.ARROW
+            arrow.action = Marker.ADD
+            arrow.pose.position.x = float(ax)
+            arrow.pose.position.y = float(ay)
+            arrow.pose.position.z = 0.12
+            q = quaternion_from_euler(0.0, 0.0, float(yaw))
+            arrow.pose.orientation.x = q[0]
+            arrow.pose.orientation.y = q[1]
+            arrow.pose.orientation.z = q[2]
+            arrow.pose.orientation.w = q[3]
+            arrow.scale.x = 0.18
+            arrow.scale.y = 0.05
+            arrow.scale.z = 0.05
+            arrow.color.r = 1.0
+            arrow.color.g = 0.55
+            arrow.color.b = 0.0
+            arrow.color.a = 1.0
+            arrow.lifetime.sec = 0
+            self.approaching_object_pub.publish(arrow)
+        else:
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = now
+            m.ns = "approaching_object"
+            m.id = 0
+            m.action = Marker.DELETE
+            self.approaching_object_pub.publish(m)
+
+        # Text label above the arrow
+        label = Marker()
+        label.header.frame_id = "map"
+        label.header.stamp = now
+        label.ns = "approaching_object"
+        label.id = 1
+        label.type = Marker.TEXT_VIEW_FACING
+        label.action = Marker.ADD
+        label.pose.position.x = float(ax)
+        label.pose.position.y = float(ay)
+        label.pose.position.z = 1.05
+        label.pose.orientation.w = 1.0
+        label.scale.z = 0.15
+        label.color.r = 1.0
+        label.color.g = 0.55
+        label.color.b = 0.0
+        label.color.a = 1.0
+        label.text = f"GOAL {attempt + 1}/{total}"
+        label.lifetime.sec = 0
+        self.approaching_object_pub.publish(label)
 
     # ── Costmap check ──────────────────────────────────────────────────
 
