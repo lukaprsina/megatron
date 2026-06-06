@@ -473,7 +473,7 @@ class Task2Controller(Node):
             self._handle_patrol()
         elif self.state == State.APPROACH_TARGET:
             self._handle_approach()
-            self._publish_approach_state()
+            # self._publish_approach_state()
         elif self.state == State.INTERACT:
             self._handle_interact()
         elif self.state == State.INSPECT_WORKSTATION:
@@ -725,11 +725,11 @@ class Task2Controller(Node):
         perp_x, perp_y = -math.sin(ax_yaw), math.cos(ax_yaw)
         if self.current_pose is not None:
             rx, ry = self.current_pose.position.x, self.current_pose.position.y
-            if (px - rx) * perp_x + (py - ry) * perp_y < 0:
+            if (ry - px) * perp_x + (ry - py) * perp_y < 0:
                 perp_x, perp_y = -perp_x, -perp_y
         # Lateral shift to robot-right (cross product of approach direction and Z-up)
-        right_x = perp_y  # rotate approach 90° CW in XY
-        right_y = -perp_x
+        right_x = -perp_y  # rotate approach 90° CW in XY
+        right_y = perp_x
         approach_x = px + perp_x * dist + right_x * lateral
         approach_y = py + perp_y * dist + right_y * lateral
         yaw = math.atan2(-perp_y, -perp_x)
