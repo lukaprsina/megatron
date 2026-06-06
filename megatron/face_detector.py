@@ -206,7 +206,9 @@ class FaceDetectorNode(Node):
                         or np.linalg.norm(pos - last_pos) > 0.05
                         or update_count >= 5
                     ):
+                        self.get_logger().info("approaching face update")
                         self._publish_detection(track, rgb_msg.header.stamp)
+
                         track["_last_published_pos"] = pos.copy()
                         track["_update_count_since_publish"] = 0
                     else:
@@ -239,13 +241,13 @@ class FaceDetectorNode(Node):
         pos[1] += -nx * self.lateral_offset
 
         self.get_logger().info(
-            f"Face #{track['id']} confirmed at "
+            f"Face #{track['id']} at "
             f"({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
         )
 
         # PoseStamped: position + normal encoded as orientation
         pose = PoseStamped()
-        pose.header.frame_id = "map"
+        pose.header.frame_id = f"map|{track['id']}"
         pose.header.stamp = stamp
         pose.pose.position.x = float(pos[0])
         pose.pose.position.y = float(pos[1])
