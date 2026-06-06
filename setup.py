@@ -50,6 +50,7 @@ setup(
             "workstation_detector = megatron.workstation_detector:main",
             "perception_visualizer = megatron.perception_visualizer:main",
             "save_image_topic = megatron.save_image_topic:main",
+            "arm_mover = megatron.arm_mover_actions:main",
         ],
     },
 )

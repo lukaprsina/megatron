@@ -101,8 +101,8 @@ def generate_launch_description():
     )
 
     arm_mover = Node(
-        package="dis_tutorial7",
-        executable="arm_mover_actions.py",
+        package="megatron",
+        executable="arm_mover",
         name="arm_mover",
         output="screen",
     )
