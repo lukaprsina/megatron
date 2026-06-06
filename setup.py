@@ -45,6 +45,7 @@ setup(
             "task2_controller = megatron.task2_controller:main",
             "yellow_avoider = megatron.yellow_avoider:main",
             "yellow_avoider2 = megatron.yellow_avoider2:main",
+            "yellow_line_injector = megatron.yellow_line_injector:main",
             "cylinder_detector = megatron.cylinder_detector:main",
             "workstation_detector = megatron.workstation_detector:main",
             "perception_visualizer = megatron.perception_visualizer:main",

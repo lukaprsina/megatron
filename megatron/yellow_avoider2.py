@@ -268,6 +268,7 @@ class YellowAvoider2(Node):
         # Threat is active — reset clear counter
         self._clear_ticks = 0
 
+        assert line_result is not None
         vx, vy, x0, y0, v_cross, x_bottom = line_result
         remaining = h - v_cross
 

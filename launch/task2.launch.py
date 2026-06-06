@@ -133,8 +133,8 @@ def generate_launch_description():
 
     yellow_avoider = Node(
         package="megatron",
-        executable="yellow_avoider2",
-        name="yellow_avoider2",
+        executable="yellow_line_injector",
+        name="yellow_line_injector",
         output="screen",
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
     )
