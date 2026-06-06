@@ -55,6 +55,13 @@ def generate_launch_description():
             choices=["true", "false"],
             description="Perception-only teleop mode (no autonomous patrol)",
         ),
+        DeclareLaunchArgument(
+            "personnel_dir",
+            default_value=PathJoinSubstitution(
+                [pkg_megatron, "personnel"]
+            ),
+            description="Directory containing personnel face images for recognition",
+        ),
     ]
 
     sim_arm_nav = IncludeLaunchDescription(
@@ -89,7 +96,12 @@ def generate_launch_description():
         executable="face_detector",
         name="face_detector",
         output="screen",
-        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+        parameters=[
+            {
+            "use_sim_time": LaunchConfiguration("use_sim_time"),
+            "personnel_dir": LaunchConfiguration("personnel_dir")
+            }
+        ],
     )
 
     ring_detector = Node(

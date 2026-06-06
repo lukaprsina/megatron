@@ -25,6 +25,10 @@ setup(
             os.path.join("share", package_name, "waypoints"),
             glob(os.path.join("waypoints", "*")),
         ),
+        (
+            os.path.join("share", package_name, "personnel"),
+            glob(os.path.join("personnel", "*")),
+        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
