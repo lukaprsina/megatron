@@ -29,7 +29,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2_lib
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 
 from megatron.perception_utils import quaternion_to_rotation_matrix
 
@@ -195,6 +195,9 @@ class CylinderDetector(Node):
         self.detected_pub = self.create_publisher(
             PoseStamped, "/detected_cylinders", 10
         )
+        self.marker_array_pub = self.create_publisher(
+            MarkerArray, "/detected_barrels_markers", 10
+        )
         self.create_service(Trigger, "/spill_check", self._spill_check_cb)
 
         self.clusters: list[Cluster] = []
@@ -249,6 +252,7 @@ class CylinderDetector(Node):
             if just_confirmed:
                 best.confirmed = True
                 self._suppress_duplicates(best)
+                self._publish_marker_array()
             cx, cy, cz = best.robust_centroid
             # Only update centroid from confirmed clusters so /spill_check always
             # targets a barrel the robot has committed to, not a stray marker update.
@@ -296,7 +300,78 @@ class CylinderDetector(Node):
         msg.pose.orientation.w = 1.0  # identity — axis yaw not encoded (see plan §J)
         self.detected_pub.publish(msg)
 
+    def _create_marker(self, cluster: Cluster) -> Marker:
+        cx, cy, cz = cluster.robust_centroid
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "barrels"
+        marker.id = cluster.cluster_id
+        marker.type = Marker.CYLINDER
+        marker.action = Marker.ADD
+        marker.pose.position.x = cx
+        marker.pose.position.y = cy
+        marker.pose.position.z = cz
+        marker.pose.orientation.w = 1.0
+
+        if cluster.best_orientation == "horizontal":
+            marker.scale.x = 0.2
+            marker.scale.y = 0.4
+            marker.scale.z = 0.2
+        else:
+            marker.scale.x = 0.2
+            marker.scale.y = 0.2
+            marker.scale.z = 0.4
+
+        color_map = {
+            "red": (1.0, 0.0, 0.0),
+            "green": (0.0, 1.0, 0.0),
+            "blue": (0.0, 0.0, 1.0),
+            "yellow": (1.0, 1.0, 0.0),
+            "orange": (1.0, 0.5, 0.0),
+            "purple": (0.5, 0.0, 0.5),
+            "brown": (0.6, 0.3, 0.3),
+            "black": (0.2, 0.2, 0.2),
+        }
+        r, g, b = color_map.get(cluster.best_colour, (0.7, 0.7, 0.7))
+        marker.color.r = float(r)
+        marker.color.g = float(g)
+        marker.color.b = float(b)
+        marker.color.a = 0.8
+        return marker
+
+    def _create_text_marker(self, cluster: Cluster) -> Marker:
+        cx, cy, cz = cluster.robust_centroid
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "orientation_labels"
+        marker.id = cluster.cluster_id
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.pose.position.x = cx
+        marker.pose.position.y = cy
+        marker.pose.position.z = cz + 0.3  # Float above the barrel
+        marker.pose.orientation.w = 1.0
+        marker.scale.z = 0.2  # Text height
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 1.0
+        marker.color.a = 1.0
+        marker.text = "H" if cluster.best_orientation == "horizontal" else "V"
+        return marker
+
+    def _publish_marker_array(self):
+        msg = MarkerArray()
+        for c in self.clusters:
+            if c.confirmed and not c.suppressed:
+                msg.markers.append(self._create_marker(c))
+                msg.markers.append(self._create_text_marker(c))
+        if msg.markers:
+            self.marker_array_pub.publish(msg)
+
     def _republish_confirmed(self):
+        self._publish_marker_array()
         for c in self.clusters:
             if c.confirmed and not c.suppressed:
                 self._publish_pose(c)

@@ -826,7 +826,8 @@ Visualization Manager:
       Enabled: true
       Name: Face Markers
       Namespaces:
-        {}
+        face_labels: true
+        faces: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -902,7 +903,7 @@ Visualization Manager:
       Enabled: true
       Name: Approaching Object
       Namespaces:
-        {}
+        approaching_object: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -924,6 +925,19 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /yellow_line/debug_image
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Cylinder Markers
+      Namespaces:
+        barrels: true
+        orientation_labels: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /detected_barrels_markers
       Value: true
   Enabled: true
   Global Options:
@@ -972,11 +986,11 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 66.0102310180664
+      Scale: 114.50731658935547
       Target Frame: <Fixed Frame>
       Value: TopDownOrtho (rviz_default_plugins)
-      X: 0.20796693861484528
-      Y: -0.8122891187667847
+      X: 0.008346452377736568
+      Y: -1.9383478164672852
     Saved: ~
 Window Geometry:
   Displays:
