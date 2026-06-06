@@ -42,6 +42,7 @@ class FaceDetectorNode(Node):
         self.declare_parameter("min_inference_period", 0.2)
         self.declare_parameter("roi_shrink", 0.3)
         self.declare_parameter("track_max_age", 30.0)
+        self.declare_parameter("lateral_offset", 0.2)
 
         self.device = cast(str, self.get_parameter("device").value)
         self.confidence_threshold = cast(
@@ -56,6 +57,7 @@ class FaceDetectorNode(Node):
         )
         self.roi_shrink = cast(float, self.get_parameter("roi_shrink").value)
         self.track_max_age = cast(float, self.get_parameter("track_max_age").value)
+        self.lateral_offset = cast(float, self.get_parameter("lateral_offset").value)
 
         self.bridge = CvBridge()
         self.model = YOLO("yolov8n-face.pt")
@@ -230,6 +232,12 @@ class FaceDetectorNode(Node):
     def _publish_detection(self, track, stamp):
         pos, normal = self.track_manager.get_best_estimate(track)
 
+        # Shift the published position to the left (relative to surface normal).
+        # Normal points AWAY from the surface. Vector to the left is (ny, -nx).
+        nx, ny = normal[0], normal[1]
+        pos[0] += ny * self.lateral_offset
+        pos[1] += -nx * self.lateral_offset
+
         self.get_logger().info(
             f"Face #{track['id']} confirmed at "
             f"({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
@@ -257,7 +265,13 @@ class FaceDetectorNode(Node):
         marker_array = MarkerArray()
         markers = []
         for track in self.track_manager.get_confirmed_tracks():
-            pos, _ = self.track_manager.get_best_estimate(track)
+            pos, normal = self.track_manager.get_best_estimate(track)
+            
+            # Shift markers to match the published (shifted) position
+            nx, ny = normal[0], normal[1]
+            pos[0] += ny * self.lateral_offset
+            pos[1] += -nx * self.lateral_offset
+            
             i = track["id"] - 1
 
             # Sphere

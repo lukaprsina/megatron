@@ -579,9 +579,7 @@ class Task2Controller(Node):
                 )
         else:
             n_candidates = 1
-            base_dist = cast(
-                float, self.get_parameter("barrel_approach_distance").value
-            )
+            base_dist = cast(float, self.get_parameter("barrel_approach_distance").value)
 
             def _gen(d):
                 return self._barrel_approach_candidates(target, distance=d)
