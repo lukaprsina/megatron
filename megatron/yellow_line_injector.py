@@ -11,6 +11,8 @@ cmd_vel fight.
 Active in PATROL / APPROACH_TARGET / INTERACT states only.
 """
 
+from typing import cast
+
 import numpy as np
 import rclpy
 import rclpy.time
@@ -93,7 +95,7 @@ class YellowLineInjector(Node):
         b = (rgb & 0xFF).astype(np.float32)
 
         mask = _is_yellow(r, g, b) & np.isfinite(pts["z"])
-        if int(mask.sum()) < int(self.get_parameter("min_points").value):
+        if int(mask.sum()) < cast(int, self.get_parameter("min_points").value):
             return
 
         xyz = np.stack([pts["x"][mask], pts["y"][mask], pts["z"][mask]], axis=1)

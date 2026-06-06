@@ -5,9 +5,8 @@ yellow_avoider2.py.  Each test draws a synthetic yellow mask representing
 a specific camera-view scenario and asserts the output direction.
 """
 
-import numpy as np
 import cv2
-import pytest
+import numpy as np
 
 W, H = 320, 240  # camera resolution
 
