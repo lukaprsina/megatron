@@ -206,7 +206,9 @@ class FaceDetectorNode(Node):
                         or np.linalg.norm(pos - last_pos) > 0.05
                         or update_count >= 5
                     ):
+                        self.get_logger().info("approaching face update")
                         self._publish_detection(track, rgb_msg.header.stamp)
+
                         track["_last_published_pos"] = pos.copy()
                         track["_update_count_since_publish"] = 0
                     else:
@@ -217,7 +219,7 @@ class FaceDetectorNode(Node):
                 cy = (ry1 + ry2) // 2
                 cv2.circle(cv_image, (cx, cy), 4, (0, 0, 255), -1)
 
-        self.track_manager.prune_stale(self.track_max_age, rgb_msg.header.stamp)
+        # self.track_manager.prune_stale(self.track_max_age, rgb_msg.header.stamp)
 
         # Publish annotated image
         try:
@@ -239,13 +241,13 @@ class FaceDetectorNode(Node):
         pos[1] += -nx * self.lateral_offset
 
         self.get_logger().info(
-            f"Face #{track['id']} confirmed at "
+            f"Face #{track['id']} at "
             f"({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
         )
 
         # PoseStamped: position + normal encoded as orientation
         pose = PoseStamped()
-        pose.header.frame_id = "map"
+        pose.header.frame_id = f"map|{track['id']}"
         pose.header.stamp = stamp
         pose.pose.position.x = float(pos[0])
         pose.pose.position.y = float(pos[1])

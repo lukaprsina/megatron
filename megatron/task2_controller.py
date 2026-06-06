@@ -217,6 +217,7 @@ class Task2Controller(Node):
         self._nav_rejected = False  # True when server rejected the last goal
         self._last_feedback_distance: float | None = None
         self._last_feedback_time: float | None = None
+        self._nav_update = False # Turn when the navigation needs to be updated
 
         # --- Costmap ---
         self.costmap = None
@@ -314,26 +315,50 @@ class Task2Controller(Node):
         self.initial_pose_received = True
 
     def _face_cb(self, msg: PoseStamped):
+        parts = msg.header.frame_id.split("|")
+        id = parts[1] if len(parts) > 1 else "unknown"
         pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
         nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
         now = self.get_clock().now()
 
         for f in self.found_faces:
-            if np.linalg.norm(pos - f["pos"]) < self.DEDUP_DISTANCE:
-                f["pos"] = pos
-                f["normal"] = (nx, ny)
-                f["last_seen"] = now
-                if not f.get("approached", False) and self.state == State.PATROL:
-                    self._requeue_if_not_pending("face", f)
-                return
+            if f["id"] == id:  #face id found in found_faces
+                if (
+                    self.current_target is not None
+                    and self.current_target["type"] == "face"
+                    and self.current_target["id"] == id
+                ): # update approach goal
+                    self.get_logger().info("Seting up to recalculate approach")
+                    f["pos"] = pos
+                    f["normal"] = (nx, ny)
+                    f["last_seen"] = now
+
+                    self.current_target["pos"] = pos
+                    self.current_target["normal"] = (nx, ny)
+                    self.current_target["last_seen"] = now
+                    self._nav_update = True
+                    return 
+        
+                elif np.linalg.norm(pos - f["pos"]) < self.DEDUP_DISTANCE:
+                    self.get_logger().info(f"Requing face {f["id"]} since the new detected location is more far away")
+                    f["pos"] = pos
+                    f["normal"] = (nx, ny)
+                    f["last_seen"] = now
+                    if not f.get("approached", False) and self.state == State.PATROL:
+                        self._requeue_if_not_pending("face", f)
+                    return
+                else:
+                    return 
 
         self.get_logger().info(f"New face at ({pos[0]:.2f}, {pos[1]:.2f})")
         entry = {
+            "id": id,
             "type": "face",
             "pos": pos,
             "normal": (nx, ny),
             "label": None,
             "approached": False,
+            # "re_approach": True,
             "last_seen": now,
         }
         self.found_faces.append(entry)
@@ -552,9 +577,11 @@ class Task2Controller(Node):
             self._transition(State.INTERACT)
             self._start_interact()
             return
-
+        
         if self._nav_aborted():
             self._approach_attempt += 1
+        
+        if self._nav_update_target() or self._nav_aborted():
             if self.current_target is not None:
                 if not self._send_approach(self.current_target, self._approach_attempt):
                     self.get_logger().warn(
@@ -783,6 +810,7 @@ class Task2Controller(Node):
         self.current_target = None
 
     def _resume_patrol(self):
+        self.current_target = None
         self._transition(State.PATROL)
         self._send_next_waypoint()
 
@@ -941,6 +969,7 @@ class Task2Controller(Node):
         self.nav_in_flight = True
         self._nav_ever_sent = True
         self._nav_rejected = False
+        self._nav_update = False
         seq = self._nav_seq
         future = self.nav_client.send_goal_async(
             goal, feedback_callback=self._nav_feedback_cb
@@ -972,6 +1001,7 @@ class Task2Controller(Node):
         self.nav_result_future = None
         self.nav_in_flight = False
         self._nav_rejected = False
+        self._nav_update = False
         self._last_feedback_distance = None
         self._last_feedback_time = None
 
@@ -994,6 +1024,9 @@ class Task2Controller(Node):
             return False
         if self._nav_rejected:
             return True
+        if self._nav_update:
+            return True
+
         if self.nav_result_future is None:
             return False
         return self.nav_result_future.done()
@@ -1003,13 +1036,23 @@ class Task2Controller(Node):
             return False
         if self._nav_rejected:
             return False
+        if self._nav_update:
+            return False
         try:
             assert self.nav_result_future is not None
             result = self.nav_result_future.result()
         except Exception:
             return False
         return result is not None and result.status == GoalStatus.STATUS_SUCCEEDED
-
+    def _nav_update_target(self) -> bool:
+        if not self._is_nav_complete():
+            return False
+        if self._nav_rejected:
+            return False
+        if self._nav_update is True:
+            return True
+        return False
+    
     def _nav_aborted(self) -> bool:
         if not self._is_nav_complete():
             return False

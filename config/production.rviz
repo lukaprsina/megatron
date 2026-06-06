@@ -902,7 +902,7 @@ Visualization Manager:
       Enabled: true
       Name: Approaching Object
       Namespaces:
-        approaching_object: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile

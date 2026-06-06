@@ -361,12 +361,14 @@ class IncrementalTrackManager:
         ]
 
     def prune_stale(self, max_age_sec, now_stamp):
+        """Deprecated """
         """Remove tracks whose most recent observation is older than max_age_sec.
 
         Args:
             max_age_sec: age threshold in seconds
             now_stamp: current stamp as builtin_interfaces/Time or float seconds
         """
+        return
         if isinstance(now_stamp, (int, float)):
             now_sec = float(now_stamp)
         else:
