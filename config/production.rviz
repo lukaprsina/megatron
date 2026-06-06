@@ -9,7 +9,7 @@ Panels:
         - /MarkerArray1/Topic1
         - /Detected Faces1/Topic1
       Splitter Ratio: 0.5833333134651184
-    Tree Height: 600
+    Tree Height: 786
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -902,7 +902,7 @@ Visualization Manager:
       Enabled: true
       Name: Approaching Object
       Namespaces:
-        approaching_object: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -929,8 +929,7 @@ Visualization Manager:
       Enabled: true
       Name: Cylinder Markers
       Namespaces:
-        barrels: true
-        orientation_labels: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
