@@ -16,7 +16,12 @@ import numpy as np
 import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import (
+    PointStamped,
+    PoseStamped,
+    PoseWithCovarianceStamped,
+    Twist,
+)
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
@@ -31,6 +36,7 @@ from rclpy.qos import (
 )
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -260,12 +266,17 @@ class Task2Controller(Node):
         self.speaker = Speaker()
         self.speaker.set_node_logger(self)
 
+        # --- Spill check async state ---
+        self._spill_future = None
+        self._spill_start_time: float | None = None
+
         # --- Publishers ---
         self.robot_state_pub = self.create_publisher(
             String, "/robot_state", robot_state_qos
         )
         self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel_unstamped", 10)
         self.arm_pub = self.create_publisher(String, "/arm_command", 10)
+        self._spill_target_pub = self.create_publisher(PointStamped, "/spill_target", 1)
         self.goal_marker_pub = self.create_publisher(MarkerArray, "/goal_markers", 10)
         self.approaching_object_pub = self.create_publisher(Marker, "/approaching_object", 10)
 
@@ -297,6 +308,7 @@ class Task2Controller(Node):
 
         # --- Nav2 action client ---
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self._spill_check_client = self.create_client(Trigger, "/spill_check")
 
         # --- Nav2 lifecycle clients ---
         self._nav2_clients = {
@@ -751,8 +763,53 @@ class Task2Controller(Node):
 
         elif target["type"] == "barrel":
             self.speaker.speak("Inspecting barrel.")
-            # TODO Phase 3: call /spill_check service
+            self._spill_future = None
+            self._spill_start_time = None
+
+            if target.get("orientation") == "horizontal":
+                pt = PointStamped()
+                pt.header.frame_id = "map"
+                pt.header.stamp = self.get_clock().now().to_msg()
+                pos = target["pos"]
+                pt.point.x, pt.point.y, pt.point.z = float(pos[0]), float(pos[1]), float(pos[2])
+                self._spill_target_pub.publish(pt)
+
+                if self._spill_check_client.service_is_ready():
+                    self._spill_future = self._spill_check_client.call_async(Trigger.Request())
+                    self._spill_start_time = self.get_clock().now().nanoseconds * 1e-9
+                else:
+                    self.get_logger().warn("SpillCheck service not ready")
+
+    def _handle_interact(self):
+        target = self.current_target
+        if target is None:
+            self._resume_patrol()
+            return
+
+        if target["type"] == "barrel":
+            orientation = target.get("orientation", "unknown")
             leaking = False
+            spill_count = 0
+
+            if orientation == "horizontal" and self._spill_future is not None:
+                now = self.get_clock().now().nanoseconds * 1e-9
+                elapsed = now - (self._spill_start_time or now)
+                if not self._spill_future.done() and elapsed < 5.0:
+                    return  # still waiting
+                try:
+                    resp = self._spill_future.result()
+                    if resp is not None and resp.success:
+                        leaking = "LEAK" in resp.message
+                        try:
+                            spill_count = int(resp.message.split("count=")[1].split()[0])
+                        except (IndexError, ValueError):
+                            pass
+                    elif resp is not None:
+                        self.get_logger().warn(f"SpillCheck error: {resp.message}")
+                except Exception as e:
+                    self.get_logger().warn(f"SpillCheck failed: {e}")
+            # vertical barrels and error cases fall through with leaking=False
+
             if leaking:
                 self.speaker.speak("Alert! Alert! This barrel is leaking!")
             else:
@@ -762,22 +819,16 @@ class Task2Controller(Node):
                 {
                     "id": len(self.barrel_report) + 1,
                     "color": target.get("color", "unknown"),
-                    "orientation": target.get("orientation", "unknown"),
+                    "orientation": orientation,
                     "leaking": leaking,
+                    "spill_count": spill_count,
+                    "spill_threshold": 4000,
                     "pos": target["pos"].tolist(),
                 }
             )
             self._mark_approached(target)
             self._resume_patrol()
-
-    def _handle_interact(self):
-        target = self.current_target
-        if target is None:
-            self._resume_patrol()
             return
-
-        if target["type"] == "barrel":
-            return  # handled fully in _start_interact
 
         # Face: wait for QR
         if self._qr_task_raw is None or self._qr_task_raw == "": # if qr_task is not seen it is failed 

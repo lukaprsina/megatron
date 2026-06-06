@@ -21,7 +21,7 @@ import numpy as np
 import rclpy
 import rclpy.time
 import tf2_ros
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
@@ -199,12 +199,12 @@ class CylinderDetector(Node):
             MarkerArray, "/detected_barrels_markers", 10
         )
         self.create_service(Trigger, "/spill_check", self._spill_check_cb)
+        self.create_subscription(PointStamped, "/spill_target", self._spill_target_cb, 10)
 
         self.clusters: list[Cluster] = []
         self.cluster_id_counter: int = 0
         self._latest_pc2: PointCloud2 | None = None
-        # Centroid of the most recently observed (or confirmed) cluster — used by spill_check
-        self._latest_centroid: np.ndarray | None = None
+        self._spill_target: np.ndarray | None = None
         self.robot_state: str = "INIT"
 
         self.create_timer(3.0, self._republish_confirmed)
@@ -214,6 +214,9 @@ class CylinderDetector(Node):
 
     def _state_cb(self, msg: String):
         self.robot_state = msg.data
+
+    def _spill_target_cb(self, msg: PointStamped):
+        self._spill_target = np.array([msg.point.x, msg.point.y, msg.point.z])
 
     def _pc2_cb(self, msg: PointCloud2):
         self._latest_pc2 = msg
@@ -254,9 +257,6 @@ class CylinderDetector(Node):
                 self._suppress_duplicates(best)
                 self._publish_marker_array()
             cx, cy, cz = best.robust_centroid
-            # Only update centroid from confirmed clusters so /spill_check always
-            # targets a barrel the robot has committed to, not a stray marker update.
-            self._latest_centroid = np.array([cx, cy, cz])
             if just_confirmed:
                 self.get_logger().info(
                     f"Barrel confirmed: {best.best_colour}/{best.best_orientation} "
@@ -379,12 +379,12 @@ class CylinderDetector(Node):
     # ── /spill_check service ──────────────────────────────────────────────────
 
     def _spill_check_cb(self, _request, response: Trigger.Response):
-        centroid = self._latest_centroid
+        centroid = self._spill_target
         pc2 = self._latest_pc2
 
         if centroid is None:
             response.success = False
-            response.message = "no barrel centroid available"
+            response.message = "no spill target set"
             return response
         if pc2 is None:
             response.success = False
