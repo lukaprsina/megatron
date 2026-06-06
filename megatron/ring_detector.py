@@ -711,7 +711,7 @@ class RingDetectorNode(Node):
         # Publish debug 4 — color
         self._publish_debug(self.debug_color_pub, debug_color_img)
 
-        self.track_manager.prune_stale(self.track_max_age, rgb_msg.header.stamp)
+        # self.track_manager.prune_stale(self.track_max_age, rgb_msg.header.stamp)
 
         # Publish main detections image
         try:

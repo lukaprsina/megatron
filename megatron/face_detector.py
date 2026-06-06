@@ -219,7 +219,7 @@ class FaceDetectorNode(Node):
                 cy = (ry1 + ry2) // 2
                 cv2.circle(cv_image, (cx, cy), 4, (0, 0, 255), -1)
 
-        self.track_manager.prune_stale(self.track_max_age, rgb_msg.header.stamp)
+        # self.track_manager.prune_stale(self.track_max_age, rgb_msg.header.stamp)
 
         # Publish annotated image
         try:
