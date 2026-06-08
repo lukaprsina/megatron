@@ -175,7 +175,7 @@ def _parse_qr_task(text: str) -> str | None:
 
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
-    DEDUP_DISTANCE = 0.8  # metres — two detections within this are the same object
+    DEDUP_DISTANCE = 0.01  # metres — two detections within this are the same object
     MAX_RETRY_CYCLES = (
         20  # bump distance up to 3× approach_retry_offset before giving up
     )
@@ -305,7 +305,6 @@ class Task2Controller(Node):
         self.create_subscription(
             OccupancyGrid, "/global_costmap/costmap", self._costmap_cb, costmap_qos
         )
-
         # --- Nav2 action client ---
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self._spill_check_client = self.create_client(Trigger, "/spill_check")
@@ -377,6 +376,7 @@ class Task2Controller(Node):
         }
         self.found_faces.append(entry)
         if self.state == State.PATROL:
+            self.get_logger().info(f"New face {label}(ID:{id}) added to pending")
             self.pending_targets.append(dict(entry))
 
     def _ring_cb(self, msg: PoseStamped):
@@ -587,6 +587,7 @@ class Task2Controller(Node):
             return
 
         if self._nav_succeeded():
+            self.get_logger().info("DEBUG!! NAV SUCCEDED ")
             self._publish_approaching_object(0.0, 0.0, none=True)
             self._transition(State.INTERACT)
             self._start_interact()
@@ -1007,7 +1008,7 @@ class Task2Controller(Node):
         if not self.nav_client.wait_for_server(timeout_sec=0.5):
             self.get_logger().warn("Nav2 server not available.")
             return False
-
+        
         goal = NavigateToPose.Goal()
         goal.pose.header.frame_id = "map"
         goal.pose.header.stamp = self.get_clock().now().to_msg()
@@ -1214,8 +1215,9 @@ class Task2Controller(Node):
             return False
         cost = self.costmap.data[my * w + mx]
         if cost >= 50 or cost < 0:
+            c_type = self.current_target["type"] if self.current_target is not None else "NONE"
             self.get_logger().warn(
-                f"Approach ({x:.2f}, {y:.2f}) blocked (cost={cost})."
+                f"Approach {c_type}({x:.2f}, {y:.2f}) blocked (cost={cost})."
             )
             return False
         return True
