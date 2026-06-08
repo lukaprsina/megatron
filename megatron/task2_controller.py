@@ -328,7 +328,9 @@ class Task2Controller(Node):
 
     def _face_cb(self, msg: PoseStamped):
         parts = msg.header.frame_id.split("|")
-        id = parts[1] if len(parts) > 1 else "unknown"
+        label = parts[1] if len(parts) > 1 else "unknown"
+        id = parts[2] if len(parts) > 1 else "ID_NONDE"
+        
         pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
         nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
         now = self.get_clock().now()
@@ -362,7 +364,7 @@ class Task2Controller(Node):
                 else:
                     return 
 
-        self.get_logger().info(f"New face at ({pos[0]:.2f}, {pos[1]:.2f})")
+        self.get_logger().info(f"New face {label}(ID:{id}) at ({pos[0]:.2f}, {pos[1]:.2f})")
         entry = {
             "id": id,
             "type": "face",
