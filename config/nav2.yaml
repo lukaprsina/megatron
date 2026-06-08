@@ -151,7 +151,24 @@ global_costmap:
                   [ 0.134,  0.134]]"
       resolution: 0.06
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer","yellow_line_layer", "inflation_layer"]
+      yellow_line_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: yellow_line_source
+        yellow_line_source:
+          topic: /yellow_line_cloud
+          data_type: PointCloud2
+          sensor_frame: top_camera_rgb_camera_optical_frame
+          marking: true
+          clearing: true
+          min_obstacle_height: -0.1
+          max_obstacle_height: 0.3
+          obstacle_max_range: 5.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 5.5
+          raytrace_min_range: 0.0
+          observation_persistence: 0.3
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
