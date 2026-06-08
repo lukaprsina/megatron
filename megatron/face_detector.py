@@ -47,13 +47,13 @@ class FaceDetectorNode(Node):
         # Parameters
         self.declare_parameter("device", "")
         self.declare_parameter("confidence_threshold", 0.5)
-        self.declare_parameter("confirmation_count", 3)
+        self.declare_parameter("confirmation_count", 6)
         self.declare_parameter("dedup_distance", 0.5)
         self.declare_parameter("min_inference_period", 0.2)
         self.declare_parameter("roi_shrink", 0.3)
         self.declare_parameter("track_max_age", 30.0)
         self.declare_parameter("lateral_offset", 0.2)
-        self.declare_parameter("recognition_tolerance", 0.6)
+        self.declare_parameter("recognition_tolerance", 0.8)
         self.declare_parameter(
             "personnel_dir",
             "/home/iota/dis/src/vendor/teammate-project/src/task1/config/personnel",
@@ -239,7 +239,7 @@ class FaceDetectorNode(Node):
                 x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
 
                 # Draw bounding box on display image
-                cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                # cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
                 # Shrink ROI toward center to avoid background pixels
                 bw, bh = x2 - x1, y2 - y1
@@ -286,11 +286,11 @@ class FaceDetectorNode(Node):
 
                 if status == "confirmed":
                     self._publish_detection(track, rgb_msg.header.stamp)
-                    pos, _ = self.track_manager.get_best_estimate(track)
+                    pos, _, _ = self.track_manager.get_best_estimate(track)
                     track["_last_published_pos"] = pos.copy()
                     track["_update_count_since_publish"] = 0
                 elif status == "updated":
-                    pos, _ = self.track_manager.get_best_estimate(track)
+                    pos, _, _ = self.track_manager.get_best_estimate(track)
                     last_pos = track.get("_last_published_pos")
                     update_count = track.get("_update_count_since_publish", 0)
                     if (
@@ -324,9 +324,9 @@ class FaceDetectorNode(Node):
     # ------------------------------------------------------------------
 
     def _publish_detection(self, track, stamp):
-        pos, normal = self.track_manager.get_best_estimate(track)
-        label = track.get("label", "Unknown")
-
+        pos, normal, label = self.track_manager.get_best_estimate(track)
+        label = "Unknown" if label is None else label 
+        id = track["id"]
         # Shift the published position to the left (relative to surface normal).
         # Normal points AWAY from the surface. Vector to the left is (ny, -nx).
         nx, ny = normal[0], normal[1]
@@ -340,7 +340,7 @@ class FaceDetectorNode(Node):
 
         # PoseStamped: position + normal encoded as orientation
         pose = PoseStamped()
-        pose.header.frame_id = f"map|{label}"
+        pose.header.frame_id = f"map|{label}|{id}"
         pose.header.stamp = stamp
         pose.pose.position.x = float(pos[0])
         pose.pose.position.y = float(pos[1])
@@ -360,7 +360,7 @@ class FaceDetectorNode(Node):
         marker_array = MarkerArray()
         markers = []
         for track in self.track_manager.get_confirmed_tracks():
-            pos, normal = self.track_manager.get_best_estimate(track)
+            pos, normal, label = self.track_manager.get_best_estimate(track)
             
             # Shift markers to match the published (shifted) position
             nx, ny = normal[0], normal[1]
@@ -407,7 +407,7 @@ class FaceDetectorNode(Node):
             t.color.b = 0.0
             t.color.a = 1.0
 
-            label = track.get("label", "Unknown")
+            label = "Unknown" if label is None else label
             t.text = f"{label} (ID: {track['id']})"
             t.lifetime.sec = 0
             markers.append(t)
