@@ -45,7 +45,7 @@ controller_server:
       min_lookahead_dist: 0.25 # was 0.3
       max_lookahead_dist: 1.0 # was 0.9
       lookahead_time: 1.2 # was 1.5
-      rotate_to_heading_angular_vel: 1.8
+      rotate_to_heading_angular_vel: 0.8 # was 1.8
       transform_tolerance: 0.1
       use_velocity_scaled_lookahead_dist: true # was false
       min_approach_linear_velocity: 0.05
@@ -96,7 +96,7 @@ local_costmap:
           data_type: PointCloud2
           sensor_frame: top_camera_rgb_camera_optical_frame
           marking: true
-          clearing: true
+          clearing: false
           min_obstacle_height: -0.1
           max_obstacle_height: 0.3
           obstacle_max_range: 5.0
@@ -161,7 +161,7 @@ global_costmap:
           data_type: PointCloud2
           sensor_frame: top_camera_rgb_camera_optical_frame
           marking: true
-          clearing: true
+          clearing: false
           min_obstacle_height: -0.1
           max_obstacle_height: 0.3
           obstacle_max_range: 5.0
@@ -235,7 +235,7 @@ behavior_server:
     global_frame: map
     local_frame: odom
     robot_base_frame: base_link
-    transform_tolerance: 0.1
+    transform_tolerance: 0.03
     simulate_ahead_time: 2.0
     max_rotational_vel: 1.0
     min_rotational_vel: 0.4
