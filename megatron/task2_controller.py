@@ -223,7 +223,7 @@ class Task2Controller(Node):
         self._nav_rejected = False  # True when server rejected the last goal
         self._last_feedback_distance: float | None = None
         self._last_feedback_time: float | None = None
-        self._nav_update = False # Turn when the navigation needs to be updated
+        self._nav_update = False  # Turn when the navigation needs to be updated
 
         # --- Costmap ---
         self.costmap = None
@@ -278,7 +278,9 @@ class Task2Controller(Node):
         self.arm_pub = self.create_publisher(String, "/arm_command", 10)
         self._spill_target_pub = self.create_publisher(PointStamped, "/spill_target", 1)
         self.goal_marker_pub = self.create_publisher(MarkerArray, "/goal_markers", 10)
-        self.approaching_object_pub = self.create_publisher(Marker, "/approaching_object", 10)
+        self.approaching_object_pub = self.create_publisher(
+            Marker, "/approaching_object", 10
+        )
 
         # --- Subscribers ---
         self.create_subscription(
@@ -334,12 +336,12 @@ class Task2Controller(Node):
         now = self.get_clock().now()
 
         for f in self.found_faces:
-            if f["id"] == id:  #face id found in found_faces
+            if f["id"] == id:  # face id found in found_faces
                 if (
                     self.current_target is not None
                     and self.current_target["type"] == "face"
                     and self.current_target["id"] == id
-                ): # update approach goal
+                ):  # update approach goal
                     self.get_logger().info("Seting up to recalculate approach")
                     f["pos"] = pos
                     f["normal"] = (nx, ny)
@@ -349,10 +351,12 @@ class Task2Controller(Node):
                     self.current_target["normal"] = (nx, ny)
                     self.current_target["last_seen"] = now
                     self._nav_update = True
-                    return 
-        
+                    return
+
                 elif np.linalg.norm(pos - f["pos"]) < self.DEDUP_DISTANCE:
-                    self.get_logger().info(f"Requing face {f["id"]} since the new detected location is more far away")
+                    self.get_logger().info(
+                        f"Requing face {f['id']} since the new detected location is more far away"
+                    )
                     f["pos"] = pos
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
@@ -360,7 +364,7 @@ class Task2Controller(Node):
                         self._requeue_if_not_pending("face", f)
                     return
                 else:
-                    return 
+                    return
 
         self.get_logger().info(f"New face at ({pos[0]:.2f}, {pos[1]:.2f})")
         entry = {
@@ -381,11 +385,21 @@ class Task2Controller(Node):
         parts = msg.header.frame_id.split("|")
         color = parts[1] if len(parts) > 1 else "unknown"
         pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        now = self.get_clock().now()
 
         for r in self.found_rings:
             if np.linalg.norm(pos - r["pos"]) < self.DEDUP_DISTANCE:
                 r["pos"] = pos
-                r["last_seen"] = self.get_clock().now()
+                r["last_seen"] = now
+                if (
+                    self.current_target is not None
+                    and self.current_target.get("type") == "ring"
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    < self.DEDUP_DISTANCE
+                ):
+                    self.current_target["pos"] = pos
+                    self.current_target["last_seen"] = now
+                    self._nav_update = True
                 return
 
         self.get_logger().info(f"New ring ({color}) at ({pos[0]:.2f}, {pos[1]:.2f})")
@@ -410,8 +424,21 @@ class Task2Controller(Node):
             if np.linalg.norm(pos - b["pos"]) < self.DEDUP_DISTANCE:
                 b["pos"] = pos
                 b["last_seen"] = now
-                if b["orientation"] == "horizontal" and not b.get("approached", False) and self.state == State.PATROL:
+                if (
+                    b["orientation"] == "horizontal"
+                    and not b.get("approached", False)
+                    and self.state == State.PATROL
+                ):
                     self._requeue_if_not_pending("barrel", b)
+                if (
+                    self.current_target is not None
+                    and self.current_target.get("type") == "barrel"
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    < self.DEDUP_DISTANCE
+                ):
+                    self.current_target["pos"] = pos
+                    self.current_target["last_seen"] = now
+                    self._nav_update = True
                 return
 
         self.get_logger().info(
@@ -555,7 +582,7 @@ class Task2Controller(Node):
 
         if self.waypoint_index >= len(self.waypoints):
             self.get_logger().info("Patrol loop complete.")
-            # self._on_patrol_complete() # TODO
+            self._on_patrol_complete()
             return
 
         self._send_next_waypoint()
@@ -581,6 +608,14 @@ class Task2Controller(Node):
     def _handle_approach(self):
         if self.nav_in_flight:
             return
+
+        if self._nav_update:
+            self._cancel_nav()
+            self._nav_update = False
+            if self.current_target is not None:
+                self._send_approach(self.current_target, self._approach_attempt)
+            return
+
         if not self._is_nav_complete():
             return
 
@@ -589,11 +624,9 @@ class Task2Controller(Node):
             self._transition(State.INTERACT)
             self._start_interact()
             return
-        
+
         if self._nav_aborted():
             self._approach_attempt += 1
-        
-        if self._nav_update_target() or self._nav_aborted():
             if self.current_target is not None:
                 if not self._send_approach(self.current_target, self._approach_attempt):
                     self.get_logger().warn(
@@ -623,13 +656,15 @@ class Task2Controller(Node):
                 )
         else:
             n_candidates = 1
-            base_dist = cast(float, self.get_parameter("barrel_approach_distance").value)
+            base_dist = cast(
+                float, self.get_parameter("barrel_approach_distance").value
+            )
 
             def _gen(d):
                 return self._barrel_approach_candidates(target, distance=d)
 
         retry_offset = cast(float, self.get_parameter("approach_retry_offset").value)
-        total = self.MAX_RETRY_CYCLES* n_candidates
+        total = self.MAX_RETRY_CYCLES * n_candidates
         remaining_cycles = self.MAX_RETRY_CYCLES - (attempt // n_candidates)
         while remaining_cycles > 0:
             cycle = attempt // n_candidates
@@ -639,9 +674,7 @@ class Task2Controller(Node):
 
             while idx < len(candidates):
                 ax, ay, yaw = candidates[idx]
-                self._publish_approaching_object(
-                    ax, ay, yaw, attempt, total=total
-                )
+                self._publish_approaching_object(ax, ay, yaw, attempt, total=total)
                 if self._cost_at_goal_ok(ax, ay):
                     self._send_nav_goal(ax, ay, yaw)
                     self._approach_attempt = attempt  # sync for next abort
@@ -664,32 +697,41 @@ class Task2Controller(Node):
         nx, ny = normal
         base = math.atan2(ny, nx)
         px, py = float(pos[0]), float(pos[1])
+
         def f(x):
-            return (x**2)/25**2
+            return (x**2) / 25**2
+
         # degrees = [val for i in range(0,30,5) for val in (i, -i)]
         degrees = [
             0,
-            2,           -2,
-            3,           -3,
-            5,           -5,
-            7,           -7,
-            9,           -9,
-            10,          -10,
-            15,          -15,
-            #20,          -20,
-            #25,          -25,
-            #30,          -30,
-            #35,          -35,
-            #40,          -40,
-            #50,          -50,
-            #60,          -60,
-            #70,          -70,
-            ]
+            2,
+            -2,
+            3,
+            -3,
+            5,
+            -5,
+            7,
+            -7,
+            9,
+            -9,
+            10,
+            -10,
+            15,
+            -15,
+            # 20,          -20,
+            # 25,          -25,
+            # 30,          -30,
+            # 35,          -35,
+            # 40,          -40,
+            # 50,          -50,
+            # 60,          -60,
+            # 70,          -70,
+        ]
         offsets = [math.radians(d) for d in degrees]
         return [
             (
-                px + math.cos(base + o) * dist*f(degrees[i]),
-                py + math.sin(base + o) * dist*f(degrees[i]),
+                px + math.cos(base + o) * dist * f(degrees[i]),
+                py + math.sin(base + o) * dist * f(degrees[i]),
                 math.atan2(-math.sin(base + o), -math.cos(base + o)),
             )
             for i, o in enumerate(offsets)
@@ -771,11 +813,17 @@ class Task2Controller(Node):
                 pt.header.frame_id = "map"
                 pt.header.stamp = self.get_clock().now().to_msg()
                 pos = target["pos"]
-                pt.point.x, pt.point.y, pt.point.z = float(pos[0]), float(pos[1]), float(pos[2])
+                pt.point.x, pt.point.y, pt.point.z = (
+                    float(pos[0]),
+                    float(pos[1]),
+                    float(pos[2]),
+                )
                 self._spill_target_pub.publish(pt)
 
                 if self._spill_check_client.service_is_ready():
-                    self._spill_future = self._spill_check_client.call_async(Trigger.Request())
+                    self._spill_future = self._spill_check_client.call_async(
+                        Trigger.Request()
+                    )
                     self._spill_start_time = self.get_clock().now().nanoseconds * 1e-9
                 else:
                     self.get_logger().warn("SpillCheck service not ready")
@@ -801,7 +849,9 @@ class Task2Controller(Node):
                     if resp is not None and resp.success:
                         leaking = "LEAK" in resp.message
                         try:
-                            spill_count = int(resp.message.split("count=")[1].split()[0])
+                            spill_count = int(
+                                resp.message.split("count=")[1].split()[0]
+                            )
                         except (IndexError, ValueError):
                             pass
                     elif resp is not None:
@@ -831,10 +881,12 @@ class Task2Controller(Node):
             return
 
         # Face: wait for QR
-        if self._qr_task_raw is None or self._qr_task_raw == "": # if qr_task is not seen it is failed 
+        if (
+            self._qr_task_raw is None or self._qr_task_raw == ""
+        ):  # if qr_task is not seen it is failed
             self.get_logger().info("Waitting for qr task")
             return
-        
+
         task_token = _parse_qr_task(self._qr_task_raw)
         self._qr_task_raw = None
 
@@ -1067,15 +1119,15 @@ class Task2Controller(Node):
 
     def _publish_approach_state(self):
         msg = String()
-        msg.data = "APPROACH_TARGET_FINAL" if self._is_near_goal() else "APPROACH_TARGET"
+        msg.data = (
+            "APPROACH_TARGET_FINAL" if self._is_near_goal() else "APPROACH_TARGET"
+        )
         self.robot_state_pub.publish(msg)
 
     def _is_nav_complete(self) -> bool:
         if not self._nav_ever_sent or self.nav_in_flight:
             return False
         if self._nav_rejected:
-            return True
-        if self._nav_update:
             return True
 
         if self.nav_result_future is None:
@@ -1087,14 +1139,13 @@ class Task2Controller(Node):
             return False
         if self._nav_rejected:
             return False
-        if self._nav_update:
-            return False
         try:
             assert self.nav_result_future is not None
             result = self.nav_result_future.result()
         except Exception:
             return False
         return result is not None and result.status == GoalStatus.STATUS_SUCCEEDED
+
     def _nav_update_target(self) -> bool:
         if not self._is_nav_complete():
             return False
@@ -1103,7 +1154,7 @@ class Task2Controller(Node):
         if self._nav_update is True:
             return True
         return False
-    
+
     def _nav_aborted(self) -> bool:
         if not self._is_nav_complete():
             return False

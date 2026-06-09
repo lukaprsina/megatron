@@ -57,9 +57,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "personnel_dir",
-            default_value=PathJoinSubstitution(
-                [pkg_megatron, "personnel"]
-            ),
+            default_value=PathJoinSubstitution([pkg_megatron, "personnel"]),
             description="Directory containing personnel face images for recognition",
         ),
     ]
@@ -91,15 +89,15 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("launch_rviz")),
     )
 
-    face_detector = Node(
+    """ face_detector = Node(
         package="megatron",
         executable="face_detector",
         name="face_detector",
         output="screen",
         parameters=[
             {
-            "use_sim_time": LaunchConfiguration("use_sim_time"),
-            "personnel_dir": LaunchConfiguration("personnel_dir")
+                "use_sim_time": LaunchConfiguration("use_sim_time"),
+                "personnel_dir": LaunchConfiguration("personnel_dir"),
             }
         ],
     )
@@ -118,7 +116,7 @@ def generate_launch_description():
         name="qr_reader",
         output="screen",
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
-    )
+    ) """
 
     arm_mover = Node(
         package="megatron",
@@ -159,6 +157,14 @@ def generate_launch_description():
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
     )
 
+    blue_line_follower = Node(
+        package="megatron",
+        executable="blue_line_follower",
+        name="blue_line_follower",
+        output="screen",
+        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+    )
+
     cylinder_detector = Node(
         package="megatron",
         executable="cylinder_detector",
@@ -167,13 +173,13 @@ def generate_launch_description():
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
     )
 
-    workstation_detector = Node(
+    """ workstation_detector = Node(
         package="megatron",
         executable="workstation_detector",
         name="workstation_detector",
         output="screen",
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
-    )
+    ) """
 
     visualizer = Node(
         package="megatron",
@@ -189,6 +195,7 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("visualization")),
     )
 
+    # TODO
     ld = LaunchDescription(args)
     ld.add_action(sim_arm_nav)
     ld.add_action(rviz)
@@ -198,6 +205,7 @@ def generate_launch_description():
     # ld.add_action(qr_reader)
     ld.add_action(arm_mover)
     ld.add_action(yellow_line_injector)
+    ld.add_action(blue_line_follower)
     ld.add_action(cylinder_detector)
     # ld.add_action(workstation_detector)
     ld.add_action(controller)

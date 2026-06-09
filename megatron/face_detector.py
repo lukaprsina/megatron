@@ -5,13 +5,13 @@ inference, projects face ROIs to 3D via pinhole model, fits surface normals,
 and publishes confirmed detections as PoseStamped (with normal as orientation).
 """
 
+import os
 from typing import cast
 
 import cv2
 import face_recognition
 import message_filters
 import numpy as np
-import os
 import rclpy
 import tf2_ros
 from cv_bridge import CvBridge, CvBridgeError
@@ -207,7 +207,7 @@ class FaceDetectorNode(Node):
             return
 
         h, w = cv_image.shape[:2]
-        self.model.embed
+
         # Run YOLO
         results = self.model.predict(
             cv_image,
@@ -281,7 +281,11 @@ class FaceDetectorNode(Node):
 
                 # Feed to tracker
                 status, track = self.track_manager.add_observation(
-                    map_point, map_normal, cam_dist, rgb_msg.header.stamp,label=person_name,
+                    map_point,
+                    map_normal,
+                    cam_dist,
+                    rgb_msg.header.stamp,
+                    label=person_name,
                 )
 
                 if status == "confirmed":
@@ -361,12 +365,12 @@ class FaceDetectorNode(Node):
         markers = []
         for track in self.track_manager.get_confirmed_tracks():
             pos, normal = self.track_manager.get_best_estimate(track)
-            
+
             # Shift markers to match the published (shifted) position
             nx, ny = normal[0], normal[1]
             pos[0] += ny * self.lateral_offset
             pos[1] += -nx * self.lateral_offset
-            
+
             i = track["id"] - 1
 
             # Sphere
@@ -400,7 +404,7 @@ class FaceDetectorNode(Node):
             t.pose.orientation.w = 1.0
 
             t.scale.x = t.scale.y = t.scale.z = 0.12
-            
+
             # 2. MAKE IT YELLOW: Red + Green light (Full opacity alpha)
             t.color.r = 0.0
             t.color.g = 1.0

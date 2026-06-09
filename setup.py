@@ -53,6 +53,7 @@ setup(
             "perception_visualizer = megatron.perception_visualizer:main",
             "save_image_topic = megatron.save_image_topic:main",
             "qr_reader = megatron.qr_reader:main",
+            "blue_line_follower = megatron.blue_line_follower:main",
             "arm_mover = megatron.arm_mover_actions:main",
         ],
     },
