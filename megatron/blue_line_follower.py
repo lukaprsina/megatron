@@ -16,9 +16,9 @@ from std_msgs.msg import String
 # ── Color detection (teammate's HSV tuned against this Gazebo world) ──────────
 BLUE_LO = np.array([82, 80, 80])
 BLUE_HI = np.array([102, 255, 255])
-BLUE_MIN_CHANNEL = 100       # B, G channels must each exceed this
-BLUE_DOMINANCE_MARGIN = 30   # B,G − R must each exceed this
-MIN_BLUE_PX = 100            # pixels required to declare "line found"
+BLUE_MIN_CHANNEL = 100  # B, G channels must each exceed this
+BLUE_DOMINANCE_MARGIN = 30  # B,G − R must each exceed this
+MIN_BLUE_PX = 100  # pixels in full frame required to declare "line found"
 MORPH_KERNEL_SIZE = 5
 
 # ── Direction ROI bands (fractions of image width; bottom ROI_Y_FRAC strip) ───
@@ -31,25 +31,25 @@ ROI_MIN_PX = 30
 ROI_MIN_RATIO = 0.02
 
 # ── Control ───────────────────────────────────────────────────────────────────
-LINEAR_SPEED = 0.12          # m/s — slow: split mode and near-obstacle
-FAST_LINEAR_SPEED = 0.30     # m/s — fast: clear straight
+LINEAR_SPEED = 0.12  # m/s — slow: split mode and near-obstacle
+FAST_LINEAR_SPEED = 0.30  # m/s — fast: clear straight
 KP = 0.8
-MAX_ANGULAR = 0.6            # rad/s
-LEFT_BIAS = 0.25             # extra rad/s leftward at junctions
-ANGULAR_ALPHA = 0.35         # EMA smoothing factor
-SPLIT_EXIT_HOLD = 0.5        # s centred before exiting split mode
+MAX_ANGULAR = 0.6  # rad/s
+LEFT_BIAS = 0.25  # extra rad/s leftward at junctions
+ANGULAR_ALPHA = 0.35  # EMA smoothing factor
+SPLIT_EXIT_HOLD = 0.5  # s centred before exiting split mode
 
 # ── LiDAR — forward is at −π/2 in this Gazebo world ──────────────────────────
 LIDAR_FORWARD_ANGLE = -math.pi / 2
-LIDAR_CONE_HALF = 0.2618     # ±15°
-LIDAR_SLOW_DIST = 0.55       # m
-LIDAR_STOP_DIST = 0.37       # m — triggers U-turn
+LIDAR_CONE_HALF = 0.2618  # ±15°
+LIDAR_SLOW_DIST = 0.55  # m
+LIDAR_STOP_DIST = 0.37  # m — triggers U-turn
 
 # ── Recovery ──────────────────────────────────────────────────────────────────
-LINE_LOST_TIMEOUT = 2.0      # s
-UTURN_SPEED = 0.5            # rad/s
-UTURN_DURATION = 6.5         # s (~180°)
-SEARCH_TURN_SPEED = 0.25     # rad/s
+LINE_LOST_TIMEOUT = 2.0  # s
+UTURN_SPEED = 0.5  # rad/s
+UTURN_DURATION = 6.5  # s (~180°)
+SEARCH_TURN_SPEED = 0.25  # rad/s
 
 
 class Mode(enum.Enum):
@@ -80,7 +80,9 @@ class BlueLineFollower(Node):
         self.create_subscription(
             Image, "/top_camera/rgb/preview/image_raw", self._image_cb, 10
         )
-        self.create_subscription(LaserScan, "/scan", self._scan_cb, qos_profile_sensor_data)
+        self.create_subscription(
+            LaserScan, "/scan", self._scan_cb, qos_profile_sensor_data
+        )
 
         self.create_timer(0.1, self._tick)
         self.get_logger().info("blue_line_follower ready")
@@ -114,20 +116,25 @@ class BlueLineFollower(Node):
     def _scan_cb(self, msg: LaserScan):
         if msg.angle_increment == 0.0:
             return
-        fwd_idx = int(round((LIDAR_FORWARD_ANGLE - msg.angle_min) / msg.angle_increment))
+        fwd_idx = int(
+            round((LIDAR_FORWARD_ANGLE - msg.angle_min) / msg.angle_increment)
+        )
         cone = int(round(LIDAR_CONE_HALF / msg.angle_increment))
         lo = max(0, fwd_idx - cone)
         hi = min(len(msg.ranges) - 1, fwd_idx + cone)
         valid = [
-            r for r in msg.ranges[lo : hi + 1]
-            if msg.range_min < r < msg.range_max
+            r for r in msg.ranges[lo : hi + 1] if msg.range_min < r < msg.range_max
         ]
         self._front_dist = min(valid) if valid else float("inf")
 
     # ── Perception ────────────────────────────────────────────────────────────
 
     def _detect(self):
-        """Return (cx_norm, directions, pixel_count) or (None, set(), 0)."""
+        """Return (cx_norm, directions, pixel_count) or (None, set(), 0).
+
+        cx_norm is computed from the bottom ROI_Y_FRAC strip only, giving
+        near-field steering that avoids perspective-induced corner cutting.
+        """
         if self._frame is None:
             return None, set(), 0
 
@@ -151,21 +158,21 @@ class BlueLineFollower(Node):
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-        pixel_count = int(np.count_nonzero(mask))
-        if pixel_count < MIN_BLUE_PX:
+        if int(np.count_nonzero(mask)) < MIN_BLUE_PX:
             return None, set(), 0
 
         H, W = mask.shape
-        moments = cv2.moments(mask)
+        y0 = int(H * (1.0 - ROI_Y_FRAC))
+        roi_mask = mask[y0:, :]
+
+        # Centroid from bottom strip only — avoids look-ahead bias from far pixels
+        moments = cv2.moments(roi_mask)
         if moments["m00"] == 0:
             return None, set(), 0
         cx = moments["m10"] / moments["m00"]
         cx_norm = (cx - W / 2.0) / (W / 2.0)  # −1 = far left, +1 = far right
 
-        # Direction ROI bands in bottom ROI_Y_FRAC of frame
-        y0 = int(H * (1.0 - ROI_Y_FRAC))
-        roi_mask = mask[y0:, :]
-
+        # Direction bands within the same bottom strip
         def _band(x0_frac: float, x1_frac: float):
             x0, x1 = int(W * x0_frac), int(W * x1_frac)
             region = roi_mask[:, x0:x1]
@@ -181,7 +188,7 @@ class BlueLineFollower(Node):
             if area > 0 and cnt >= ROI_MIN_PX and cnt / area >= ROI_MIN_RATIO:
                 directions.add(name)
 
-        return cx_norm, directions, pixel_count
+        return cx_norm, directions, int(np.count_nonzero(roi_mask))
 
     # ── Main control loop ─────────────────────────────────────────────────────
 
@@ -250,9 +257,14 @@ class BlueLineFollower(Node):
         linear = LINEAR_SPEED if slow else FAST_LINEAR_SPEED
 
         # Steering: positive angular.z = turn left
-        raw = -KP * cx_norm
-        if self._split_active and "left" in directions:
-            raw = -KP * cx_norm + LEFT_BIAS
+        if self._split_active:
+            if "left" in directions:
+                raw = -KP * cx_norm + LEFT_BIAS
+            else:
+                steer = min(cx_norm, 0.0) if "straight" not in directions else cx_norm
+                raw = -KP * steer
+        else:
+            raw = -KP * cx_norm
         raw = float(np.clip(raw, -MAX_ANGULAR, MAX_ANGULAR))
 
         angular = ANGULAR_ALPHA * raw + (1.0 - ANGULAR_ALPHA) * self._prev_angular

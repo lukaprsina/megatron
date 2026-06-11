@@ -603,7 +603,7 @@ class Task2Controller(Node):
                 self.get_logger().warn(
                     f"Workstation '{color}' pose not known — skipping inspection."
                 )
-        self._pub_arm("garage")
+        self._pub_arm("look_down")
         self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── APPROACH_TARGET ───────────────────────────────────────────────
@@ -962,7 +962,7 @@ class Task2Controller(Node):
             self.get_logger().warn(
                 "INSPECT_WORKSTATION not yet implemented — skipping to FOLLOW_BLUE_LINE."
             )
-            self._pub_arm("garage")
+            self._pub_arm("look_down")
             self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── FOLLOW_BLUE_LINE ──────────────────────────────────────────────
