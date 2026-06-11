@@ -18,6 +18,7 @@ normalisation.
 | `qr_rings.png` | "Find all the rings." | `rings` |
 | `qr_nothing.png` | "I'm just a visitor :)" | `nothing` |
 | `qr_cto.png` | "Hello there! Thanks for the report." | `report` |
+| `qr_incinerator.png` | "Emergency Intelligence Incinerator: System testing complete. Fall down the Glados oven." | `emergency` |
 
 **Matching priority**: `report`/`thanks` → red belt + defect → green belt + defect →
 barrel → ring → visitor. The `"fault"` keyword is additionally checked for red/green

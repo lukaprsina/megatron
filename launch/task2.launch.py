@@ -89,7 +89,7 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("launch_rviz")),
     )
 
-    """ face_detector = Node(
+    face_detector = Node(
         package="megatron",
         executable="face_detector",
         name="face_detector",
@@ -116,7 +116,7 @@ def generate_launch_description():
         name="qr_reader",
         output="screen",
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
-    ) """
+    )
 
     arm_mover = Node(
         package="megatron",
@@ -200,9 +200,9 @@ def generate_launch_description():
     ld.add_action(sim_arm_nav)
     ld.add_action(rviz)
     ld.add_action(cylinder_segmentation)
-    # ld.add_action(face_detector)
+    ld.add_action(face_detector)
     # ld.add_action(ring_detector)
-    # ld.add_action(qr_reader)
+    ld.add_action(qr_reader)
     ld.add_action(arm_mover)
     ld.add_action(yellow_line_injector)
     ld.add_action(blue_line_follower)

@@ -165,6 +165,8 @@ def _parse_qr_task(text: str) -> str | None:
         return "rings"
     if "visitor" in t:
         return "nothing"
+    if "emergency" in t or "incinerator" in t:
+        return "emergency"
     return None
 
 
@@ -601,7 +603,8 @@ class Task2Controller(Node):
                 self.get_logger().warn(
                     f"Workstation '{color}' pose not known — skipping inspection."
                 )
-        # self._transition(State.FOLLOW_BLUE_LINE)
+        self._pub_arm("garage")
+        self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── APPROACH_TARGET ───────────────────────────────────────────────
 
@@ -889,6 +892,13 @@ class Task2Controller(Node):
 
         task_token = _parse_qr_task(self._qr_task_raw)
         self._qr_task_raw = None
+
+        if task_token == "emergency":
+            self.get_logger().info("Emergency Intelligence Incinerator triggered - falling down Glados oven!")
+            self.speaker.speak("Emergency testing! Initiating system shutdown...")
+            self._transition(State.DONE)
+            rclpy.shutdown()
+            return
 
         if task_token and task_token != "nothing" and task_token != "report":
             self.assigned_task = task_token
