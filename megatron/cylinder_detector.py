@@ -362,12 +362,14 @@ class CylinderDetector(Node):
         return marker
 
     def _publish_marker_array(self):
-        msg = MarkerArray()
+        markers: list = []
         for c in self.clusters:
             if c.confirmed and not c.suppressed:
-                msg.markers.append(self._create_marker(c))
-                msg.markers.append(self._create_text_marker(c))
-        if msg.markers:
+                markers.append(self._create_marker(c))
+                markers.append(self._create_text_marker(c))
+        if markers:
+            msg = MarkerArray()
+            msg.markers = markers
             self.marker_array_pub.publish(msg)
 
     def _republish_confirmed(self):

@@ -251,6 +251,7 @@ class Task2Controller(Node):
         # --- Approach tracking ---
         self.current_target: dict | None = None
         self._approach_attempt = 0
+        self._patrol_complete = False
 
         # --- Interact tracking ---
         self._qr_task_raw: str | None = None
@@ -362,8 +363,6 @@ class Task2Controller(Node):
                     f["pos"] = pos
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
-                    if not f.get("approached", False) and self.state == State.PATROL:
-                        self._requeue_if_not_pending("face", f)
                     return
                 else:
                     return
@@ -380,8 +379,6 @@ class Task2Controller(Node):
             "last_seen": now,
         }
         self.found_faces.append(entry)
-        if self.state == State.PATROL:
-            self.pending_targets.append(dict(entry))
 
     def _ring_cb(self, msg: PoseStamped):
         parts = msg.header.frame_id.split("|")
@@ -427,12 +424,6 @@ class Task2Controller(Node):
                 b["pos"] = pos
                 b["last_seen"] = now
                 if (
-                    b["orientation"] == "horizontal"
-                    and not b.get("approached", False)
-                    and self.state == State.PATROL
-                ):
-                    self._requeue_if_not_pending("barrel", b)
-                if (
                     self.current_target is not None
                     and self.current_target.get("type") == "barrel"
                     and np.linalg.norm(pos - np.array(self.current_target["pos"]))
@@ -456,8 +447,6 @@ class Task2Controller(Node):
             "last_seen": now,
         }
         self.found_barrels.append(entry)
-        if self.state == State.PATROL:
-            self.pending_targets.append(dict(entry))
 
     def _workstation_cb(self, msg: Marker):
         color = msg.ns  # "red" or "green"
@@ -556,24 +545,6 @@ class Task2Controller(Node):
     # ── PATROL ────────────────────────────────────────────────────────
 
     def _handle_patrol(self):
-        # Pending target takes priority — preempt navigation
-        if self.pending_targets:
-            target = self.pending_targets.pop(0)
-            self._cancel_nav()
-            self.current_target = target
-            self._approach_attempt = 0
-            self._transition(State.APPROACH_TARGET)
-            if not self._send_approach(target, attempt=0):
-                self.get_logger().warn(
-                    "Initial approach candidates blocked — re-queuing target."
-                )
-                self.current_target["approached"] = False
-                self.pending_targets.append(self.current_target)
-                self.current_target = None
-                self._transition(State.PATROL)
-                self._send_next_waypoint()
-            return
-
         if not self._is_nav_complete():
             return
 
@@ -590,21 +561,42 @@ class Task2Controller(Node):
         self._send_next_waypoint()
 
     def _on_patrol_complete(self):
-        if self.assigned_task and self.assigned_task.startswith("defects"):
-            color = self.assigned_task.split("_")[1]  # "red" or "green"
-            if color in self.workstation_poses:
+        self.get_logger().info("Patrol loop complete — building post-patrol queue.")
+        self._patrol_complete = True
+
+        for f in self.found_faces:
+            if not f.get("approached", False):
+                self.pending_targets.append(dict(f))
                 self.get_logger().info(
-                    f"Heading to {color} workstation for inspection."
+                    f"Queuing face {f.get('id')} at ({f['pos'][0]:.2f}, {f['pos'][1]:.2f})"
                 )
-                self._transition(State.INSPECT_WORKSTATION)
-                self._start_inspection(color)
-                return
-            else:
-                self.get_logger().warn(
-                    f"Workstation '{color}' pose not known — skipping inspection."
+
+        for b in self.found_barrels:
+            if not b.get("approached", False):
+                self.pending_targets.append(dict(b))
+                self.get_logger().info(
+                    f"Queuing {b.get('orientation')} {b.get('color')} barrel "
+                    f"at ({b['pos'][0]:.2f}, {b['pos'][1]:.2f})"
                 )
-        self._pub_arm("look_down")
-        self._transition(State.FOLLOW_BLUE_LINE)
+
+        if not self.pending_targets:
+            self.get_logger().info("No targets to approach — heading to room 2.")
+            self._pub_arm("look_down")
+            self._transition(State.FOLLOW_BLUE_LINE)
+            return
+
+        target = self.pending_targets.pop(0)
+        self.current_target = target
+        self._approach_attempt = 0
+        self._transition(State.APPROACH_TARGET)
+        if not self._send_approach(target, attempt=0):
+            self.get_logger().warn(
+                "Initial approach candidates blocked — re-queuing target."
+            )
+            target["approached"] = False
+            self.pending_targets.append(target)
+            self.current_target = None
+            self._next_post_patrol_target()
 
     # ── APPROACH_TARGET ───────────────────────────────────────────────
 
@@ -638,8 +630,11 @@ class Task2Controller(Node):
                     self.current_target["approached"] = False
                     self.pending_targets.append(self.current_target)
                     self.current_target = None
-                    self._transition(State.PATROL)
-                    self._send_next_waypoint()
+                    if self._patrol_complete:
+                        self._next_post_patrol_target()
+                    else:
+                        self._transition(State.PATROL)
+                        self._send_next_waypoint()
 
     def _send_approach(self, target: dict, attempt: int) -> bool:
         """Try candidate at `attempt`, costmap-skip forward if blocked.
@@ -924,8 +919,30 @@ class Task2Controller(Node):
 
     def _resume_patrol(self):
         self.current_target = None
-        self._transition(State.PATROL)
-        self._send_next_waypoint()
+        if self._patrol_complete:
+            self._next_post_patrol_target()
+        else:
+            self._transition(State.PATROL)
+            self._send_next_waypoint()
+
+    def _next_post_patrol_target(self):
+        if self.pending_targets:
+            target = self.pending_targets.pop(0)
+            self.current_target = target
+            self._approach_attempt = 0
+            self._transition(State.APPROACH_TARGET)
+            if not self._send_approach(target, attempt=0):
+                self.get_logger().warn(
+                    "Post-patrol approach candidates blocked — re-queuing."
+                )
+                target["approached"] = False
+                self.pending_targets.append(target)
+                self.current_target = None
+                self._next_post_patrol_target()
+        else:
+            self.get_logger().info("All post-patrol targets handled — heading to room 2.")
+            self._pub_arm("look_down")
+            self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── INSPECT_WORKSTATION ───────────────────────────────────────────
 

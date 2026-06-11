@@ -142,7 +142,7 @@ def generate_launch_description():
             {
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
                 "waypoints_file": PathJoinSubstitution(
-                    [pkg_megatron, "waypoints", "empty.yaml"]
+                    [pkg_megatron, "waypoints", "01.yaml"]
                 ),
                 "manual_mode": LaunchConfiguration("manual_mode"),
             }
@@ -173,13 +173,13 @@ def generate_launch_description():
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
     )
 
-    """ workstation_detector = Node(
+    workstation_detector = Node(
         package="megatron",
         executable="workstation_detector",
         name="workstation_detector",
         output="screen",
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
-    ) """
+    )
 
     visualizer = Node(
         package="megatron",
@@ -201,13 +201,13 @@ def generate_launch_description():
     ld.add_action(rviz)
     ld.add_action(cylinder_segmentation)
     ld.add_action(face_detector)
-    # ld.add_action(ring_detector)
+    ld.add_action(ring_detector)
     ld.add_action(qr_reader)
     ld.add_action(arm_mover)
     ld.add_action(yellow_line_injector)
     ld.add_action(blue_line_follower)
     ld.add_action(cylinder_detector)
-    # ld.add_action(workstation_detector)
+    ld.add_action(workstation_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
     return ld
