@@ -376,7 +376,7 @@ class Task2Controller(Node):
             "type": "face",
             "pos": pos,
             "normal": (nx, ny),
-            "label": None,
+            "label": label,
             "approached": False,
             # "re_approach": True,
             "last_seen": now,
