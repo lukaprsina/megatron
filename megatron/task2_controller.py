@@ -12,10 +12,12 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import cast
 
+import cv2
 import numpy as np
 import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
+from cv_bridge import CvBridge
 from geometry_msgs.msg import (
     PointStamped,
     PoseStamped,
@@ -34,7 +36,7 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
@@ -177,7 +179,7 @@ def _parse_qr_task(text: str) -> str | None:
 
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
-    DEDUP_DISTANCE = 0.01  # metres — two detections within this are the same object
+    DEDUP_DISTANCE = 0.5  # metres — two detections within this are the same object
     MAX_RETRY_CYCLES = (
         20  # bump distance up to 3× approach_retry_offset before giving up
     )
@@ -264,6 +266,14 @@ class Task2Controller(Node):
         self._tile_index = 0
         self._phase_start_time: float | None = None
         self._tile_pause_start: float | None = None
+        self._tile_scored_this_pause = False
+
+        # --- Top camera ---
+        self._cv_bridge = CvBridge()
+        self._last_top_frame: np.ndarray | None = None
+        _ref_path = Path(__file__).parent.parent / "assets/tile_reference/reference.png"
+        self._reference_tile = cv2.imread(str(_ref_path), cv2.IMREAD_GRAYSCALE)
+        self._ssim_threshold = 0.75  # TODO: calibrate in sim
 
         # --- Speech ---
         self.speaker = Speaker()
@@ -302,6 +312,12 @@ class Task2Controller(Node):
             LaserScan, "/scan", self._scan_cb, qos_profile_sensor_data
         )
         self.create_subscription(Bool, "/yellow_line_seen", self._yellow_seen_cb, 10)
+        self.create_subscription(
+            Image,
+            "/top_camera/rgb/preview/image_raw",
+            self._top_camera_cb,
+            qos_profile_sensor_data,
+        )
         costmap_qos = QoSProfile(
             depth=1,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
@@ -333,7 +349,7 @@ class Task2Controller(Node):
     def _face_cb(self, msg: PoseStamped):
         parts = msg.header.frame_id.split("|")
         label = parts[1] if len(parts) > 1 else "unknown"
-        id = parts[2] if len(parts) > 1 else "ID_NONDE"
+        id = parts[2] if len(parts) > 2 else "ID_NONDE"
 
         pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
         nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
@@ -364,6 +380,8 @@ class Task2Controller(Node):
                     f["pos"] = pos
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
+                    if not f.get("approached", False) and self.state == State.PATROL:
+                        self._requeue_if_not_pending("face", f)
                     return
                 else:
                     return
@@ -438,6 +456,8 @@ class Task2Controller(Node):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
                     self._nav_update = True
+                if b["orientation"] == "horizontal" and not b.get("approached", False) and self.state == State.PATROL:
+                    self._requeue_if_not_pending("barrel", b)
                 return
 
         self.get_logger().info(
@@ -472,6 +492,15 @@ class Task2Controller(Node):
 
     def _yellow_seen_cb(self, msg: Bool):
         self._yellow_seen = msg.data
+
+    def _top_camera_cb(self, msg: Image):
+        frame = self._cv_bridge.imgmsg_to_cv2(msg, "bgr8")
+        self._last_top_frame = frame
+        if self.state == State.INSPECT_WORKSTATION and self._inspection_phase in (4, 5):
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            h = frame.shape[0]
+            yellow = cv2.inRange(hsv[-h // 8 :, :], (18, 100, 80), (35, 255, 255))
+            self._yellow_seen = int(yellow.sum()) > 300
 
     def _costmap_cb(self, msg: OccupancyGrid):
         self.costmap = msg
@@ -621,7 +650,6 @@ class Task2Controller(Node):
             return
 
         if self._nav_succeeded():
-            self.get_logger().info("DEBUG!! NAV SUCCEDED ")
             self._publish_approaching_object(0.0, 0.0, none=True)
             self._transition(State.INTERACT)
             self._start_interact()
@@ -964,8 +992,17 @@ class Task2Controller(Node):
         self._yellow_seen = False
         self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
         ws_pos = self.workstation_poses[color]
+        # Offset approach 1 m before the centroid so Nav2 doesn't drive into the belt
+        if self.current_pose is not None:
+            rx = self.current_pose.pose.pose.position.x
+            ry = self.current_pose.pose.pose.position.y
+            delta = ws_pos - np.array([rx, ry])
+            dist = float(np.linalg.norm(delta))
+            approach_xy = ws_pos - (delta / dist) * 1.0 if dist > 1.2 else ws_pos
+        else:
+            approach_xy = ws_pos
         self._send_nav_goal(
-            ws_pos[0], ws_pos[1], math.pi if color == "red" else math.pi / 2
+            approach_xy[0], approach_xy[1], math.pi if color == "red" else math.pi / 2
         )
 
     def _handle_inspection(self):
@@ -983,15 +1020,132 @@ class Task2Controller(Node):
             self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
             return
 
-        # TODO Phase 4: implement inspection phases 1–5.
-        # Stub: phases 1+ skip straight to FOLLOW_BLUE_LINE.
-        # Remove this block when real phase logic is added.
-        if self._inspection_phase >= 1:
-            self.get_logger().warn(
-                "INSPECT_WORKSTATION not yet implemented — skipping to FOLLOW_BLUE_LINE."
-            )
-            self._pub_arm("look_down")
-            self._transition(State.FOLLOW_BLUE_LINE)
+        now = self.get_clock().now().nanoseconds / 1e9
+        elapsed = now - self._phase_start_time
+
+        # Phase 1 — Forward to wall (front LiDAR ≤ 0.30 m or 10 s timeout)
+        if self._inspection_phase == 1:
+            ranges = self._last_scan_ranges
+            near_wall = False
+            if ranges:
+                front = list(ranges[:30]) + list(ranges[-30:])
+                valid = [r for r in front if 0.01 < r < 10.0]
+                if valid and min(valid) <= 0.30:
+                    near_wall = True
+            if near_wall or elapsed > 10.0:
+                self._stop_cmd_vel()
+                self._inspection_phase = 2
+                self._phase_start_time = now
+            else:
+                self._send_cmd_vel(0.08, 0.0)
+            return
+
+        # Phase 2 — Yaw alignment (P-controller, target π red / π/2 green, 10 s timeout)
+        if self._inspection_phase == 2:
+            target_yaw = math.pi if self._inspection_color == "red" else math.pi / 2
+            if self.current_pose is not None:
+                q = self.current_pose.pose.pose.orientation
+                cur_yaw = _quaternion_to_yaw([q.w, q.x, q.y, q.z])
+                error = _normalize_angle(target_yaw - cur_yaw)
+                if abs(error) < 0.05 or elapsed > 10.0:
+                    self._stop_cmd_vel()
+                    self._inspection_phase = 3
+                    self._phase_start_time = now
+                else:
+                    self._send_cmd_vel(0.0, max(-0.5, min(0.5, 1.5 * error)))
+            elif elapsed > 10.0:
+                self._inspection_phase = 3
+                self._phase_start_time = now
+            return
+
+        # Phase 3 — Hough tilt correction (top camera, < 0.5° or 5 s timeout)
+        if self._inspection_phase == 3:
+            if self._last_top_frame is not None and elapsed < 5.0:
+                tilt = self._compute_belt_tilt(self._last_top_frame)
+                if abs(tilt) < 0.0087:
+                    self._stop_cmd_vel()
+                    self._inspection_phase = 4
+                    self._phase_start_time = now
+                    self._yellow_seen = False
+                else:
+                    self._send_cmd_vel(0.0, max(-0.3, min(0.3, 0.5 * tilt)))
+            elif elapsed >= 5.0:
+                self._stop_cmd_vel()
+                self._inspection_phase = 4
+                self._phase_start_time = now
+                self._yellow_seen = False
+            return
+
+        # Phase 4 — Reverse to yellow line (or rear obstacle ≤ 0.40 m or 10 s)
+        if self._inspection_phase == 4:
+            ranges = self._last_scan_ranges
+            rear_hit = False
+            if ranges:
+                rear = list(ranges[150:211])
+                valid = [r for r in rear if 0.01 < r < 10.0]
+                if valid and min(valid) <= 0.40:
+                    rear_hit = True
+            if self._yellow_seen or rear_hit or elapsed > 10.0:
+                self._stop_cmd_vel()
+                self._yellow_seen = False
+                self._inspection_phase = 5
+                self._phase_start_time = now
+                self._tile_pause_start = None
+            else:
+                self._send_cmd_vel(-0.06, 0.0)
+            return
+
+        # Phase 5 — Forward tile scan (brightness trigger + SSIM, exit on yellow or 30 s)
+        if self._inspection_phase == 5:
+            if self._yellow_seen or elapsed > 30.0:
+                self._stop_cmd_vel()
+                self._pub_arm("garage")
+                self._inspection_phase = 6
+                self._phase_start_time = now
+                return
+
+            if self._tile_pause_start is not None:
+                pause_elapsed = now - self._tile_pause_start
+                if pause_elapsed >= 0.3 and self._last_top_frame is not None:
+                    if not self._tile_scored_this_pause:
+                        defect, ssim_score = self._score_tile(self._last_top_frame)
+                        self.tile_results.append({
+                            "station": self._inspection_color,
+                            "tile_id": self._tile_index,
+                            "defect": defect,
+                            "ssim": ssim_score,
+                        })
+                        self._tile_index += 1
+                        self._tile_scored_this_pause = True
+                        self.get_logger().info(
+                            f"Tile {self._tile_index - 1}: ssim={ssim_score:.3f} defect={defect}"
+                        )
+                    if pause_elapsed >= 2.0:
+                        self._tile_pause_start = None
+                        self._tile_scored_this_pause = False
+                return
+
+            if self._last_top_frame is not None:
+                h, w = self._last_top_frame.shape[:2]
+                roi = self._last_top_frame[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
+                if float(roi.mean()) > 120:
+                    self._stop_cmd_vel()
+                    self._tile_pause_start = now
+                    self._tile_scored_this_pause = False
+                    return
+
+            self._send_cmd_vel(0.08, 0.0)
+            return
+
+        # Phase 6 — Escape: CW turn ~130° then forward 4 s
+        if self._inspection_phase == 6:
+            if elapsed < 2.6:
+                self._send_cmd_vel(0.0, -0.9)
+            elif elapsed < 6.6:
+                self._send_cmd_vel(0.15, 0.0)
+            else:
+                self._stop_cmd_vel()
+                self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── FOLLOW_BLUE_LINE ──────────────────────────────────────────────
 
@@ -1047,6 +1201,54 @@ class Task2Controller(Node):
         msg = String()
         msg.data = pose_name
         self.arm_pub.publish(msg)
+
+    def _send_cmd_vel(self, linear: float, angular: float):
+        t = Twist()
+        t.linear.x = linear
+        t.angular.z = angular
+        self.cmd_vel_pub.publish(t)
+
+    def _stop_cmd_vel(self):
+        self._send_cmd_vel(0.0, 0.0)
+
+    def _compute_belt_tilt(self, frame: np.ndarray) -> float:
+        """Return tilt angle (rad) of dominant lines in the top-camera view."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        lines = cv2.HoughLinesP(
+            edges, 1, math.pi / 180, threshold=80, minLineLength=60, maxLineGap=10
+        )
+        if lines is None:
+            return 0.0
+        angles = [
+            math.atan2(int(ln[0][3]) - int(ln[0][1]), int(ln[0][2]) - int(ln[0][0]))
+            for ln in lines
+        ]
+        median_angle = float(np.median(angles))
+        if abs(median_angle) > math.pi / 4:
+            median_angle -= math.copysign(math.pi / 2, median_angle)
+        return median_angle
+
+    def _score_tile(self, frame: np.ndarray) -> tuple[bool, float]:
+        """SSIM anomaly score against reference tile. Returns (is_defect, ssim_score)."""
+        from skimage.metrics import structural_similarity as ssim  # lazy import
+
+        if self._reference_tile is None:
+            return False, 1.0
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return False, 1.0
+        c = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(c)
+        box = cv2.boxPoints(rect).astype(np.float32)
+        dst = np.array([[0, 511], [511, 511], [511, 0], [0, 0]], dtype=np.float32)
+        M = cv2.getPerspectiveTransform(box, dst)
+        warped = cv2.warpPerspective(gray, M, (512, 512))
+        ref = cv2.resize(self._reference_tile, (512, 512))
+        score = float(ssim(ref, warped))
+        return score < self._ssim_threshold, score
 
     # ── Navigation helpers ─────────────────────────────────────────────
 
