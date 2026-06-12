@@ -50,6 +50,7 @@ setup(
             "yellow_line_injector = megatron.yellow_line_injector:main",
             "cylinder_detector = megatron.cylinder_detector:main",
             "workstation_detector = megatron.workstation_detector:main",
+            "workstation_detector2 = megatron.workstation_detector2:main",
             "perception_visualizer = megatron.perception_visualizer:main",
             "save_image_topic = megatron.save_image_topic:main",
             "qr_reader = megatron.qr_reader:main",

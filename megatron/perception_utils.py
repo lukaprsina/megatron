@@ -8,12 +8,13 @@ Provides:
 """
 
 import math
+from collections import Counter
 
 import numpy as np
 import tf2_geometry_msgs as tfg
 from geometry_msgs.msg import PointStamped, Vector3Stamped
 from sensor_msgs_py import point_cloud2 as pc2_lib
-from collections import Counter
+
 # ---------------------------------------------------------------------------
 # Depth → 3D projection
 # ---------------------------------------------------------------------------
@@ -270,14 +271,57 @@ class IncrementalTrackManager:
     where N = number of active tracks (typically < 10).
     """
 
-    def __init__(self, dedup_distance: float = 0.5, confirmation_count: int = 3):
+    def __init__(
+        self,
+        dedup_distance: float = 0.5,
+        confirmation_count: int = 3,
+        compact_inlier_radius: float = 0.35,
+        compact_min_fraction: float = 0.6,
+    ):
         self.dedup_distance = dedup_distance
         self.confirmation_count = confirmation_count
+        self.compact_inlier_radius = compact_inlier_radius
+        self.compact_min_fraction = compact_min_fraction
         self._tracks: list[dict] = []
         self._next_id = 1
 
+    def _compact_points(self, track):
+        """Filter observations to those within _inlier_radius_ of the median XY position.
+
+        Returns (list of inlier observations, median_x, median_y).
+        """
+        obs = track["observations"]
+        if len(obs) < 3:
+            return obs, None, None
+        xs = [o["map_pos"][0] for o in obs]
+        ys = [o["map_pos"][1] for o in obs]
+        mx, my = np.median(xs), np.median(ys)
+        inliers = [
+            o
+            for o in obs
+            if np.sqrt((o["map_pos"][0] - mx) ** 2 + (o["map_pos"][1] - my) ** 2)
+            <= self.compact_inlier_radius
+        ]
+        return inliers, mx, my
+
+    def _is_compact(self, track):
+        """True if enough observations are clustered around the median XY position."""
+        obs = track["observations"]
+        if len(obs) < self.confirmation_count:
+            return False
+        inliers, _, _ = self._compact_points(track)
+        required = max(3, int(self.compact_min_fraction * len(obs)))
+        return len(inliers) >= required
+
     def add_observation(self, map_point, normal, cam_dist, stamp, label=None):
         """Add a new observation and return (status, track).
+
+        Matching: greedy nearest-observation (not centroid), so TF drift
+        during sharp turns doesn't split a single object into two tracks.
+
+        Gating: a track only confirms when its observations form a compact
+        cluster — prevents two genuinely close objects from being bridged
+        and merged into one.
 
         status is one of:
         - 'confirmed' — track just crossed the confirmation threshold
@@ -285,31 +329,39 @@ class IncrementalTrackManager:
         - 'new'       — created a brand-new unconfirmed track
         - 'pending'   — observation added to existing unconfirmed track
         """
+        map_point = np.asarray(map_point, dtype=np.float64)
+        normal = np.asarray(normal, dtype=np.float64)
+        cam_dist = float(cam_dist)
+
         obs = {
-            "map_pos": np.asarray(map_point, dtype=np.float64),
-            "normal": np.asarray(normal, dtype=np.float64),
-            "cam_dist": float(cam_dist),
+            "map_pos": map_point,
+            "normal": normal,
+            "cam_dist": cam_dist,
             "stamp": stamp,
         }
         if label is not None:
             obs["label"] = label
 
-        # Try to match against existing tracks
+        best_track = None
+        best_dist = float("inf")
         for track in self._tracks:
-            center, _ , _ = self.get_best_estimate(track)
-            if np.linalg.norm(map_point - center) < self.dedup_distance:
-                track["observations"].append(obs)
-                # Update label to most recent if provided
-                # if label is not None:
-                #     track["label"] = label
-                if track["confirmed"]:
-                    return "updated", track
-                if len(track["observations"]) >= self.confirmation_count:
-                    track["confirmed"] = True
-                    return "confirmed", track
-                return "pending", track
+            for o in track["observations"]:
+                d = np.linalg.norm(map_point[:2] - o["map_pos"][:2])
+                if d < best_dist:
+                    best_dist = d
+                    best_track = track
 
-        # No match — new track
+        if best_track is not None and best_dist < self.dedup_distance:
+            best_track["observations"].append(obs)
+            if best_track["confirmed"]:
+                return "updated", best_track
+            if len(best_track["observations"]) >= self.confirmation_count:
+                if self._is_compact(best_track):
+                    best_track["confirmed"] = True
+                    return "confirmed", best_track
+                return "pending", best_track
+            return "pending", best_track
+
         track = {
             "id": self._next_id,
             "observations": [obs],
@@ -321,39 +373,33 @@ class IncrementalTrackManager:
         return "new", track
 
     def get_best_estimate(self, track):
-        """Inverse-distance² weighted mean of position and normal.
+        """Robust estimate: median of compact inliers + weighted normal.
 
-        Returns (position, normal) as (3,) numpy arrays.
+        Returns (position, normal, label).
         """
         observations = track["observations"]
         if not observations:
             return np.zeros(3), np.array([1.0, 0.0, 0.0]), None
 
-        weights = []
-        positions = []
-        normals = []
-        labels = []
-        for obs in observations:
-            w = 1.0 / (obs["cam_dist"] ** 2 + 0.01)
-            weights.append(w)
-            positions.append(obs["map_pos"])
-            normals.append(obs["normal"])
-            labels.append(obs.get("label"))
+        inliers, _, _ = self._compact_points(track)
+        pts = inliers if len(inliers) >= 3 else observations
 
-        weights = np.array(weights)
-        positions = np.array(positions)
-        normals = np.array(normals)
-        labels = np.array(labels)
+        positions = np.array([o["map_pos"] for o in pts])
+        normals = np.array([o["normal"] for o in pts])
+        labels = [o.get("label") for o in pts]
 
-        pos = np.average(positions, axis=0, weights=weights)
-        label = Counter(labels).most_common(1)[0][0]
-        # Weighted average of normals, then re-normalize
+        weights = np.array([1.0 / (o["cam_dist"] ** 2 + 0.01) for o in pts])
+
+        pos = np.median(positions, axis=0)
         n = np.average(normals, axis=0, weights=weights)
         n_len = np.linalg.norm(n)
         if n_len > 1e-6:
             n = n / n_len
         else:
             n = np.array([1.0, 0.0, 0.0])
+
+        valid_labels = [lb for lb in labels if lb is not None]
+        label = Counter(valid_labels).most_common(1)[0][0] if valid_labels else None
 
         return pos, n, label
 

@@ -183,7 +183,7 @@ def generate_launch_description():
 
     workstation_detector = Node(
         package="megatron",
-        executable="workstation_detector",
+        executable="workstation_detector2",
         name="workstation_detector",
         output="screen",
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],

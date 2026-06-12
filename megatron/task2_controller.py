@@ -37,6 +37,7 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from sensor_msgs.msg import Image, LaserScan
+from skimage.metrics import structural_similarity as ssim
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
@@ -326,6 +327,8 @@ class Task2Controller(Node):
         self.create_subscription(
             OccupancyGrid, "/global_costmap/costmap", self._costmap_cb, costmap_qos
         )
+        self.create_subscription(String, "/robot_state", self._robot_state_cb, 10)
+
         # --- Nav2 action client ---
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self._spill_check_client = self.create_client(Trigger, "/spill_check")
@@ -456,7 +459,11 @@ class Task2Controller(Node):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
                     self._nav_update = True
-                if b["orientation"] == "horizontal" and not b.get("approached", False) and self.state == State.PATROL:
+                if (
+                    b["orientation"] == "horizontal"
+                    and not b.get("approached", False)
+                    and self.state == State.PATROL
+                ):
                     self._requeue_if_not_pending("barrel", b)
                 return
 
@@ -487,6 +494,47 @@ class Task2Controller(Node):
         self._qr_task_raw = msg.data
         self.get_logger().info(f"QR received: {msg.data!r}")
 
+    def _robot_state_cb(self, msg: String):
+        try:
+            new_state = State[msg.data]
+        except KeyError:
+            self.get_logger().warn(f"Unknown state from /robot_state: {msg.data!r}")
+            return
+
+        if new_state == self.state:
+            return
+
+        self.get_logger().info(
+            f"Manual state override from /robot_state: {self.state.name} → {new_state.name}"
+        )
+        self._cancel_nav()
+        self._stop_cmd_vel()
+
+        if new_state == State.INSPECT_WORKSTATION:
+            if self.assigned_task is None and self._qr_task_raw not in (None, ""):
+                task_token = _parse_qr_task(self._qr_task_raw)
+                self._qr_task_raw = None
+                if task_token and task_token not in ("nothing", "report"):
+                    self.assigned_task = task_token
+                    self.get_logger().info(
+                        f"Eagerly parsed QR: assigned_task = {task_token!r}"
+                    )
+
+            color = (
+                self.assigned_task.split("_")[1]
+                if self.assigned_task and self.assigned_task.startswith("defects")
+                else next(iter(self.workstation_poses.keys()), None)
+            )
+            if color is None:
+                self.get_logger().error(
+                    "No task assigned and no workstations detected — "
+                    "can't enter INSPECT_WORKSTATION"
+                )
+                return
+            self._start_inspection(color)
+
+        self._transition(new_state)
+
     def _scan_cb(self, msg: LaserScan):
         self._last_scan_ranges = msg.ranges
 
@@ -499,7 +547,11 @@ class Task2Controller(Node):
         if self.state == State.INSPECT_WORKSTATION and self._inspection_phase in (4, 5):
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             h = frame.shape[0]
-            yellow = cv2.inRange(hsv[-h // 8 :, :], (18, 100, 80), (35, 255, 255))
+            yellow = cv2.inRange(
+                hsv[-h // 8 :, :],
+                np.array([18, 100, 80], dtype=np.uint8),
+                np.array([35, 255, 255], dtype=np.uint8),
+            )
             self._yellow_seen = int(yellow.sum()) > 300
 
     def _costmap_cb(self, msg: OccupancyGrid):
@@ -977,6 +1029,19 @@ class Task2Controller(Node):
                 self.current_target = None
                 self._next_post_patrol_target()
         else:
+            if self.assigned_task and self.assigned_task.startswith("defects"):
+                color = self.assigned_task.split("_")[1]
+                if color in self.workstation_poses:
+                    self.get_logger().info(
+                        f"Post-patrol done — starting {color} workstation inspection."
+                    )
+                    self._start_inspection(color)
+                    self._transition(State.INSPECT_WORKSTATION)
+                    return
+                else:
+                    self.get_logger().warn(
+                        f"Defects task for '{color}' but workstation pose unknown — skipping."
+                    )
             self.get_logger().info(
                 "All post-patrol targets handled — heading to room 2."
             )
@@ -991,14 +1056,30 @@ class Task2Controller(Node):
         self._tile_index = 0
         self._yellow_seen = False
         self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
-        ws_pos = self.workstation_poses[color]
-        # Offset approach 1 m before the centroid so Nav2 doesn't drive into the belt
+
+        if color in self.workstation_poses:
+            ws_pos = self.workstation_poses[color]
+        elif self.current_pose is not None:
+            self.get_logger().warn(
+                f"Workstation '{color}' pose unknown — using current position."
+            )
+            ws_pos = np.array(
+                [
+                    self.current_pose.position.x,
+                    self.current_pose.position.y,
+                ]
+            )
+        else:
+            self.get_logger().error("No pose available — can't start inspection.")
+            return
+
         if self.current_pose is not None:
-            rx = self.current_pose.pose.pose.position.x
-            ry = self.current_pose.pose.pose.position.y
+            rx = self.current_pose.position.x
+            ry = self.current_pose.position.y
             delta = ws_pos - np.array([rx, ry])
             dist = float(np.linalg.norm(delta))
-            approach_xy = ws_pos - (delta / dist) * 1.0 if dist > 1.2 else ws_pos
+            # approach_xy = ws_pos - (delta / dist) * 0.67 if dist > 0.8 else ws_pos
+            approach_xy = ws_pos - (delta / dist) * 0.4 if dist > 0.6 else ws_pos
         else:
             approach_xy = ws_pos
         self._send_nav_goal(
@@ -1006,18 +1087,26 @@ class Task2Controller(Node):
         )
 
     def _handle_inspection(self):
-        # Phase 0: navigate to workstation
-        if self._inspection_phase == 0 and not self._is_nav_complete():
+        if self._phase_start_time is None:
             return
-        if self._inspection_phase == 0 and self._is_nav_complete():
+        # Phase 0: navigate to workstation (Nav2) — 30 s timeout
+        if self._inspection_phase == 0:
+            now = self.get_clock().now().nanoseconds / 1e9
+            elapsed = now - self._phase_start_time
+            if not self._is_nav_complete() and elapsed < 30.0:
+                return
+            if elapsed >= 30.0:
+                self.get_logger().warn("Phase 0 nav timed out — advancing anyway.")
+                self._cancel_nav()
+                self._stop_cmd_vel()
             arm_pose = (
-                "look_at_belt_right"
+                "look_at_belt_left"
                 if self._inspection_color == "red"
-                else "look_at_belt_left"
+                else "look_at_belt_right"
             )
             self._pub_arm(arm_pose)
             self._inspection_phase = 1
-            self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
+            self._phase_start_time = now
             return
 
         now = self.get_clock().now().nanoseconds / 1e9
@@ -1044,7 +1133,7 @@ class Task2Controller(Node):
         if self._inspection_phase == 2:
             target_yaw = math.pi if self._inspection_color == "red" else math.pi / 2
             if self.current_pose is not None:
-                q = self.current_pose.pose.pose.orientation
+                q = self.current_pose.orientation
                 cur_yaw = _quaternion_to_yaw([q.w, q.x, q.y, q.z])
                 error = _normalize_angle(target_yaw - cur_yaw)
                 if abs(error) < 0.05 or elapsed > 10.0:
@@ -1109,12 +1198,14 @@ class Task2Controller(Node):
                 if pause_elapsed >= 0.3 and self._last_top_frame is not None:
                     if not self._tile_scored_this_pause:
                         defect, ssim_score = self._score_tile(self._last_top_frame)
-                        self.tile_results.append({
-                            "station": self._inspection_color,
-                            "tile_id": self._tile_index,
-                            "defect": defect,
-                            "ssim": ssim_score,
-                        })
+                        self.tile_results.append(
+                            {
+                                "station": self._inspection_color,
+                                "tile_id": self._tile_index,
+                                "defect": defect,
+                                "ssim": ssim_score,
+                            }
+                        )
                         self._tile_index += 1
                         self._tile_scored_this_pause = True
                         self.get_logger().info(
@@ -1153,8 +1244,8 @@ class Task2Controller(Node):
         # blue_line_follower.py activates on /robot_state == "FOLLOW_BLUE_LINE"
         if self._qr_task_raw is not None:
             task_token = _parse_qr_task(self._qr_task_raw)
-            self._qr_task_raw = None
             if task_token == "report":
+                self._qr_task_raw = None
                 self.get_logger().info("CTO QR received — generating report.")
                 self._generate_report()
                 self._transition(State.DONE)
@@ -1231,13 +1322,13 @@ class Task2Controller(Node):
 
     def _score_tile(self, frame: np.ndarray) -> tuple[bool, float]:
         """SSIM anomaly score against reference tile. Returns (is_defect, ssim_score)."""
-        from skimage.metrics import structural_similarity as ssim  # lazy import
-
         if self._reference_tile is None:
             return False, 1.0
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(
+            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
         if not contours:
             return False, 1.0
         c = max(contours, key=cv2.contourArea)
@@ -1247,7 +1338,8 @@ class Task2Controller(Node):
         M = cv2.getPerspectiveTransform(box, dst)
         warped = cv2.warpPerspective(gray, M, (512, 512))
         ref = cv2.resize(self._reference_tile, (512, 512))
-        score = float(ssim(ref, warped))
+        _score = ssim(ref, warped)
+        score = float(_score[0] if isinstance(_score, tuple) else _score)
         return score < self._ssim_threshold, score
 
     # ── Navigation helpers ─────────────────────────────────────────────
