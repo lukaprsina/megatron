@@ -804,8 +804,9 @@ class Task2Controller(Node):
 
         if target["type"] == "face":
             label = target.get("label") or ""
-            pronoun = "woman" if "she" in label.lower() else "man"
-            self.speaker.speak(f"Hi {pronoun}! What task should I perform?")
+            name = label
+            # pronoun = "woman" if "she" in label.lower() else "man"
+            self.speaker.speak(f"Hi {name}! What task should I perform?")
             self._qr_task_raw = None
 
         elif target["type"] == "barrel":
