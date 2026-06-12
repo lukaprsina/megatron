@@ -13,7 +13,7 @@ import numpy as np
 import tf2_geometry_msgs as tfg
 from geometry_msgs.msg import PointStamped, Vector3Stamped
 from sensor_msgs_py import point_cloud2 as pc2_lib
-
+from collections import Counter
 # ---------------------------------------------------------------------------
 # Depth → 3D projection
 # ---------------------------------------------------------------------------
@@ -296,12 +296,12 @@ class IncrementalTrackManager:
 
         # Try to match against existing tracks
         for track in self._tracks:
-            center, _ = self.get_best_estimate(track)
+            center, _ , _ = self.get_best_estimate(track)
             if np.linalg.norm(map_point - center) < self.dedup_distance:
                 track["observations"].append(obs)
                 # Update label to most recent if provided
-                if label is not None:
-                    track["label"] = label
+                # if label is not None:
+                #     track["label"] = label
                 if track["confirmed"]:
                     return "updated", track
                 if len(track["observations"]) >= self.confirmation_count:
@@ -327,23 +327,26 @@ class IncrementalTrackManager:
         """
         observations = track["observations"]
         if not observations:
-            return np.zeros(3), np.array([1.0, 0.0, 0.0])
+            return np.zeros(3), np.array([1.0, 0.0, 0.0]), None
 
         weights = []
         positions = []
         normals = []
+        labels = []
         for obs in observations:
             w = 1.0 / (obs["cam_dist"] ** 2 + 0.01)
             weights.append(w)
             positions.append(obs["map_pos"])
             normals.append(obs["normal"])
+            labels.append(obs.get("label"))
 
         weights = np.array(weights)
         positions = np.array(positions)
         normals = np.array(normals)
+        labels = np.array(labels)
 
         pos = np.average(positions, axis=0, weights=weights)
-
+        label = Counter(labels).most_common(1)[0][0]
         # Weighted average of normals, then re-normalize
         n = np.average(normals, axis=0, weights=weights)
         n_len = np.linalg.norm(n)
@@ -352,7 +355,7 @@ class IncrementalTrackManager:
         else:
             n = np.array([1.0, 0.0, 0.0])
 
-        return pos, n
+        return pos, n, label
 
     def get_confirmed_tracks(self):
         return [t for t in self._tracks if t["confirmed"]]

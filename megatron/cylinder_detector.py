@@ -243,7 +243,7 @@ class CylinderDetector(Node):
             if d < best_d:
                 best, best_d = c, d
 
-        if best is None or best_d > radius:
+        if best is None or best_d > radius: # new Cluster
             best = Cluster(x, y, z, colour, orientation, self.cluster_id_counter)
             self.cluster_id_counter += 1
             self.clusters.append(best)

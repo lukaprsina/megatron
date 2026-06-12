@@ -89,6 +89,14 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("launch_rviz")),
     )
 
+    keepout_filter_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([pkg_megatron, "launch", "keepout_filter.launch.py"])
+        ),
+        launch_arguments=[
+            ("use_sim_time", LaunchConfiguration("use_sim_time")),
+        ],
+    )
     face_detector = Node(
         package="megatron",
         executable="face_detector",
@@ -195,19 +203,19 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("visualization")),
     )
 
-    # TODO
     ld = LaunchDescription(args)
     ld.add_action(sim_arm_nav)
     ld.add_action(rviz)
-    ld.add_action(cylinder_segmentation)
-    ld.add_action(face_detector)
-    ld.add_action(ring_detector)
+    ld.add_action(keepout_filter_launch)
+    # ld.add_action(cylinder_segmentation)
+    # ld.add_action(face_detector)
+    # ld.add_action(ring_detector)
     ld.add_action(qr_reader)
     ld.add_action(arm_mover)
-    ld.add_action(yellow_line_injector)
+    # ld.add_action(yellow_line_injector)
     ld.add_action(blue_line_follower)
-    ld.add_action(cylinder_detector)
-    ld.add_action(workstation_detector)
+    # ld.add_action(cylinder_detector)
+    # ld.add_action(workstation_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
     return ld

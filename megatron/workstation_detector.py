@@ -179,7 +179,7 @@ class WorkstationDetector(Node):
             )
 
             if status in ("confirmed", "updated"):
-                pos, _ = self._trackers[color].get_best_estimate(track)
+                pos, _, _ = self._trackers[color].get_best_estimate(track)
                 self._publish_marker(color, pos)
                 if status == "confirmed":
                     self.get_logger().info(
@@ -219,7 +219,7 @@ class WorkstationDetector(Node):
         for color, tracker in self._trackers.items():
             confirmed = tracker.get_confirmed_tracks()
             if confirmed:
-                pos, _ = tracker.get_best_estimate(confirmed[-1])
+                pos, _, _ = tracker.get_best_estimate(confirmed[-1])
                 self._publish_marker(color, pos)
 
 

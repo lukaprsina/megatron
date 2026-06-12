@@ -690,11 +690,11 @@ class RingDetectorNode(Node):
 
             if status == "confirmed":
                 self._publish_detection(track, rgb_msg.header.stamp)
-                pos, _ = self.track_manager.get_best_estimate(track)
+                pos, _, _ = self.track_manager.get_best_estimate(track)
                 track["_last_published_pos"] = pos.copy()
                 track["_update_count_since_publish"] = 0
             elif status == "updated":
-                pos, _ = self.track_manager.get_best_estimate(track)
+                pos, _, _ = self.track_manager.get_best_estimate(track)
                 last_pos = track.get("_last_published_pos")
                 update_count = track.get("_update_count_since_publish", 0)
                 if (
@@ -724,7 +724,7 @@ class RingDetectorNode(Node):
     # ------------------------------------------------------------------
 
     def _publish_detection(self, track, stamp):
-        pos, normal = self.track_manager.get_best_estimate(track)
+        pos, normal, _ = self.track_manager.get_best_estimate(track)
         color_name = track.get("label", "unknown")
 
         self.get_logger().info(
@@ -755,7 +755,7 @@ class RingDetectorNode(Node):
         markers: list[Marker] = []
         now_stamp = self.get_clock().now().to_msg()
         for track in self.track_manager.get_confirmed_tracks():
-            pos, nrm = self.track_manager.get_best_estimate(track)
+            pos, nrm, _ = self.track_manager.get_best_estimate(track)
             color_name = track.get("label", "unknown")
             i = track["id"] - 1
 
