@@ -45,6 +45,8 @@ SENSOR_QOS = QoSProfile(
     depth=1,
 )
 
+DEBUG_TOPIC = "/workstation_detector/debug"
+
 # HSV thresholds — identical to v1
 RED_LO1 = np.array([0, 80, 60], dtype=np.uint8)
 RED_HI1 = np.array([10, 255, 255], dtype=np.uint8)
@@ -58,7 +60,7 @@ MIN_CONTOUR_AREA = 80  # px² — reduced from v1's 2000; floor ROI already prun
 MIN_ASPECT_RATIO = 3.0  # belt shape; rings/barrels have aspect ~1
 MIN_POINTS_3D = 15  # minimum 3D points to attempt PCA
 MAX_FLAT_STD = 0.03  # m — flat belt ≈ 0.01 m, barrel ≈ 0.15 m in normal direction
-MIN_BELT_LENGTH_M = 1.5  # map-frame belt length; barrels project ~0.2 m
+MIN_BELT_LENGTH_M = 0.8  # map-frame belt length; barrels project ~0.2 m
 CONFIRM_COUNT = 10  # sightings before locking (median of these)
 TF_TIMEOUT_S = 0.2  # 4× longer than v1's 0.05 s
 
@@ -87,6 +89,7 @@ class WorkstationDetector2(Node):
         self.create_subscription(String, "/robot_state", self._state_cb, 10)
 
         self._pub = self.create_publisher(Marker, "/detected_workstations", 10)
+        self._debug_pub = self.create_publisher(Image, DEBUG_TOPIC, 1)
 
         self._latest_pc2: PointCloud2 | None = None
         self._robot_state: str = "INIT"
@@ -98,6 +101,8 @@ class WorkstationDetector2(Node):
         }
         self._locked: dict[str, bool] = {"red": False, "green": False}
         self._locked_markers: dict[str, Marker] = {}
+        self._last_reject: dict[str, str] = {"red": "no contour", "green": "no contour"}
+        self._debug_frame_skip = 0  # publish every 3rd frame
 
         self.create_timer(2.0, self._republish_locked)
         self.get_logger().info(
@@ -114,12 +119,9 @@ class WorkstationDetector2(Node):
         self._latest_pc2 = msg
 
     def _image_cb(self, msg: Image) -> None:
-        if self._robot_state in _INACTIVE_STATES:
-            return
-        if self._latest_pc2 is None:
-            return
-        if self._locked["red"] and self._locked["green"]:
-            return
+        inactive = self._robot_state in _INACTIVE_STATES
+        no_pc2 = self._latest_pc2 is None
+        all_locked = self._locked["red"] and self._locked["green"]
 
         try:
             img = self._bridge.imgmsg_to_cv2(msg, "bgr8")
@@ -127,17 +129,112 @@ class WorkstationDetector2(Node):
             return
 
         h, w = img.shape[:2]
-        pc2_snap = self._latest_pc2
 
-        # Floor ROI: zero out top half to ignore walls, rings, barrel bodies
-        floor_img = img.copy()
-        floor_img[: h // 2, :] = 0
+        if not inactive and not no_pc2 and not all_locked:
+            pc2_snap: PointCloud2 = self._latest_pc2  # type: ignore[assignment]
+            floor_img = img.copy()
+            floor_img[: h // 2, :] = 0
+            hsv = cv2.cvtColor(floor_img, cv2.COLOR_BGR2HSV)
+            masks = dict(self._build_masks(hsv))
+            for color, mask in masks.items():
+                if not self._locked[color]:
+                    self._process_color(color, mask, h, w, pc2_snap)
+        else:
+            masks = {"red": None, "green": None}
 
-        hsv = cv2.cvtColor(floor_img, cv2.COLOR_BGR2HSV)
+        # Publish debug image every 3rd frame to keep bandwidth reasonable
+        self._debug_frame_skip = (self._debug_frame_skip + 1) % 3
+        if self._debug_frame_skip == 0 and self._debug_pub.get_subscription_count() > 0:
+            reason = (
+                "inactive"
+                if inactive
+                else ("no_pc2" if no_pc2 else "all_locked" if all_locked else "")
+            )
+            self._publish_debug(img, masks, h, w, reason)
 
-        for color, mask in self._build_masks(hsv):
-            if not self._locked[color]:
-                self._process_color(color, mask, h, w, pc2_snap)
+    def _publish_debug(
+        self, img: np.ndarray, masks: dict, h: int, w: int, skip_reason: str
+    ) -> None:
+        debug = img.copy()
+
+        # Floor ROI boundary
+        cv2.line(debug, (0, h // 2), (w, h // 2), (255, 255, 0), 1)
+        cv2.putText(
+            debug,
+            "floor ROI",
+            (4, h // 2 - 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (255, 255, 0),
+            1,
+        )
+
+        # Overlay color masks as tinted regions + contours
+        overlay_colors = {"red": (0, 0, 200), "green": (0, 200, 0)}
+        for color, mask in masks.items():
+            if mask is None:
+                continue
+            bgr = overlay_colors[color]
+            tint = np.zeros_like(debug)
+            tint[mask > 0] = bgr
+            cv2.addWeighted(tint, 0.35, debug, 1.0, 0, debug)
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(debug, contours, -1, bgr, 1)
+
+        # Status text per color
+        status_lines = []
+        for color in ("red", "green"):
+            n = len(self._candidates[color])
+            if self._locked[color]:
+                status_lines.append(f"{color}: LOCKED ({n} sightings)")
+            elif skip_reason:
+                status_lines.append(f"{color}: SKIP ({skip_reason})")
+            else:
+                status_lines.append(
+                    f"{color}: {n}/{CONFIRM_COUNT} — {self._last_reject[color]}"
+                )
+
+        if skip_reason:
+            status_lines.insert(0, f"state={self._robot_state}")
+
+        for i, line in enumerate(status_lines):
+            cv2.putText(
+                debug,
+                line,
+                (4, 14 + i * 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                debug,
+                line,
+                (4, 14 + i * 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 0, 0),
+                3,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                debug,
+                line,
+                (4, 14 + i * 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+        try:
+            self._debug_pub.publish(self._bridge.cv2_to_imgmsg(debug, "bgr8"))
+        except Exception:
+            pass
 
     # ── Detection pipeline ─────────────────────────────────────────────────────
 
@@ -178,6 +275,7 @@ class WorkstationDetector2(Node):
                 best_cnt = cnt
 
         if best_cnt is None:
+            self._last_reject[color] = "no contour"
             return
 
         cnt_mask = np.zeros((h, w), dtype=np.uint8)
@@ -185,6 +283,7 @@ class WorkstationDetector2(Node):
 
         pts_cam = extract_3d_points_from_pc2(cnt_mask, pc2_msg, max_range=5.0)
         if len(pts_cam) < MIN_POINTS_3D:
+            self._last_reject[color] = f"pts_3d={len(pts_cam)}<{MIN_POINTS_3D}"
             return
 
         # PCA: fit a 3D line through the point cloud
@@ -197,6 +296,7 @@ class WorkstationDetector2(Node):
         # Flatness filter: stds[0] = spread in the direction normal to the floor.
         # A flat belt has stds[0] ≈ 0.01 m; a barrel or ring has stds[0] ≈ 0.15 m.
         if stds[0] >= MAX_FLAT_STD:
+            self._last_reject[color] = f"flat_std={stds[0]:.3f}>={MAX_FLAT_STD}"
             self.get_logger().debug(
                 f"[{color}] rejected: flat_std={stds[0]:.3f} >= {MAX_FLAT_STD}"
             )
@@ -216,7 +316,8 @@ class WorkstationDetector2(Node):
                 rclpy.time.Time(),
                 timeout=Duration(seconds=TF_TIMEOUT_S),
             )
-        except Exception:
+        except Exception as e:
+            self._last_reject[color] = f"tf_fail:{e}"
             return
 
         pts_to_xf = np.array(
@@ -232,6 +333,7 @@ class WorkstationDetector2(Node):
         # Map-frame length filter: barrels project ~0.2 m, belts ≥ 1.5 m
         belt_length = float(np.linalg.norm(p2_map - p1_map))
         if belt_length < MIN_BELT_LENGTH_M:
+            self._last_reject[color] = f"len={belt_length:.2f}m<{MIN_BELT_LENGTH_M}"
             self.get_logger().debug(
                 f"[{color}] rejected: belt_length={belt_length:.2f} m < {MIN_BELT_LENGTH_M}"
             )
@@ -239,6 +341,7 @@ class WorkstationDetector2(Node):
 
         cx, cy = float(center_map[0]), float(center_map[1])
         self._candidates[color].append((cx, cy))
+        self._last_reject[color] = f"ok len={belt_length:.2f}m"
         n = len(self._candidates[color])
 
         self.get_logger().debug(

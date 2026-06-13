@@ -891,7 +891,7 @@ Visualization Manager:
       Enabled: true
       Name: Goal Markers
       Namespaces:
-        {}
+        waypoints: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -1069,11 +1069,11 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 123.7100601196289
+      Scale: 118.87138366699219
       Target Frame: <Fixed Frame>
       Value: TopDownOrtho (rviz_default_plugins)
-      X: -0.3091312646865845
-      Y: -4.06020975112915
+      X: 0.19746190309524536
+      Y: -5.089888572692871
     Saved: ~
 Window Geometry:
   Displays:

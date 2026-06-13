@@ -377,7 +377,7 @@ class Task2Controller(Node):
                     and self.current_target["type"] == "face"
                     and self.current_target["id"] == id
                 ):  # update approach goal
-                    self.get_logger().info("Seting up to recalculate approach")
+                    old_pos = np.array(f["pos"])
                     f["pos"] = pos
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
@@ -385,7 +385,9 @@ class Task2Controller(Node):
                     self.current_target["pos"] = pos
                     self.current_target["normal"] = (nx, ny)
                     self.current_target["last_seen"] = now
-                    self._nav_update = True
+                    if np.linalg.norm(pos[:2] - old_pos[:2]) > 0.05:
+                        self.get_logger().info("Seting up to recalculate approach")
+                        self._nav_update = True
                     return
 
                 elif np.linalg.norm(pos - f["pos"]) < self.DEDUP_DISTANCE:
@@ -795,34 +797,28 @@ class Task2Controller(Node):
         base = math.atan2(ny, nx)
         px, py = float(pos[0]), float(pos[1])
 
-        def f(x):
-            return (x**2) / 25**2
+        # All candidates at fixed approach distance; angular offsets spread the fan
+        def f(_x):
+            return 1.0
 
-        # degrees = [val for i in range(0,30,5) for val in (i, -i)]
         degrees = [
             0,
-            2,
-            -2,
-            3,
-            -3,
             5,
             -5,
-            7,
-            -7,
-            9,
-            -9,
             10,
             -10,
             15,
             -15,
-            # 20,          -20,
-            # 25,          -25,
-            # 30,          -30,
-            # 35,          -35,
-            # 40,          -40,
-            # 50,          -50,
-            # 60,          -60,
-            # 70,          -70,
+            20,
+            -20,
+            25,
+            -25,
+            30,
+            -30,
+            40,
+            -40,
+            50,
+            -50,
         ]
         offsets = [math.radians(d) for d in degrees]
         return [

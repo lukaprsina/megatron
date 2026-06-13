@@ -60,7 +60,8 @@ class ArmMoverAction(Node):
             "look_for_qr": [0.0, 0.6, 0.5, 2.0],
             "garage": [0.0, -0.45, 2.8, -0.8],
             "up": [0.0, 0.0, 0.0, 0.0],
-            "look_down": [0.0, -0.45, 2.8, 0.0],
+            # "look_down": [0.0, -0.45, 2.8, 0.0],
+            "look_down": [0.0, -0.45, 2.8, -0.4],
             "manual": None,
         }
 
