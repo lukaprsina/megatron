@@ -17,6 +17,7 @@ import numpy as np
 import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
+from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from geometry_msgs.msg import (
     PointStamped,
@@ -272,8 +273,19 @@ class Task2Controller(Node):
         # --- Top camera ---
         self._cv_bridge = CvBridge()
         self._last_top_frame: np.ndarray | None = None
-        _ref_path = Path(__file__).parent.parent / "assets/tile_reference/reference.png"
+        _ref_path = (
+            Path(get_package_share_directory("megatron"))
+            / "assets/tile_reference/reference.png"
+        )
         self._reference_tile = cv2.imread(str(_ref_path), cv2.IMREAD_GRAYSCALE)
+        if self._reference_tile is None:
+            self.get_logger().error(
+                f"SSIM BROKEN: reference tile not found at {_ref_path}"
+            )
+        else:
+            self.get_logger().info(
+                f"Reference tile loaded from {_ref_path}, shape={self._reference_tile.shape}"
+            )
         self._ssim_threshold = 0.75  # TODO: calibrate in sim
 
         # --- Speech ---

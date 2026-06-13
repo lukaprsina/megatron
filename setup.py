@@ -29,6 +29,14 @@ setup(
             os.path.join("share", package_name, "personnel"),
             glob(os.path.join("personnel", "*")),
         ),
+        (
+            os.path.join("share", package_name, "assets", "tile_reference"),
+            glob(os.path.join("assets", "tile_reference", "*")),
+        ),
+        (
+            os.path.join("share", package_name, "assets", "wechat_qrcode"),
+            glob(os.path.join("assets", "wechat_qrcode", "*")),
+        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
