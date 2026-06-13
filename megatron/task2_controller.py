@@ -263,12 +263,19 @@ class Task2Controller(Node):
         # --- Inspection state ---
         self._inspection_phase = 0
         self._inspection_color: str | None = None
-        self._last_scan_ranges = None
+        self._last_scan: LaserScan | None = None
         self._yellow_seen = False
         self._tile_index = 0
         self._phase_start_time: float | None = None
         self._tile_pause_start: float | None = None
         self._tile_scored_this_pause = False
+        self._arm_settle_until: float | None = None
+        self._prev_inspection_phase: int = -1
+        self._inspection_scan_yaw: float | None = None
+        self._inspection_side_target: float | None = None
+        self._tile_visible = False
+        self._tile_hit_count = 0
+        self._tile_miss_count = 0
 
         # --- Top camera ---
         self._cv_bridge = CvBridge()
@@ -306,6 +313,21 @@ class Task2Controller(Node):
         self.goal_marker_pub = self.create_publisher(MarkerArray, "/goal_markers", 10)
         self.approaching_object_pub = self.create_publisher(
             Marker, "/approaching_object", 10
+        )
+        self._ws_debug_live_pub = self.create_publisher(
+            Image, "/workstation_debug/live", 1
+        )
+        self._ws_debug_raw_pub = self.create_publisher(
+            Image, "/workstation_debug/raw", 1
+        )
+        self._ws_debug_thresh_pub = self.create_publisher(
+            Image, "/workstation_debug/thresh", 1
+        )
+        self._ws_debug_warped_pub = self.create_publisher(
+            Image, "/workstation_debug/warped", 1
+        )
+        self._ws_debug_phase_pub = self.create_publisher(
+            String, "/workstation_debug/phase", 1
         )
 
         # --- Subscribers ---
@@ -550,7 +572,7 @@ class Task2Controller(Node):
         self._transition(new_state)
 
     def _scan_cb(self, msg: LaserScan):
-        self._last_scan_ranges = msg.ranges
+        self._last_scan = msg
 
     def _yellow_seen_cb(self, msg: Bool):
         self._yellow_seen = msg.data
@@ -558,6 +580,50 @@ class Task2Controller(Node):
     def _top_camera_cb(self, msg: Image):
         frame = self._cv_bridge.imgmsg_to_cv2(msg, "bgr8")
         self._last_top_frame = frame
+        if self.state == State.INSPECT_WORKSTATION:
+            try:
+                # Annotate with ROI mean brightness so we can see the trigger threshold
+                h, w = frame.shape[:2]
+                roi = frame[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
+                brightness = float(roi.mean())
+                annotated = frame.copy()
+                cv2.rectangle(
+                    annotated,
+                    (w // 4, h // 4),
+                    (3 * w // 4, 3 * h // 4),
+                    (0, 255, 255),
+                    2,
+                )
+                cv2.putText(
+                    annotated,
+                    f"ROI mean: {brightness:.1f}",
+                    (8, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+                tile_box, _ = self._detect_tile(frame)
+                if tile_box is not None:
+                    cv2.drawContours(
+                        annotated, [tile_box.astype(np.int32)], -1, (0, 255, 0), 2
+                    )
+                    cv2.putText(
+                        annotated,
+                        "TILE",
+                        (8, 42),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (0, 255, 0),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                self._ws_debug_live_pub.publish(
+                    self._cv_bridge.cv2_to_imgmsg(annotated, "bgr8")
+                )
+            except Exception:
+                pass
         if self.state == State.INSPECT_WORKSTATION and self._inspection_phase in (4, 5):
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             h = frame.shape[0]
@@ -1063,7 +1129,23 @@ class Task2Controller(Node):
         self._inspection_phase = 0
         self._tile_index = 0
         self._yellow_seen = False
+        self._inspection_scan_yaw = None
+        self._inspection_side_target = None
+        self._tile_visible = False
+        self._tile_hit_count = 0
+        self._tile_miss_count = 0
         self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
+
+        # The red workstation patrol waypoint is also its calibrated inspection
+        # approach pose: safely offset from the belt and facing it head-on.
+        if color == "red" and self.waypoints:
+            approach_x, approach_y, approach_yaw = self.waypoints[0]
+            self.get_logger().info(
+                f"[inspection] using calibrated red approach waypoint0: "
+                f"({approach_x:.2f}, {approach_y:.2f}) yaw={approach_yaw:.2f}"
+            )
+            self._send_nav_goal(approach_x, approach_y, approach_yaw)
+            return
 
         if color in self.workstation_poses:
             ws_pos = self.workstation_poses[color]
@@ -1086,33 +1168,48 @@ class Task2Controller(Node):
             ry = self.current_pose.position.y
             delta = ws_pos - np.array([rx, ry])
             dist = float(np.linalg.norm(delta))
-            # approach_xy = ws_pos - (delta / dist) * 0.67 if dist > 0.8 else ws_pos
             approach_xy = ws_pos - (delta / dist) * 0.4 if dist > 0.6 else ws_pos
         else:
             approach_xy = ws_pos
-        self._send_nav_goal(
-            approach_xy[0], approach_xy[1], math.pi if color == "red" else math.pi / 2
+        target_yaw = math.pi if color == "red" else math.pi / 2
+        self.get_logger().info(
+            f"[inspection] approach goal: ({approach_xy[0]:.2f}, {approach_xy[1]:.2f}) yaw={target_yaw:.2f} "
+            f"(ws={ws_pos[0]:.2f},{ws_pos[1]:.2f} robot={rx:.2f},{ry:.2f} dist={dist:.2f})"
         )
+        self._send_nav_goal(approach_xy[0], approach_xy[1], target_yaw)
 
     def _handle_inspection(self):
         if self._phase_start_time is None:
             return
-        # Phase 0: navigate to workstation (Nav2) — 30 s timeout
+        self._ws_debug_phase_pub.publish(
+            String(
+                data=f"phase={self._inspection_phase} color={self._inspection_color}"
+            )
+        )
+        if self._inspection_phase != self._prev_inspection_phase:
+            self.get_logger().info(
+                f"[inspection] → phase {self._inspection_phase} (was {self._prev_inspection_phase})"
+            )
+            self._prev_inspection_phase = self._inspection_phase
+        # Phase 0: navigate to workstation (Nav2) — 90 s timeout
         if self._inspection_phase == 0:
             now = self.get_clock().now().nanoseconds / 1e9
             elapsed = now - self._phase_start_time
-            if not self._is_nav_complete() and elapsed < 30.0:
+            if not self._is_nav_complete() and elapsed < 90.0:
                 return
-            if elapsed >= 30.0:
+            if elapsed >= 90.0:
                 self.get_logger().warn("Phase 0 nav timed out — advancing anyway.")
                 self._cancel_nav()
                 self._stop_cmd_vel()
+            else:
+                self.get_logger().info(f"Phase 0 nav succeeded in {elapsed:.1f}s.")
             arm_pose = (
                 "look_at_belt_left"
                 if self._inspection_color == "red"
                 else "look_at_belt_right"
             )
             self._pub_arm(arm_pose)
+            self._arm_settle_until = now + 5.0
             self._inspection_phase = 1
             self._phase_start_time = now
             return
@@ -1120,21 +1217,42 @@ class Task2Controller(Node):
         now = self.get_clock().now().nanoseconds / 1e9
         elapsed = now - self._phase_start_time
 
-        # Phase 1 — Forward to wall (front LiDAR ≤ 0.30 m or 10 s timeout)
+        # Phase 1 — Approach to a 0.60 m front LiDAR stand-off.
         if self._inspection_phase == 1:
-            ranges = self._last_scan_ranges
-            near_wall = False
-            if ranges:
-                front = list(ranges[:30]) + list(ranges[-30:])
-                valid = [r for r in front if 0.01 < r < 10.0]
-                if valid and min(valid) <= 0.30:
-                    near_wall = True
-            if near_wall or elapsed > 10.0:
+            if self._arm_settle_until is not None and now < self._arm_settle_until:
+                return  # wait for arm to finish swinging before driving
+            if self._arm_settle_until is not None:
+                self._arm_settle_until = None
+                self._phase_start_time = now
+                elapsed = 0.0
+                self.get_logger().info(
+                    "[inspection] arm settled; starting wall approach"
+                )
+
+            front_distance = self._min_scan_distance(-math.pi / 2, math.radians(30.0))
+            if front_distance is None:
                 self._stop_cmd_vel()
+                self.get_logger().warn(
+                    "[inspection] phase 1 waiting for valid front LiDAR",
+                    throttle_duration_sec=1.0,
+                )
+                return
+
+            self.get_logger().info(
+                f"[inspection] phase 1 front={front_distance:.3f}m elapsed={elapsed:.1f}s",
+                throttle_duration_sec=0.5,
+            )
+            if front_distance <= 0.60 or elapsed > 12.0:
+                self._stop_cmd_vel()
+                reason = "wall reached" if front_distance <= 0.60 else "timeout"
+                self.get_logger().info(
+                    f"[inspection] phase 1 complete: {reason}, front={front_distance:.3f}m"
+                )
                 self._inspection_phase = 2
                 self._phase_start_time = now
             else:
-                self._send_cmd_vel(0.08, 0.0)
+                speed = 0.03 if front_distance <= 0.80 else 0.08
+                self._send_cmd_vel(speed, 0.0)
             return
 
         # Phase 2 — Yaw alignment (P-controller, target π red / π/2 green, 10 s timeout)
@@ -1159,43 +1277,85 @@ class Task2Controller(Node):
         if self._inspection_phase == 3:
             if self._last_top_frame is not None and elapsed < 5.0:
                 tilt = self._compute_belt_tilt(self._last_top_frame)
-                if abs(tilt) < 0.0087:
+                if tilt is None:
                     self._stop_cmd_vel()
+                    self.get_logger().info(
+                        "[inspection] phase 3 waiting for belt line",
+                        throttle_duration_sec=1.0,
+                    )
+                elif abs(tilt) < 0.0087:
+                    self._stop_cmd_vel()
+                    self._inspection_scan_yaw = self._current_yaw()
+                    self._inspection_side_target = self._belt_side_distance()
+                    self.get_logger().info(
+                        f"[inspection] phase 3 aligned: tilt={math.degrees(tilt):+.2f}deg "
+                        f"scan_yaw={self._inspection_scan_yaw} "
+                        f"side_target={self._inspection_side_target}"
+                    )
                     self._inspection_phase = 4
                     self._phase_start_time = now
                     self._yellow_seen = False
                 else:
+                    self.get_logger().info(
+                        f"[inspection] phase 3 tilt={math.degrees(tilt):+.2f}deg",
+                        throttle_duration_sec=0.5,
+                    )
                     self._send_cmd_vel(0.0, max(-0.3, min(0.3, 0.5 * tilt)))
             elif elapsed >= 5.0:
                 self._stop_cmd_vel()
+                self._inspection_scan_yaw = self._current_yaw()
+                self._inspection_side_target = self._belt_side_distance()
+                self.get_logger().warn(
+                    "[inspection] phase 3 timed out without confirmed camera alignment; "
+                    f"holding current yaw={self._inspection_scan_yaw} "
+                    f"side_target={self._inspection_side_target}"
+                )
                 self._inspection_phase = 4
                 self._phase_start_time = now
                 self._yellow_seen = False
             return
 
-        # Phase 4 — Reverse to yellow line (or rear obstacle ≤ 0.40 m or 10 s)
+        # Phase 4 — Briefly move to the scan start from the right-side waypoint.
         if self._inspection_phase == 4:
-            ranges = self._last_scan_ranges
-            rear_hit = False
-            if ranges:
-                rear = list(ranges[150:211])
-                valid = [r for r in rear if 0.01 < r < 10.0]
-                if valid and min(valid) <= 0.40:
-                    rear_hit = True
-            if self._yellow_seen or rear_hit or elapsed > 10.0:
+            rear_distance = self._min_scan_distance(math.pi / 2, math.radians(30.0))
+            rear_hit = rear_distance is not None and rear_distance <= 0.40
+            if self._yellow_seen or rear_hit or elapsed > 1.5:
                 self._stop_cmd_vel()
+                reason = (
+                    "yellow line"
+                    if self._yellow_seen
+                    else "rear obstacle"
+                    if rear_hit
+                    else "timeout"
+                )
+                self.get_logger().info(
+                    f"[inspection] phase 4 complete: {reason}, rear={rear_distance}"
+                )
                 self._yellow_seen = False
                 self._inspection_phase = 5
                 self._phase_start_time = now
                 self._tile_pause_start = None
+                self._tile_visible = False
+                self._tile_hit_count = 0
+                self._tile_miss_count = 0
             else:
-                self._send_cmd_vel(-0.06, 0.0)
+                self._send_cmd_vel(-0.05, self._belt_follow_correction(-1.0))
             return
 
-        # Phase 5 — Forward tile scan (brightness trigger + SSIM, exit on yellow or 30 s)
+        # Phase 5 — Forward tile scan (contour enter/leave + SSIM)
         if self._inspection_phase == 5:
-            if self._yellow_seen or elapsed > 30.0:
+            if self._tile_index >= 4 or self._yellow_seen or elapsed > 45.0:
                 self._stop_cmd_vel()
+                reason = (
+                    "four tiles"
+                    if self._tile_index >= 4
+                    else "yellow line"
+                    if self._yellow_seen
+                    else "timeout"
+                )
+                self.get_logger().info(
+                    f"[inspection] phase 5 complete: {reason}, tiles={self._tile_index}"
+                )
                 self._pub_arm("garage")
                 self._inspection_phase = 6
                 self._phase_start_time = now
@@ -1225,15 +1385,29 @@ class Task2Controller(Node):
                 return
 
             if self._last_top_frame is not None:
-                h, w = self._last_top_frame.shape[:2]
-                roi = self._last_top_frame[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
-                if float(roi.mean()) > 120:
+                tile_box, _ = self._detect_tile(self._last_top_frame)
+                if tile_box is not None:
+                    self._tile_hit_count += 1
+                    self._tile_miss_count = 0
+                else:
+                    self._tile_miss_count += 1
+                    self._tile_hit_count = 0
+
+                if not self._tile_visible and self._tile_hit_count >= 3:
+                    self._tile_visible = True
+                    self.get_logger().info(
+                        f"[phase5] tile {self._tile_index} entered view; pausing to score"
+                    )
                     self._stop_cmd_vel()
                     self._tile_pause_start = now
                     self._tile_scored_this_pause = False
                     return
+                if self._tile_visible and self._tile_miss_count >= 5:
+                    self._tile_visible = False
+                    self._tile_miss_count = 0
+                    self.get_logger().info("[phase5] tile left view")
 
-            self._send_cmd_vel(0.08, 0.0)
+            self._send_cmd_vel(0.05, self._belt_follow_correction(1.0))
             return
 
         # Phase 6 — Escape: CW turn ~130° then forward 4 s
@@ -1310,7 +1484,126 @@ class Task2Controller(Node):
     def _stop_cmd_vel(self):
         self._send_cmd_vel(0.0, 0.0)
 
-    def _compute_belt_tilt(self, frame: np.ndarray) -> float:
+    def _min_scan_distance(self, center_angle: float, half_cone: float) -> float | None:
+        scan = self._last_scan
+        if scan is None:
+            return None
+
+        minimum = float("inf")
+        for index, distance in enumerate(scan.ranges):
+            if not math.isfinite(distance):
+                continue
+            if distance < scan.range_min or distance > scan.range_max:
+                continue
+            angle = scan.angle_min + index * scan.angle_increment
+            error = _normalize_angle(angle - center_angle)
+            if abs(error) <= half_cone:
+                minimum = min(minimum, distance)
+        return minimum if math.isfinite(minimum) else None
+
+    def _current_yaw(self) -> float | None:
+        if self.current_pose is None:
+            return None
+        q = self.current_pose.orientation
+        return _quaternion_to_yaw([q.w, q.x, q.y, q.z])
+
+    def _median_scan_distance(
+        self, center_angle: float, half_cone: float
+    ) -> float | None:
+        scan = self._last_scan
+        if scan is None:
+            return None
+
+        distances = []
+        for index, distance in enumerate(scan.ranges):
+            if not math.isfinite(distance):
+                continue
+            if distance < scan.range_min or distance > scan.range_max:
+                continue
+            angle = scan.angle_min + index * scan.angle_increment
+            if abs(_normalize_angle(angle - center_angle)) <= half_cone:
+                distances.append(distance)
+        return float(np.median(distances)) if distances else None
+
+    def _belt_side_distance(self) -> float | None:
+        side_angle = 0.0 if self._inspection_color == "red" else math.pi
+        return self._median_scan_distance(side_angle, math.radians(8.0))
+
+    def _belt_follow_correction(self, direction: float) -> float:
+        current_yaw = self._current_yaw()
+        yaw_correction = 0.0
+        if current_yaw is not None and self._inspection_scan_yaw is not None:
+            yaw_error = _normalize_angle(self._inspection_scan_yaw - current_yaw)
+            yaw_correction = 0.8 * yaw_error
+
+        belt_on_left = self._inspection_color == "red"
+        side_sign = 1.0 if belt_on_left else -1.0
+        side = self._belt_side_distance()
+
+        wall_correction = 0.0
+        if side is not None and self._inspection_side_target is not None:
+            distance_error = side - self._inspection_side_target
+            if abs(distance_error) > 0.03:
+                wall_correction = direction * side_sign * 0.6 * distance_error
+
+        correction = max(-0.08, min(0.08, yaw_correction + wall_correction))
+        self.get_logger().info(
+            f"[inspection] belt follow dir={direction:+.0f} side={side} "
+            f"target={self._inspection_side_target} "
+            f"yaw_cmd={yaw_correction:+.3f} wall_cmd={wall_correction:+.3f} "
+            f"cmd={correction:+.3f}",
+            throttle_duration_sec=0.5,
+        )
+        return correction
+
+    @staticmethod
+    def _order_points(points: np.ndarray) -> np.ndarray:
+        ordered_by_y = points[points[:, 1].argsort()]
+        top = ordered_by_y[:2][ordered_by_y[:2, 0].argsort()]
+        bottom = ordered_by_y[2:][ordered_by_y[2:, 0].argsort()]
+        return np.array([top[0], top[1], bottom[1], bottom[0]], dtype=np.float32)
+
+    def _detect_tile(
+        self, frame: np.ndarray
+    ) -> tuple[np.ndarray | None, np.ndarray]:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        crop_y = gray.shape[0] // 5
+        crop = gray[crop_y:, :]
+        _, threshold = cv2.threshold(
+            crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        center_y, center_x = crop.shape[0] // 2, crop.shape[1] // 2
+        if threshold[center_y, center_x] == 0:
+            threshold = 255 - threshold
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        threshold = cv2.morphologyEx(threshold, cv2.MORPH_CLOSE, kernel)
+
+        full_mask = np.zeros_like(gray)
+        full_mask[crop_y:, :] = threshold
+        contours, _ = cv2.findContours(
+            threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        frame_area = crop.shape[0] * crop.shape[1]
+        best = None
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < frame_area * 0.05 or area > frame_area * 0.50:
+                continue
+            box = cv2.boxPoints(cv2.minAreaRect(contour))
+            width = float(np.linalg.norm(box[0] - box[1]))
+            height = float(np.linalg.norm(box[1] - box[2]))
+            if max(width, height) / max(min(width, height), 1.0) > 2.0:
+                continue
+            if best is None or area > cv2.contourArea(best):
+                best = contour
+
+        if best is None:
+            return None, full_mask
+        box = cv2.boxPoints(cv2.minAreaRect(best))
+        box[:, 1] += crop_y
+        return box.astype(np.float32), full_mask
+
+    def _compute_belt_tilt(self, frame: np.ndarray) -> float | None:
         """Return tilt angle (rad) of dominant lines in the top-camera view."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
@@ -1318,7 +1611,7 @@ class Task2Controller(Node):
             edges, 1, math.pi / 180, threshold=80, minLineLength=60, maxLineGap=10
         )
         if lines is None:
-            return 0.0
+            return None
         angles = [
             math.atan2(int(ln[0][3]) - int(ln[0][1]), int(ln[0][2]) - int(ln[0][0]))
             for ln in lines
@@ -1333,18 +1626,30 @@ class Task2Controller(Node):
         if self._reference_tile is None:
             return False, 1.0
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        contours, _ = cv2.findContours(
-            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
+        box, thresh = self._detect_tile(frame)
+        # Publish raw and thresh for debugging
+        try:
+            self._ws_debug_raw_pub.publish(self._cv_bridge.cv2_to_imgmsg(frame, "bgr8"))
+            self._ws_debug_thresh_pub.publish(
+                self._cv_bridge.cv2_to_imgmsg(thresh, "mono8")
+            )
+        except Exception:
+            pass
+        if box is None:
             return False, 1.0
-        c = max(contours, key=cv2.contourArea)
-        rect = cv2.minAreaRect(c)
-        box = cv2.boxPoints(rect).astype(np.float32)
-        dst = np.array([[0, 511], [511, 511], [511, 0], [0, 0]], dtype=np.float32)
-        M = cv2.getPerspectiveTransform(box, dst)
+        source = self._order_points(box)
+        destination = np.array(
+            [[0, 0], [511, 0], [511, 511], [0, 511]], dtype=np.float32
+        )
+        M = cv2.getPerspectiveTransform(source, destination)
         warped = cv2.warpPerspective(gray, M, (512, 512))
+        # Publish warped for debugging
+        try:
+            self._ws_debug_warped_pub.publish(
+                self._cv_bridge.cv2_to_imgmsg(warped, "mono8")
+            )
+        except Exception:
+            pass
         ref = cv2.resize(self._reference_tile, (512, 512))
         _score = ssim(ref, warped)
         score = float(_score[0] if isinstance(_score, tuple) else _score)

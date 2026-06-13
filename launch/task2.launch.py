@@ -203,6 +203,20 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("visualization")),
     )
 
+    workstation_visualizer = Node(
+        package="megatron",
+        executable="workstation_visualizer",
+        name="workstation_visualizer",
+        output="screen",
+        parameters=[
+            {
+                "use_sim_time": LaunchConfiguration("use_sim_time"),
+                "show_window": LaunchConfiguration("show_debug_window"),
+            }
+        ],
+        condition=IfCondition(LaunchConfiguration("visualization")),
+    )
+
     ld = LaunchDescription(args)
     ld.add_action(sim_arm_nav)
     ld.add_action(rviz)
@@ -218,4 +232,5 @@ def generate_launch_description():
     ld.add_action(workstation_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
+    ld.add_action(workstation_visualizer)
     return ld

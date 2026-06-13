@@ -60,6 +60,7 @@ setup(
             "workstation_detector = megatron.workstation_detector:main",
             "workstation_detector2 = megatron.workstation_detector2:main",
             "perception_visualizer = megatron.perception_visualizer:main",
+            "workstation_visualizer = megatron.workstation_visualizer:main",
             "save_image_topic = megatron.save_image_topic:main",
             "qr_reader = megatron.qr_reader:main",
             "blue_line_follower = megatron.blue_line_follower:main",
