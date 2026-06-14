@@ -184,6 +184,8 @@ def _parse_qr_task(text: str) -> str | None:
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.5  # metres — two detections within this are the same object
+    WORKSTATION_TILE_COUNTS = {"red": 4, "green": 5}
+    WORKSTATION_SCAN_DISTANCES = {"red": 2.4, "green": 3.0}
     MAX_RETRY_CYCLES = (
         20  # bump distance up to 3× approach_retry_offset before giving up
     )
@@ -1376,6 +1378,12 @@ class Task2Controller(Node):
 
         # Phase 5 — Forward tile scan (contour enter/leave + SSIM)
         if self._inspection_phase == 5:
+            expected_tiles = self.WORKSTATION_TILE_COUNTS.get(
+                self._inspection_color or "", 4
+            )
+            max_scan_distance = self.WORKSTATION_SCAN_DISTANCES.get(
+                self._inspection_color or "", 2.4
+            )
             scan_distance = self._inspection_scan_distance()
             front_distance = self._min_scan_distance(-math.pi / 2, math.radians(15.0))
             if (
@@ -1388,32 +1396,33 @@ class Task2Controller(Node):
                 self._inspection_front_hit_count = 0
 
             self.get_logger().info(
-                f"[inspection] phase 5 progress: distance={scan_distance:.2f}/2.40m "
-                f"tiles={self._tile_index} front={front_distance} "
+                f"[inspection] phase 5 progress: "
+                f"distance={scan_distance:.2f}/{max_scan_distance:.2f}m "
+                f"tiles={self._tile_index}/{expected_tiles} front={front_distance} "
                 f"front_hits={self._inspection_front_hit_count}/3 "
                 f"yellow={self._yellow_seen} elapsed={elapsed:.1f}s",
                 throttle_duration_sec=1.0,
             )
             yellow_endpoint = self._yellow_seen and scan_distance >= 1.0
-            tile_endpoint = self._tile_index >= 4
+            tile_endpoint = self._tile_index >= expected_tiles
             obstacle_endpoint = self._inspection_front_hit_count >= 3
             if (
                 tile_endpoint
                 or obstacle_endpoint
                 or yellow_endpoint
-                or scan_distance >= 2.4
+                or scan_distance >= max_scan_distance
                 or elapsed > 70.0
             ):
                 self._stop_cmd_vel()
                 reason = (
-                    "four tiles"
+                    f"{expected_tiles} tiles"
                     if tile_endpoint
                     else "front obstacle"
                     if obstacle_endpoint
                     else "yellow line"
                     if yellow_endpoint
                     else "scan distance"
-                    if scan_distance >= 2.4
+                    if scan_distance >= max_scan_distance
                     else "timeout"
                 )
                 self.get_logger().info(
@@ -1455,10 +1464,22 @@ class Task2Controller(Node):
                     self._tile_miss_count += 1
                     self._tile_hit_count = 0
 
-                if not self._tile_visible and self._tile_hit_count >= 3:
+                tile_centered = False
+                if tile_box is not None:
+                    tile_center_x = float(tile_box[:, 0].mean())
+                    frame_width = self._last_top_frame.shape[1]
+                    tile_centered = (
+                        0.42 * frame_width <= tile_center_x <= 0.58 * frame_width
+                    )
+
+                if (
+                    not self._tile_visible
+                    and self._tile_hit_count >= 3
+                    and tile_centered
+                ):
                     self._tile_visible = True
                     self.get_logger().info(
-                        f"[phase5] tile {self._tile_index} entered view; pausing to score"
+                        f"[phase5] tile {self._tile_index} centered; pausing to score"
                     )
                     self._stop_cmd_vel()
                     self._tile_pause_start = now
