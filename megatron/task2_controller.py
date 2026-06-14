@@ -1148,14 +1148,17 @@ class Task2Controller(Node):
         self._tile_miss_count = 0
         self._inspection_scan_start = None
         self._inspection_front_hit_count = 0
+        self._prev_inspection_phase = -1
         self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
 
-        # The red workstation patrol waypoint is also its calibrated inspection
-        # approach pose: safely offset from the belt and facing it head-on.
-        if color == "red" and self.waypoints:
-            approach_x, approach_y, approach_yaw = self.waypoints[0]
+        # The first two patrol waypoints are calibrated inspection approaches:
+        # safely offset from each belt and facing it head-on.
+        waypoint_index = {"red": 0, "green": 1}.get(color)
+        if waypoint_index is not None and waypoint_index < len(self.waypoints):
+            approach_x, approach_y, approach_yaw = self.waypoints[waypoint_index]
             self.get_logger().info(
-                f"[inspection] using calibrated red approach waypoint0: "
+                f"[inspection] using calibrated {color} approach "
+                f"waypoint{waypoint_index}: "
                 f"({approach_x:.2f}, {approach_y:.2f}) yaw={approach_yaw:.2f}"
             )
             self._send_nav_goal(approach_x, approach_y, approach_yaw)
@@ -1212,11 +1215,27 @@ class Task2Controller(Node):
             if not self._is_nav_complete() and elapsed < 90.0:
                 return
             if elapsed >= 90.0:
-                self.get_logger().warn("Phase 0 nav timed out — advancing anyway.")
-                self._cancel_nav()
-                self._stop_cmd_vel()
-            else:
-                self.get_logger().info(f"Phase 0 nav succeeded in {elapsed:.1f}s.")
+                self._abort_inspection("phase 0 navigation timed out")
+                return
+            if not self._nav_succeeded():
+                self._abort_inspection(
+                    f"phase 0 navigation failed with status {self._nav_status_name()}"
+                )
+                return
+
+            pose = self._current_xy()
+            yaw = self._current_yaw()
+            pose_text = (
+                f"({pose[0]:.2f}, {pose[1]:.2f})" if pose is not None else "unknown"
+            )
+            yaw_text = f"{yaw:.3f}" if yaw is not None else "unknown"
+            self.get_logger().info(
+                f"[inspection] phase 0 nav succeeded in {elapsed:.1f}s; "
+                f"pose={pose_text} yaw={yaw_text}"
+            )
+            # Clear our completed action before direct velocity control begins.
+            self._cancel_nav()
+            self._stop_cmd_vel()
             arm_pose = "look_at_belt_right"
             self.get_logger().info(
                 f"[inspection] moving top camera to {arm_pose}"
@@ -1280,15 +1299,26 @@ class Task2Controller(Node):
                     f"target={target_yaw:.3f} error={error:+.3f}",
                     throttle_duration_sec=0.5,
                 )
-                if abs(error) < 0.05 or elapsed > 10.0:
+                if abs(error) < 0.10:
                     self._stop_cmd_vel()
+                    self.get_logger().info(
+                        f"[inspection] phase 2 aligned within tolerance; "
+                        f"yaw error={error:+.3f} rad"
+                    )
                     self._inspection_phase = 3
                     self._phase_start_time = now
+                elif elapsed > 15.0:
+                    self._abort_inspection(
+                        f"phase 2 could not align to belt; yaw error={error:+.3f} rad"
+                    )
                 else:
-                    self._send_cmd_vel(0.0, max(-0.5, min(0.5, 1.5 * error)))
-            elif elapsed > 10.0:
-                self._inspection_phase = 3
-                self._phase_start_time = now
+                    gain = 0.6 if abs(error) < 0.30 else 1.0
+                    self._send_cmd_vel(
+                        0.0,
+                        max(-0.4, min(0.4, gain * error)),
+                    )
+            elif elapsed > 15.0:
+                self._abort_inspection("phase 2 has no current robot pose")
             return
 
         # Phase 3 — Capture the map-aligned scan heading.  The camera Hough
@@ -1533,6 +1563,13 @@ class Task2Controller(Node):
             dtype=float,
         )
 
+    def _abort_inspection(self, reason: str):
+        self.get_logger().error(f"[inspection] aborted: {reason}")
+        self._stop_cmd_vel()
+        self._cancel_nav()
+        self._pub_arm("garage")
+        self._transition(State.FOLLOW_BLUE_LINE)
+
     def _inspection_scan_distance(self) -> float:
         current_xy = self._current_xy()
         if current_xy is None or self._inspection_scan_start is None:
@@ -1595,11 +1632,26 @@ class Task2Controller(Node):
                 yaw_correction = 0.35 * yaw_error
 
         side = self._belt_side_distance()
-        correction = max(-0.05, min(0.05, yaw_correction))
+        distance_correction = 0.0
+        if side is not None and self._inspection_side_target is not None:
+            distance_error = side - self._inspection_side_target
+            if abs(distance_error) > 0.04:
+                # Red belt is on the robot's left while scanning; green is on
+                # the right. Apply a gentle heading bias back toward the belt.
+                belt_side_sign = 1.0 if self._inspection_color == "red" else -1.0
+                distance_correction = (
+                    direction * belt_side_sign * 0.25 * distance_error
+                )
+
+        correction = max(
+            -0.06,
+            min(0.06, yaw_correction + distance_correction),
+        )
         self.get_logger().info(
             f"[inspection] belt follow dir={direction:+.0f} side={side} "
             f"target={self._inspection_side_target} "
-            f"yaw_cmd={yaw_correction:+.3f} cmd={correction:+.3f}",
+            f"yaw_cmd={yaw_correction:+.3f} "
+            f"distance_cmd={distance_correction:+.3f} cmd={correction:+.3f}",
             throttle_duration_sec=0.5,
         )
         return correction
@@ -1863,6 +1915,28 @@ class Task2Controller(Node):
         except Exception:
             return False
         return result is not None and result.status == GoalStatus.STATUS_SUCCEEDED
+
+    def _nav_status_name(self) -> str:
+        if self._nav_rejected:
+            return "REJECTED"
+        if self.nav_result_future is None or not self.nav_result_future.done():
+            return "INCOMPLETE"
+        try:
+            result = self.nav_result_future.result()
+        except Exception as exc:
+            return f"ERROR({exc})"
+        if result is None:
+            return "NO_RESULT"
+        names = {
+            GoalStatus.STATUS_UNKNOWN: "UNKNOWN",
+            GoalStatus.STATUS_ACCEPTED: "ACCEPTED",
+            GoalStatus.STATUS_EXECUTING: "EXECUTING",
+            GoalStatus.STATUS_CANCELING: "CANCELING",
+            GoalStatus.STATUS_SUCCEEDED: "SUCCEEDED",
+            GoalStatus.STATUS_CANCELED: "CANCELED",
+            GoalStatus.STATUS_ABORTED: "ABORTED",
+        }
+        return names.get(result.status, str(result.status))
 
     def _nav_update_target(self) -> bool:
         if not self._is_nav_complete():
