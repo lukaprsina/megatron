@@ -1740,19 +1740,23 @@ class Task2Controller(Node):
                 distances.append(distance)
         return float(np.median(distances)) if distances else None
 
+    def _belt_world_perp(self) -> float:
+        return math.pi / 2 if self._inspection_color == "red" else math.pi
+
     def _belt_side_distance(self) -> float | None:
-        side_angle = 0.0 if self._inspection_color == "red" else math.pi
         current_yaw = self._current_yaw()
-        if current_yaw is not None:
-            world_perp = math.pi / 2 if self._inspection_color == "red" else math.pi
-            corrected_angle = _normalize_angle(world_perp - current_yaw - math.pi / 2)
-            self.get_logger().info(
-                f"[belt_side] color={self._inspection_color} yaw={current_yaw:.3f} "
-                f"fixed_angle={side_angle:.3f} corrected_angle={corrected_angle:.3f} "
-                f"drift={_normalize_angle(corrected_angle - side_angle):+.3f}",
-                throttle_duration_sec=1.0,
-            )
-        return self._median_scan_distance(side_angle, math.radians(8.0))
+        if current_yaw is None:
+            return None
+        body_angle = _normalize_angle(self._belt_world_perp() - current_yaw - math.pi / 2)
+        dist = self._median_scan_distance(body_angle, math.radians(8.0))
+        if dist is None:
+            return None
+        # Reject structural misses: belt face gaps let the ray shoot past the belt
+        # to a far surface (typically 3.7–4.2 m vs the expected ~2.3 m). A reading
+        # more than 1 m above the calibrated target is a miss, not a drift.
+        if self._inspection_side_target is not None and dist > self._inspection_side_target + 1.0:
+            return None
+        return dist
 
     def _belt_follow_correction(self, direction: float) -> float:
         current_yaw = self._current_yaw()
@@ -1767,17 +1771,13 @@ class Task2Controller(Node):
         if side is not None and self._inspection_side_target is not None:
             distance_error = side - self._inspection_side_target
             if abs(distance_error) > 0.04:
-                # Red belt is on the robot's left while scanning; green is on
-                # the right. Cross-track recovery must dominate fixed-yaw hold;
-                # otherwise they cancel while the robot remains too far away.
-                belt_side_sign = 1.0 if self._inspection_color == "red" else -1.0
-                distance_correction = direction * belt_side_sign * 0.45 * distance_error
-                yaw_correction *= 0.25
+                belt_side_sign = math.copysign(
+                    1.0, math.sin(self._belt_world_perp() - (current_yaw or 0.0))
+                )
+                distance_correction = direction * belt_side_sign * 0.25 * distance_error
 
-        correction = max(
-            -0.08,
-            min(0.08, yaw_correction + distance_correction),
-        )
+        CLAMP = 0.10
+        correction = max(-CLAMP, min(CLAMP, yaw_correction + distance_correction))
         self.get_logger().info(
             f"[inspection] belt follow dir={direction:+.0f} side={side} "
             f"target={self._inspection_side_target} "
