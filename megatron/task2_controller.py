@@ -1742,6 +1742,16 @@ class Task2Controller(Node):
 
     def _belt_side_distance(self) -> float | None:
         side_angle = 0.0 if self._inspection_color == "red" else math.pi
+        current_yaw = self._current_yaw()
+        if current_yaw is not None:
+            world_perp = math.pi / 2 if self._inspection_color == "red" else math.pi
+            corrected_angle = _normalize_angle(world_perp - current_yaw - math.pi / 2)
+            self.get_logger().info(
+                f"[belt_side] color={self._inspection_color} yaw={current_yaw:.3f} "
+                f"fixed_angle={side_angle:.3f} corrected_angle={corrected_angle:.3f} "
+                f"drift={_normalize_angle(corrected_angle - side_angle):+.3f}",
+                throttle_duration_sec=1.0,
+            )
         return self._median_scan_distance(side_angle, math.radians(8.0))
 
     def _belt_follow_correction(self, direction: float) -> float:
