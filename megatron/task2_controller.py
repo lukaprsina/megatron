@@ -315,6 +315,7 @@ class Task2Controller(Node):
         self._prev_inspection_phase: int = -1
         self._inspection_scan_yaw: float | None = None
         self._inspection_side_target: float | None = None
+        self._inspection_side_samples: list[float] = []
         self._tile_visible = False
         self._tile_hit_count = 0
         self._tile_miss_count = 0
@@ -1206,6 +1207,7 @@ class Task2Controller(Node):
         self._yellow_seen = False
         self._inspection_scan_yaw = None
         self._inspection_side_target = None
+        self._inspection_side_samples = []
         self._tile_visible = False
         self._tile_hit_count = 0
         self._tile_miss_count = 0
@@ -1382,17 +1384,30 @@ class Task2Controller(Node):
                 self._abort_inspection("phase 2 has no current robot pose")
             return
 
-        # Phase 3 — Capture the map-aligned scan heading.  The camera Hough
-        # estimate is ambiguous after moving the arm to the other side and can
-        # lock onto diagonal workstation edges, so it must not steer the base.
+        # Phase 3 — Capture the map-aligned scan heading and side distance.
+        # Capture the map-aligned scan heading and (for green only) calibrate the
+        # lateral distance target. Red's calibration position sits on structural
+        # gaps that produce unreliable readings; red relies on yaw-only control.
         if self._inspection_phase == 3:
             self._stop_cmd_vel()
             self._inspection_scan_yaw = self._current_yaw()
-            self._inspection_side_target = self._belt_side_distance()
+            if self._inspection_color == "green":
+                sample = self._belt_side_distance()
+                if sample is not None:
+                    self._inspection_side_samples.append(sample)
+            elapsed_p3 = now - self._phase_start_time
+            if elapsed_p3 < 0.5:
+                return
+            if self._inspection_color == "green" and self._inspection_side_samples:
+                sorted_samples = sorted(self._inspection_side_samples)
+                self._inspection_side_target = sorted_samples[len(sorted_samples) // 2]
+            else:
+                self._inspection_side_target = None
             self.get_logger().info(
-                "[inspection] phase 3 holding map-aligned heading: "
+                "[inspection] phase 3 calibrated: "
                 f"scan_yaw={self._inspection_scan_yaw} "
-                f"side_target={self._inspection_side_target}"
+                f"side_target={self._inspection_side_target} "
+                f"n_samples={len(self._inspection_side_samples)}"
             )
             self._inspection_phase = 4
             self._phase_start_time = now
@@ -1751,10 +1766,11 @@ class Task2Controller(Node):
         dist = self._median_scan_distance(body_angle, math.radians(8.0))
         if dist is None:
             return None
-        # Reject structural misses: belt face gaps let the ray shoot past the belt
-        # to a far surface (typically 3.7–4.2 m vs the expected ~2.3 m). A reading
-        # more than 1 m above the calibrated target is a miss, not a drift.
-        if self._inspection_side_target is not None and dist > self._inspection_side_target + 1.0:
+        # Reject structural gaps where the perpendicular ray shoots past the belt face.
+        # Red belt face is ~1.8 m away; green is ~0.5 m away. Use per-belt ceilings
+        # well above the observed face range but below the nearest gap reading.
+        max_valid = 2.5 if self._inspection_color == "red" else 1.0
+        if dist > max_valid:
             return None
         return dist
 
@@ -1768,6 +1784,7 @@ class Task2Controller(Node):
 
         side = self._belt_side_distance()
         distance_correction = 0.0
+        distance_active = False
         if side is not None and self._inspection_side_target is not None:
             distance_error = side - self._inspection_side_target
             if abs(distance_error) > 0.04:
@@ -1775,6 +1792,12 @@ class Task2Controller(Node):
                     1.0, math.sin(self._belt_world_perp() - (current_yaw or 0.0))
                 )
                 distance_correction = direction * belt_side_sign * 0.25 * distance_error
+                distance_active = True
+
+        # Distance takes priority: suppress yaw correction while lateral position
+        # is outside the deadband so the two don't fight each other.
+        if distance_active:
+            yaw_correction = 0.0
 
         CLAMP = 0.10
         correction = max(-CLAMP, min(CLAMP, yaw_correction + distance_correction))

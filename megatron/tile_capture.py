@@ -22,17 +22,30 @@ def save_tile_capture(
     stamp_ns: int,
     pose: dict[str, float] | None = None,
 ) -> Path:
-    """Save one camera-domain tile sample and return its metadata path."""
+    """Save one camera-domain tile sample and return its metadata path.
+
+    Directory layout (paths relative to station_dir)::
+
+        <station_dir>/
+          captures/tile-NN-<stamp>.yaml   ← immutable provenance, no label
+          canonical/tile-NN-<stamp>.png
+          raw/tile-NN-<stamp>.png
+
+    Labels live in a separate ``labels.yaml`` at the world level, keyed by
+    station and tile_index, so capture files are never modified after writing.
+    """
     if frame is None or frame.size == 0:
         raise ValueError("frame is empty")
 
     quad = np.asarray(quad, dtype=np.float32).reshape(4, 2)
-    sample_dir = Path(output_dir).expanduser() / _safe_name(world) / _safe_name(station)
-    sample_dir.mkdir(parents=True, exist_ok=True)
+    station_dir = Path(output_dir).expanduser() / _safe_name(world) / _safe_name(station)
+    captures_dir = station_dir / "captures"
+    captures_dir.mkdir(parents=True, exist_ok=True)
+
     stem = f"tile-{tile_index:02d}-{stamp_ns}"
-    raw_path = sample_dir / "raw" / f"{stem}.png"
-    warp_path = sample_dir / "canonical" / f"{stem}.png"
-    metadata_path = sample_dir / f"{stem}.yaml"
+    raw_path = station_dir / "raw" / f"{stem}.png"
+    warp_path = station_dir / "canonical" / f"{stem}.png"
+    metadata_path = captures_dir / f"{stem}.yaml"
     raw_path.parent.mkdir(exist_ok=True)
     warp_path.parent.mkdir(exist_ok=True)
 
@@ -44,14 +57,14 @@ def save_tile_capture(
         raise OSError(f"could not write tile warp: {warp_path}")
 
     gray = cv2.cvtColor(canonical, cv2.COLOR_BGR2GRAY)
+    # Paths are relative to station_dir (parent of captures/).
     metadata: dict[str, Any] = {
         "world": world,
         "station": station,
         "tile_index": tile_index,
         "stamp_ns": stamp_ns,
-        "label": "unknown",
-        "raw_image": str(raw_path.relative_to(sample_dir)),
-        "canonical_image": str(warp_path.relative_to(sample_dir)),
+        "raw_image": f"raw/{stem}.png",
+        "canonical_image": f"canonical/{stem}.png",
         "quad_xy": [[float(x), float(y)] for x, y in quad],
         "quality": {
             "brightness_mean": float(gray.mean()),
