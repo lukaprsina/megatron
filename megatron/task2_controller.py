@@ -1,7 +1,8 @@
 """Task 2 mission controller.
 
 State machine:
-  INIT → PATROL → APPROACH_TARGET → INTERACT → INSPECT_WORKSTATION → FOLLOW_BLUE_LINE → DONE
+  INIT → PATROL → APPROACH_TARGET → INTERACT → INSPECT_WORKSTATION
+       → NAVIGATE_ROOM2_ENTRY → FOLLOW_BLUE_LINE → DONE
 
 Detectors publish PoseStamped on their respective topics; this controller deduplicates
 by position and queues pending_targets for approach.
@@ -57,6 +58,7 @@ class State(Enum):
     APPROACH_TARGET = auto()
     INTERACT = auto()
     INSPECT_WORKSTATION = auto()
+    NAVIGATE_ROOM2_ENTRY = auto()
     FOLLOW_BLUE_LINE = auto()
     DONE = auto()
 
@@ -191,6 +193,7 @@ class Task2Controller(Node):
 
         # --- Parameters ---
         self.declare_parameter("waypoints_file", "waypoints/task.yaml")
+        self.declare_parameter("room2_entry_file", "waypoints/bluelinepoint.yaml")
         self.declare_parameter("face_approach_distance", 0.50)
         self.declare_parameter("barrel_approach_distance", 0.60)
         self.declare_parameter("barrel_lateral_offset", 0.30)
@@ -201,6 +204,18 @@ class Task2Controller(Node):
         wp_file = cast(str, self.get_parameter("waypoints_file").value)
         self.waypoints = load_waypoints_from_yaml(wp_file)
         self.get_logger().info(f"Loaded {len(self.waypoints)} waypoints from {wp_file}")
+        room2_file = cast(str, self.get_parameter("room2_entry_file").value)
+        room2_entries = load_waypoints_from_yaml(room2_file)
+        if len(room2_entries) != 1:
+            raise ValueError(
+                f"Room 2 entry file must contain exactly one waypoint: {room2_file}"
+            )
+        self.room2_entry = room2_entries[0]
+        self.get_logger().info(
+            f"Loaded room 2 entry from {room2_file}: "
+            f"({self.room2_entry[0]:.2f}, {self.room2_entry[1]:.2f}) "
+            f"yaw={self.room2_entry[2]:.2f}"
+        )
         self.manual_mode = cast(bool, self.get_parameter("manual_mode").value)
         if self.manual_mode:
             self.get_logger().info(
@@ -230,6 +245,9 @@ class Task2Controller(Node):
         self._last_feedback_distance: float | None = None
         self._last_feedback_time: float | None = None
         self._nav_update = False  # Turn when the navigation needs to be updated
+        self._room2_nav_attempt = 0
+        self._room2_nav_started: float | None = None
+        self._room2_goal_sent = False
 
         # --- Costmap ---
         self.costmap = None
@@ -687,6 +705,8 @@ class Task2Controller(Node):
             self._handle_interact()
         elif self.state == State.INSPECT_WORKSTATION:
             self._handle_inspection()
+        elif self.state == State.NAVIGATE_ROOM2_ENTRY:
+            self._handle_room2_navigation()
         elif self.state == State.FOLLOW_BLUE_LINE:
             self._handle_follow_blue_line()
         elif self.state == State.DONE:
@@ -761,7 +781,7 @@ class Task2Controller(Node):
         if not self.pending_targets:
             self.get_logger().info("No targets to approach — heading to room 2.")
             self._pub_arm("look_down")
-            self._transition(State.FOLLOW_BLUE_LINE)
+            self._start_room2_navigation()
             return
 
         target = self.pending_targets.pop(0)
@@ -1132,7 +1152,7 @@ class Task2Controller(Node):
                 "All post-patrol targets handled — heading to room 2."
             )
             self._pub_arm("look_down")
-            self._transition(State.FOLLOW_BLUE_LINE)
+            self._start_room2_navigation()
 
     # ── INSPECT_WORKSTATION ───────────────────────────────────────────
 
@@ -1237,9 +1257,7 @@ class Task2Controller(Node):
             self._cancel_nav()
             self._stop_cmd_vel()
             arm_pose = "look_at_belt_right"
-            self.get_logger().info(
-                f"[inspection] moving top camera to {arm_pose}"
-            )
+            self.get_logger().info(f"[inspection] moving top camera to {arm_pose}")
             self._pub_arm(arm_pose)
             self._arm_settle_until = now + 5.0
             self._inspection_phase = 1
@@ -1359,9 +1377,7 @@ class Task2Controller(Node):
         # Phase 5 — Forward tile scan (contour enter/leave + SSIM)
         if self._inspection_phase == 5:
             scan_distance = self._inspection_scan_distance()
-            front_distance = self._min_scan_distance(
-                -math.pi / 2, math.radians(15.0)
-            )
+            front_distance = self._min_scan_distance(-math.pi / 2, math.radians(15.0))
             if (
                 scan_distance >= 1.0
                 and front_distance is not None
@@ -1404,9 +1420,7 @@ class Task2Controller(Node):
                     f"[inspection] phase 5 complete: {reason}, tiles={self._tile_index} "
                     f"distance={scan_distance:.2f}m"
                 )
-                self._pub_arm("garage")
-                self._inspection_phase = 6
-                self._phase_start_time = now
+                self._start_room2_navigation()
                 return
 
             if self._tile_pause_start is not None:
@@ -1458,15 +1472,59 @@ class Task2Controller(Node):
             self._send_cmd_vel(0.05, self._belt_follow_correction(1.0))
             return
 
-        # Phase 6 — Escape: CW turn ~130° then forward 4 s
-        if self._inspection_phase == 6:
-            if elapsed < 2.6:
-                self._send_cmd_vel(0.0, -0.9)
-            elif elapsed < 6.6:
-                self._send_cmd_vel(0.15, 0.0)
-            else:
-                self._stop_cmd_vel()
-                self._transition(State.FOLLOW_BLUE_LINE)
+    # ── NAVIGATE_ROOM2_ENTRY ─────────────────────────────────────────
+
+    def _start_room2_navigation(self):
+        self._stop_cmd_vel()
+        self._cancel_nav()
+        # Blue-line following depends on this calibrated downward camera view.
+        # Centralizing it here covers inspection success, abort, and skip paths.
+        self._pub_arm("look_down")
+        self._room2_nav_attempt = 0
+        self._room2_goal_sent = False
+        self._transition(State.NAVIGATE_ROOM2_ENTRY)
+        self._send_room2_entry_goal()
+
+    def _send_room2_entry_goal(self):
+        x, y, yaw = self.room2_entry
+        self._room2_nav_started = self.get_clock().now().nanoseconds / 1e9
+        self.get_logger().info(
+            f"Navigating to room 2 entry (attempt {self._room2_nav_attempt + 1}/2): "
+            f"({x:.2f}, {y:.2f}) yaw={yaw:.2f}"
+        )
+        self._room2_goal_sent = self._send_nav_goal(x, y, yaw)
+
+    def _handle_room2_navigation(self):
+        now = self.get_clock().now().nanoseconds / 1e9
+        timed_out = (
+            self._room2_nav_started is not None and now - self._room2_nav_started > 90.0
+        )
+        if self._room2_goal_sent and not timed_out and not self._is_nav_complete():
+            return
+
+        if self._room2_goal_sent and self._nav_succeeded():
+            self.get_logger().info(
+                "Reached room 2 entry — starting blue-line following."
+            )
+            self._transition(State.FOLLOW_BLUE_LINE)
+            return
+
+        status = "TIMEOUT" if timed_out else self._nav_status_name()
+        if self._room2_nav_attempt < 1:
+            self._room2_nav_attempt += 1
+            self.get_logger().warn(
+                f"Room 2 entry navigation failed ({status}); retrying once."
+            )
+            self._cancel_nav()
+            self._send_room2_entry_goal()
+            return
+
+        self.get_logger().error(
+            f"Room 2 entry navigation failed after two attempts ({status}); "
+            "falling back to blue-line following."
+        )
+        self._cancel_nav()
+        self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── FOLLOW_BLUE_LINE ──────────────────────────────────────────────
 
@@ -1567,8 +1625,7 @@ class Task2Controller(Node):
         self.get_logger().error(f"[inspection] aborted: {reason}")
         self._stop_cmd_vel()
         self._cancel_nav()
-        self._pub_arm("garage")
-        self._transition(State.FOLLOW_BLUE_LINE)
+        self._start_room2_navigation()
 
     def _inspection_scan_distance(self) -> float:
         current_xy = self._current_xy()
@@ -1637,15 +1694,15 @@ class Task2Controller(Node):
             distance_error = side - self._inspection_side_target
             if abs(distance_error) > 0.04:
                 # Red belt is on the robot's left while scanning; green is on
-                # the right. Apply a gentle heading bias back toward the belt.
+                # the right. Cross-track recovery must dominate fixed-yaw hold;
+                # otherwise they cancel while the robot remains too far away.
                 belt_side_sign = 1.0 if self._inspection_color == "red" else -1.0
-                distance_correction = (
-                    direction * belt_side_sign * 0.25 * distance_error
-                )
+                distance_correction = direction * belt_side_sign * 0.45 * distance_error
+                yaw_correction *= 0.25
 
         correction = max(
-            -0.06,
-            min(0.06, yaw_correction + distance_correction),
+            -0.08,
+            min(0.08, yaw_correction + distance_correction),
         )
         self.get_logger().info(
             f"[inspection] belt follow dir={direction:+.0f} side={side} "

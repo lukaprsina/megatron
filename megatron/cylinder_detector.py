@@ -57,7 +57,7 @@ SENSOR_QOS = QoSProfile(
     depth=1,
 )
 
-_INACTIVE_STATES = frozenset(("FOLLOW_BLUE_LINE", "DONE"))
+_INACTIVE_STATES = frozenset(("NAVIGATE_ROOM2_ENTRY", "FOLLOW_BLUE_LINE", "DONE"))
 
 
 # ── Colour classification (adapted from teammate's cylinder_localizator) ───────

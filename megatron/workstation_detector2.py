@@ -64,7 +64,9 @@ MIN_BELT_LENGTH_M = 0.8  # map-frame belt length; barrels project ~0.2 m
 CONFIRM_COUNT = 10  # sightings before locking (median of these)
 TF_TIMEOUT_S = 0.2  # 4× longer than v1's 0.05 s
 
-_INACTIVE_STATES = frozenset(("INSPECT_WORKSTATION", "FOLLOW_BLUE_LINE", "DONE"))
+_INACTIVE_STATES = frozenset(
+    ("INSPECT_WORKSTATION", "NAVIGATE_ROOM2_ENTRY", "FOLLOW_BLUE_LINE", "DONE")
+)
 _MARKER_COLORS = {"red": (1.0, 0.0, 0.0), "green": (0.0, 1.0, 0.0)}
 _MARKER_IDS = {"red": 0, "green": 1}
 
@@ -385,7 +387,7 @@ class WorkstationDetector2(Node):
         return m
 
     def _republish_locked(self) -> None:
-        for color, marker in self._locked_markers.items():
+        for marker in self._locked_markers.values():
             marker.header.stamp = self.get_clock().now().to_msg()
             self._pub.publish(marker)
 

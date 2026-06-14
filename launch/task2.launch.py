@@ -152,6 +152,9 @@ def generate_launch_description():
                 "waypoints_file": PathJoinSubstitution(
                     [pkg_megatron, "waypoints", "workstation.yaml"]
                 ),
+                "room2_entry_file": PathJoinSubstitution(
+                    [pkg_megatron, "waypoints", "bluelinepoint.yaml"]
+                ),
                 "manual_mode": LaunchConfiguration("manual_mode"),
             }
         ],

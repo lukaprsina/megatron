@@ -47,7 +47,9 @@ MORPH_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 MIN_CONTOUR_AREA = 2000  # px² — reject small blobs
 MIN_ASPECT_RATIO = 3.0  # long belt shape; rings and faces have aspect ~1
 
-_INACTIVE_STATES = frozenset(("INSPECT_WORKSTATION", "FOLLOW_BLUE_LINE", "DONE"))
+_INACTIVE_STATES = frozenset(
+    ("INSPECT_WORKSTATION", "NAVIGATE_ROOM2_ENTRY", "FOLLOW_BLUE_LINE", "DONE")
+)
 
 _MARKER_COLORS = {
     "red": (1.0, 0.0, 0.0),
