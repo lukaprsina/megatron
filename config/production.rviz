@@ -66,278 +66,6 @@ Visualization Manager:
         Expand Link Details: false
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
-        arm_base2_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_base_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_elbow_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_shoulder_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_wrist_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        base_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        bump_front_center:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        bump_front_left:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        bump_front_right:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        bump_left:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        bump_right:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        bumper:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        button_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        button_2:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        button_power:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        cliff_front_left:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        cliff_front_right:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        cliff_side_left:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        cliff_side_right:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        front_caster_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        front_left_bottom_weight_block:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        front_left_top_weight_block:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        front_left_tower_standoff:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        front_right_bottom_weight_block:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        front_right_top_weight_block:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        front_right_tower_standoff:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        imu_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        ir_intensity_front_center_left:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        ir_intensity_front_center_right:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        ir_intensity_front_left:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        ir_intensity_front_right:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        ir_intensity_left:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        ir_intensity_right:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        ir_intensity_side_left:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        ir_omni:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        left_wheel:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        mouse:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        oakd_camera_bracket:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        oakd_imu_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        oakd_left_camera_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        oakd_left_camera_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        oakd_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        oakd_rgb_camera_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        oakd_rgb_camera_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        oakd_right_camera_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        oakd_right_camera_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        rear_left_tower_standoff:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        rear_right_tower_standoff:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        right_wheel:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        rplidar_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        shell_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        top_camera_imu_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        top_camera_left_camera_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        top_camera_left_camera_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        top_camera_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        top_camera_rgb_camera_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        top_camera_rgb_camera_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        top_camera_right_camera_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        top_camera_right_camera_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tower_sensor_plate:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wheel_drop_left:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        wheel_drop_right:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
       Mass Properties:
         Inertia: false
         Mass: false
@@ -827,8 +555,7 @@ Visualization Manager:
       Enabled: true
       Name: Face Markers
       Namespaces:
-        face_labels: true
-        faces: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -892,7 +619,7 @@ Visualization Manager:
       Enabled: true
       Name: Goal Markers
       Namespaces:
-        waypoints: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -1098,7 +825,7 @@ Window Geometry:
   Hide Right Dock: false
   Navigation 2:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000400000000000001e600000374fc0200000015fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005d00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003f0000029f000000cc00fffffffc000001bb000001f80000000000fffffffaffffffff0100000002fb00000018004e0061007600690067006100740069006f006e002000320000000000000002110000013a00fffffffb000000220053006c0061006d0054006f006f006c0062006f00780050006c007500670069006e0000000000ffffffff0000021100fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001e005200650061006c00730065006e0073006500430061006d00650072006100000002c4000000630000001700fffffffb0000001a004600610063006500730041006e006400520069006e006700730100000267000001710000000000000000fb0000002c0046006100630065007300200061006e0064002000520069006e00670073002000430061006d006500720061000000030f000000c50000000000000000fb0000000a0049006d00610067006502000009c40000020b000002dd00000207fb0000000a0049006d00610067006502000003580000022700000275000001e9fb0000000a0049006d00610067006502000006710000022b000002b0000001dbfb0000000c00590065006c006c006f0077010000025f000001540000000000000000fb0000000a0049006d006100670065010000025d000001560000000000000000fb000000200054006f0070002000430061006d00650072006100200049006d0061006700650000000205000000e00000001700fffffffb0000002400590065006c006c006f007700200044006500620075006700200049006d006100670065000000028d000001260000001700fffffffb000000340057006f0072006b00730074006100740069006f006e0020004400650074006500630074006f007200200049006d00610067006501000002e4000000cf0000001700fffffffb000000320057006f0072006b00730074006100740069006f006e002000560069007300750061006c0069007a006100740069006f006e030000036f000003410000024c0000022600000001000002110000035ffc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000004c0000035f000000a900fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004420000003efc0100000002fb0000000800540069006d00650100000000000004420000000000000000fb0000000800540069006d00650100000000000004500000000000000000000004a40000037400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000400000000000001e600000374fc0200000015fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005d00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003f0000029f000000cc00fffffffc000001bb000001f80000000000fffffffaffffffff0100000002fb00000018004e0061007600690067006100740069006f006e002000320000000000000002110000013a00fffffffb000000220053006c0061006d0054006f006f006c0062006f00780050006c007500670069006e0000000000ffffffff0000021100fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001e005200650061006c00730065006e0073006500430061006d00650072006100000002c4000000630000001700fffffffb0000001a004600610063006500730041006e006400520069006e006700730100000267000001710000000000000000fb0000002c0046006100630065007300200061006e0064002000520069006e00670073002000430061006d006500720061000000030f000000c50000000000000000fb0000000a0049006d00610067006502000009c40000020b000002dd00000207fb0000000a0049006d00610067006502000003580000022700000275000001e9fb0000000a0049006d00610067006502000006710000022b000002b0000001dbfb0000000c00590065006c006c006f0077010000025f000001540000000000000000fb0000000a0049006d006100670065010000025d000001560000000000000000fb000000200054006f0070002000430061006d00650072006100200049006d0061006700650000000205000000e00000001700fffffffb0000002400590065006c006c006f007700200044006500620075006700200049006d006100670065000000028d000001260000001700fffffffb000000340057006f0072006b00730074006100740069006f006e0020004400650074006500630074006f007200200049006d00610067006501000002e4000000cf0000001700fffffffb000000320057006f0072006b00730074006100740069006f006e002000560069007300750061006c0069007a006100740069006f006e0300000902000003460000024c0000022600000001000002110000035ffc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000004c0000035f000000a900fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004420000003efc0100000002fb0000000800540069006d00650100000000000004420000000000000000fb0000000800540069006d00650100000000000004500000000000000000000004a40000037400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   RealsenseCamera:
     collapsed: false
   Selection:

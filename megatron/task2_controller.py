@@ -153,6 +153,19 @@ def _normalize_angle(a: float) -> float:
     return a
 
 
+def _inspection_waypoint_index(color: str) -> int | None:
+    return {"red": 0, "green": 1}.get(color)
+
+
+def _inspection_target_available(
+    color: str, confirmed_colors: set[str], waypoint_count: int
+) -> bool:
+    waypoint_index = _inspection_waypoint_index(color)
+    return color in confirmed_colors or (
+        waypoint_index is not None and waypoint_index < waypoint_count
+    )
+
+
 # ---------------------------------------------------------------------------
 # QR task text → task token
 # ---------------------------------------------------------------------------
@@ -1158,7 +1171,15 @@ class Task2Controller(Node):
         else:
             if self.assigned_task and self.assigned_task.startswith("defects"):
                 color = self.assigned_task.split("_")[1]
-                if color in self.workstation_poses:
+                waypoint_index = _inspection_waypoint_index(color)
+                if _inspection_target_available(
+                    color, set(self.workstation_poses), len(self.waypoints)
+                ):
+                    if color not in self.workstation_poses:
+                        self.get_logger().warn(
+                            f"Workstation '{color}' was not confirmed; using calibrated "
+                            f"inspection waypoint{waypoint_index}."
+                        )
                     self.get_logger().info(
                         f"Post-patrol done — starting {color} workstation inspection."
                     )
@@ -1166,8 +1187,9 @@ class Task2Controller(Node):
                     self._transition(State.INSPECT_WORKSTATION)
                     return
                 else:
-                    self.get_logger().warn(
-                        f"Defects task for '{color}' but workstation pose unknown — skipping."
+                    self.get_logger().error(
+                        f"Defects task for '{color}' has neither a confirmed pose nor "
+                        "a calibrated inspection waypoint — skipping."
                     )
             self.get_logger().info(
                 "All post-patrol targets handled — heading to room 2."
@@ -1194,7 +1216,7 @@ class Task2Controller(Node):
 
         # The first two patrol waypoints are calibrated inspection approaches:
         # safely offset from each belt and facing it head-on.
-        waypoint_index = {"red": 0, "green": 1}.get(color)
+        waypoint_index = _inspection_waypoint_index(color)
         if waypoint_index is not None and waypoint_index < len(self.waypoints):
             approach_x, approach_y, approach_yaw = self.waypoints[waypoint_index]
             self.get_logger().info(

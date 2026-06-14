@@ -1,18 +1,26 @@
 tile_detector:
   image_size: 512
   border_inset: 0.06
+  analysis_inset_x: 0.12
+  analysis_inset_y: 0.08
   min_stddev: 7.0
+  min_laplacian_variance: 2.0
   max_alignment_error: 0.34
   color_threshold: 8.0
-  self_color_threshold: 6.0
-  self_color_min_area: 180
-  strong_color_area: 600
+  self_color_threshold: 8.0
+  self_color_min_area: 24
+  self_color_max_area: 5000
+  strong_color_area: 250
   intensity_threshold: 24.0
   gradient_threshold: 34.0
   dark_line_threshold: 18.0
   dark_segment_score: 180.0
   min_segment_length: 20.0
-  strong_line_area: 250
+  strong_line_area: 64
+  border_defect_area: 1800
+  dark_blob_threshold: 45.0
+  dark_blob_min_area: 300
+  component_border_margin: 12
   min_component_area: 18
   min_component_contrast: 10.0
   min_defect_area: 24

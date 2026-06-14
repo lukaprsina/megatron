@@ -16,18 +16,26 @@ TileStatus = Literal["OK", "DEFECT", "UNKNOWN"]
 class DetectorConfig:
     image_size: int = 512
     border_inset: float = 0.06
+    analysis_inset_x: float = 0.12
+    analysis_inset_y: float = 0.08
     min_stddev: float = 7.0
+    min_laplacian_variance: float = 2.0
     max_alignment_error: float = 0.34
     color_threshold: float = 8.0
-    self_color_threshold: float = 6.0
-    self_color_min_area: int = 180
-    strong_color_area: int = 600
+    self_color_threshold: float = 8.0
+    self_color_min_area: int = 24
+    self_color_max_area: int = 5000
+    strong_color_area: int = 250
     intensity_threshold: float = 24.0
     gradient_threshold: float = 34.0
     dark_line_threshold: float = 18.0
     dark_segment_score: float = 180.0
     min_segment_length: float = 20.0
-    strong_line_area: int = 250
+    strong_line_area: int = 64
+    border_defect_area: int = 1800
+    dark_blob_threshold: float = 45.0
+    dark_blob_min_area: int = 300
+    component_border_margin: int = 12
     min_component_area: int = 18
     min_component_contrast: float = 10.0
     min_defect_area: int = 24
@@ -126,13 +134,11 @@ class TileAnomalyDetector:
         self.config = config or DetectorConfig()
         self._references: list[_ReferenceVariant] = []
         for name, image in references.items():
-            canonical = cv2.resize(
-                _as_bgr(image),
-                (self.config.image_size, self.config.image_size),
-                interpolation=cv2.INTER_AREA,
-            )
+            source = _as_bgr(image)
             for turns in range(4):
-                rotated = np.ascontiguousarray(np.rot90(canonical, turns))
+                rotated = self._prepare_image(
+                    np.ascontiguousarray(np.rot90(source, turns))
+                )
                 normalized = normalize_lab(rotated, self.config.image_size)
                 self._references.append(
                     _ReferenceVariant(
@@ -162,11 +168,7 @@ class TileAnomalyDetector:
 
     def detect(self, sample: np.ndarray) -> TileAnomalyResult:
         try:
-            sample = cv2.resize(
-                _as_bgr(sample),
-                (self.config.image_size, self.config.image_size),
-                interpolation=cv2.INTER_AREA,
-            )
+            sample = self._prepare_image(sample)
         except ValueError as exc:
             return TileAnomalyResult(status="UNKNOWN", reason=str(exc))
 
@@ -175,31 +177,39 @@ class TileAnomalyDetector:
             return TileAnomalyResult(
                 status="UNKNOWN", reason="tile image has insufficient contrast"
             )
+        sharpness = float(cv2.Laplacian(sample_gray, cv2.CV_64F).var())
+        if sharpness < self.config.min_laplacian_variance:
+            return TileAnomalyResult(
+                status="UNKNOWN", reason="tile image is too blurred"
+            )
 
         normalized_sample = normalize_lab(sample, self.config.image_size)
-        self_evidence = self._build_self_evidence(sample)
-        self_mask, self_components = self._build_self_mask(self_evidence)
-        self_area = int(cv2.countNonZero(self_mask))
-        line_area = int(cv2.countNonZero(self_evidence["line"]))
-        if (
-            line_area >= self.config.strong_line_area
-            or self_area >= self.config.strong_color_area
-        ):
-            return TileAnomalyResult(
-                status="DEFECT",
-                defect_area=self_area,
-                defect_ratio=self_area / float(self_mask.size),
-                mask=self_mask,
-                normalized_sample=cv2.cvtColor(normalized_sample, cv2.COLOR_LAB2BGR),
-                evidence=self_evidence,
-                component_scores=self_components,
-            )
         variant = self._select_reference(normalized_sample[:, :, 0])
         aligned, alignment_error = self._align_reference(
             variant.normalized, normalized_sample
         )
         if aligned is None or alignment_error > self.config.max_alignment_error:
-            if self_area >= self.config.min_defect_area:
+            self_evidence = self._build_self_evidence(sample, include_lines=False)
+            self_mask, self_components = self._build_self_mask(self_evidence)
+            self_area = int(cv2.countNonZero(self_mask))
+            line_area = int(cv2.countNonZero(self_evidence["line_filtered"]))
+            color_area = int(
+                cv2.countNonZero(self_evidence["self_color_filtered"])
+            )
+            border_area = int(cv2.countNonZero(self_evidence["border_intrusion"]))
+            dark_blob_area = int(cv2.countNonZero(self_evidence["dark_blob"]))
+            strong_self_evidence = (
+                color_area >= self.config.strong_color_area
+                or border_area >= self.config.border_defect_area
+                or dark_blob_area >= self.config.dark_blob_min_area
+            )
+            if not strong_self_evidence:
+                self_evidence = self._build_self_evidence(sample, include_lines=True)
+                self_mask, self_components = self._build_self_mask(self_evidence)
+                self_area = int(cv2.countNonZero(self_mask))
+                line_area = int(cv2.countNonZero(self_evidence["line_filtered"]))
+                strong_self_evidence = line_area >= self.config.strong_line_area
+            if strong_self_evidence:
                 return TileAnomalyResult(
                     status="DEFECT",
                     defect_area=self_area,
@@ -220,7 +230,6 @@ class TileAnomalyDetector:
             )
 
         evidence = self._build_evidence(normalized_sample, aligned)
-        evidence.update(self_evidence)
         mask, components = self._build_mask(evidence)
         defect_area = int(cv2.countNonZero(mask))
         status: TileStatus = (
@@ -237,6 +246,29 @@ class TileAnomalyDetector:
             normalized_sample=cv2.cvtColor(normalized_sample, cv2.COLOR_LAB2BGR),
             evidence=evidence,
             component_scores=components,
+        )
+
+    def _prepare_image(self, image: np.ndarray) -> np.ndarray:
+        image = _as_bgr(image)
+        height, width = image.shape[:2]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        center = float(np.median(gray[height // 4 : 3 * height // 4, width // 4 : 3 * width // 4]))
+        edge_width = max(2, int(round(width * 0.05)))
+        edge_height = max(2, int(round(height * 0.05)))
+        dark_limit = max(25.0, center * 0.55)
+        inset_x = int(round(width * self.config.analysis_inset_x))
+        inset_y = int(round(height * self.config.analysis_inset_y))
+        left = inset_x if float(np.median(gray[:, :edge_width])) < dark_limit else 0
+        right = inset_x if float(np.median(gray[:, -edge_width:])) < dark_limit else 0
+        top = inset_y if float(np.median(gray[:edge_height, :])) < dark_limit else 0
+        bottom = inset_y if float(np.median(gray[-edge_height:, :])) < dark_limit else 0
+        if left + right >= width or top + bottom >= height:
+            raise ValueError("analysis inset removes the complete tile image")
+        image = image[top : height - bottom, left : width - right]
+        return cv2.resize(
+            image,
+            (self.config.image_size, self.config.image_size),
+            interpolation=cv2.INTER_AREA,
         )
 
     def _select_reference(self, sample_gray: np.ndarray) -> _ReferenceVariant:
@@ -300,7 +332,9 @@ class TileAnomalyDetector:
         )
         return aligned, error
 
-    def _build_self_evidence(self, sample: np.ndarray) -> dict[str, np.ndarray]:
+    def _build_self_evidence(
+        self, sample: np.ndarray, *, include_lines: bool = True
+    ) -> dict[str, np.ndarray]:
         sample_lab = cv2.cvtColor(sample, cv2.COLOR_BGR2LAB)
         chroma = sample_lab[:, :, 1:].astype(np.float32)
         median = np.median(chroma.reshape(-1, 2), axis=0)
@@ -313,24 +347,59 @@ class TileAnomalyDetector:
             cv2.MORPH_OPEN,
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
         )
-        lines = _dark_line_segments(
-            cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY),
-            self.config.min_segment_length,
-            self.config.dark_segment_score,
+        gray = cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY)
+        lines = (
+            _dark_line_segments(
+                gray,
+                self.config.min_segment_length,
+                self.config.dark_segment_score,
+            )
+            if include_lines
+            else np.zeros(gray.shape, dtype=np.uint8)
         )
-        return {"self_color": color, "line": lines}
+        border_intrusion = _lateral_border_intrusions(
+            gray,
+            self.config.border_defect_area,
+        )
+        dark_blob = _dark_blobs(
+            gray,
+            self.config.dark_blob_threshold,
+            self.config.dark_blob_min_area,
+            self.config.component_border_margin,
+        )
+        return {
+            "self_color": color,
+            "line": lines,
+            "border_intrusion": border_intrusion,
+            "dark_blob": dark_blob,
+        }
 
     def _build_self_mask(
         self, evidence: dict[str, np.ndarray]
     ) -> tuple[np.ndarray, list[dict[str, float | int]]]:
-        output = evidence["line"].copy()
+        output = np.zeros_like(evidence["line"])
         components: list[dict[str, float | int]] = []
+        margin = self.config.component_border_margin
         count, labels, stats, _ = cv2.connectedComponentsWithStats(
             evidence["self_color"]
         )
         for label in range(1, count):
             area = int(stats[label, cv2.CC_STAT_AREA])
-            if area < self.config.self_color_min_area:
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            width = int(stats[label, cv2.CC_STAT_WIDTH])
+            height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            touches_border = (
+                x < margin
+                or y < margin
+                or x + width > output.shape[1] - margin
+                or y + height > output.shape[0] - margin
+            )
+            if (
+                area < self.config.self_color_min_area
+                or area > self.config.self_color_max_area
+                or touches_border
+            ):
                 continue
             region = labels == label
             output[region] = 255
@@ -338,16 +407,19 @@ class TileAnomalyDetector:
                 {
                     "area": area,
                     "contrast": 255.0,
-                    "x": int(stats[label, cv2.CC_STAT_LEFT]),
-                    "y": int(stats[label, cv2.CC_STAT_TOP]),
-                    "width": int(stats[label, cv2.CC_STAT_WIDTH]),
-                    "height": int(stats[label, cv2.CC_STAT_HEIGHT]),
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
                 }
             )
-        output[:8, :] = 0
-        output[-8:, :] = 0
-        output[:, :8] = 0
-        output[:, -8:] = 0
+        evidence["self_color_filtered"] = output.copy()
+        evidence["line_filtered"] = _filter_components(
+            evidence["line"], margin, self.config.min_defect_area
+        )
+        output = cv2.bitwise_or(output, evidence["line_filtered"])
+        output = cv2.bitwise_or(output, evidence["border_intrusion"])
+        output = cv2.bitwise_or(output, evidence["dark_blob"])
         return output, components
 
     def _build_evidence(
@@ -516,3 +588,75 @@ def _dark_line_segments(
             cv2.LINE_AA,
         )
     return mask
+
+
+def _filter_components(mask: np.ndarray, margin: int, min_area: int) -> np.ndarray:
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    output = np.zeros_like(mask)
+    height, width = mask.shape
+    for label in range(1, count):
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        if (
+            x < margin
+            or y < margin
+            or x + component_width > width - margin
+            or y + component_height > height - margin
+        ):
+            continue
+        output[labels == label] = 255
+    return output
+
+
+def _lateral_border_intrusions(gray: np.ndarray, min_area: int) -> np.ndarray:
+    original_shape = gray.shape
+    gray = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    background = cv2.GaussianBlur(gray, (0, 0), 12.5)
+    darkness = background.astype(np.int16) - gray.astype(np.int16)
+    candidate = np.where(darkness >= 15, 255, 0).astype(np.uint8)
+    candidate = cv2.morphologyEx(
+        candidate,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+    )
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(candidate)
+    output = np.zeros_like(candidate)
+    height, width = candidate.shape
+    for label in range(1, count):
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        center_y = float(centroids[label, 1])
+        touches_side = x <= 1 or x + component_width >= width - 1
+        away_from_corners = 0.2 * height <= center_y <= 0.8 * height
+        if area >= max(1, min_area // 4) and touches_side and away_from_corners:
+            output[labels == label] = 255
+    return cv2.resize(
+        output, original_shape[::-1], interpolation=cv2.INTER_NEAREST
+    )
+
+
+def _dark_blobs(
+    gray: np.ndarray, threshold: float, min_area: int, margin: int
+) -> np.ndarray:
+    original_shape = gray.shape
+    gray = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    background = cv2.GaussianBlur(gray, (0, 0), 15)
+    darkness = background.astype(np.int16) - gray.astype(np.int16)
+    candidate = np.where(darkness >= threshold, 255, 0).astype(np.uint8)
+    candidate = cv2.morphologyEx(
+        candidate,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+    )
+    output = _filter_components(
+        candidate, max(1, margin // 2), max(1, min_area // 4)
+    )
+    return cv2.resize(
+        output, original_shape[::-1], interpolation=cv2.INTER_NEAREST
+    )

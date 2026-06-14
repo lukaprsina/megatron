@@ -107,6 +107,7 @@ class WorkstationDetector2(Node):
         self._debug_frame_skip = 0  # publish every 3rd frame
 
         self.create_timer(2.0, self._republish_locked)
+        self.create_timer(5.0, self._log_detection_status)
         self.get_logger().info(
             "WorkstationDetector2 ready  "
             "(floor-ROI + PCA flatness + 200 ms TF + median lock)"
@@ -390,6 +391,20 @@ class WorkstationDetector2(Node):
         for marker in self._locked_markers.values():
             marker.header.stamp = self.get_clock().now().to_msg()
             self._pub.publish(marker)
+
+    def _log_detection_status(self) -> None:
+        statuses = []
+        for color in ("red", "green"):
+            if self._locked[color]:
+                statuses.append(f"{color}=locked")
+            else:
+                statuses.append(
+                    f"{color}={len(self._candidates[color])}/{CONFIRM_COUNT} "
+                    f"({self._last_reject[color]})"
+                )
+        self.get_logger().info(
+            f"Detection status state={self._robot_state}: " + "; ".join(statuses)
+        )
 
     # ── TF helper ──────────────────────────────────────────────────────────────
 
