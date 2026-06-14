@@ -34,6 +34,10 @@ setup(
             glob(os.path.join("assets", "tile_reference", "*")),
         ),
         (
+            os.path.join("share", package_name, "assets", "tiles"),
+            glob(os.path.join("assets", "tiles", "*")),
+        ),
+        (
             os.path.join("share", package_name, "assets", "wechat_qrcode"),
             glob(os.path.join("assets", "wechat_qrcode", "*")),
         ),

@@ -1,0 +1,26 @@
+tile_detector:
+  image_size: 512
+  border_inset: 0.06
+  min_stddev: 7.0
+  max_alignment_error: 0.34
+  color_threshold: 8.0
+  self_color_threshold: 6.0
+  self_color_min_area: 180
+  strong_color_area: 600
+  intensity_threshold: 24.0
+  gradient_threshold: 34.0
+  dark_line_threshold: 18.0
+  dark_segment_score: 180.0
+  min_segment_length: 20.0
+  strong_line_area: 250
+  min_component_area: 18
+  min_component_contrast: 10.0
+  min_defect_area: 24
+  ecc_iterations: 35
+  ecc_epsilon: 0.0001
+
+dataset:
+  source: supplied task2 world textures
+  good_unique: 4
+  damaged_unique: 15
+  note: Thresholds are provisional until camera-warp captures are available.
