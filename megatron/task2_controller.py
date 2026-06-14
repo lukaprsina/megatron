@@ -46,6 +46,7 @@ from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
 from visualization_msgs.msg import Marker, MarkerArray
 
 from megatron.speech import Speaker
+from megatron.tile_capture import save_tile_capture
 
 # ---------------------------------------------------------------------------
 # State machine
@@ -202,6 +203,9 @@ class Task2Controller(Node):
         self.declare_parameter("approach_retry_offset", 0.20)
         self.declare_parameter("manual_mode", False)
         self.declare_parameter("avoidance_blind_distance", 0.40)
+        self.declare_parameter("capture_tiles", False)
+        self.declare_parameter("tile_capture_dir", "/tmp/megatron_tile_captures")
+        self.declare_parameter("world_name", "task2")
 
         wp_file = cast(str, self.get_parameter("waypoints_file").value)
         self.waypoints = load_waypoints_from_yaml(wp_file)
@@ -219,6 +223,11 @@ class Task2Controller(Node):
             f"yaw={self.room2_entry[2]:.2f}"
         )
         self.manual_mode = cast(bool, self.get_parameter("manual_mode").value)
+        self._capture_tiles = cast(bool, self.get_parameter("capture_tiles").value)
+        self._tile_capture_dir = Path(
+            cast(str, self.get_parameter("tile_capture_dir").value)
+        ).expanduser()
+        self._world_name = cast(str, self.get_parameter("world_name").value)
         if self.manual_mode:
             self.get_logger().info(
                 "MANUAL MODE — perception only, no navigation. Drive with keyboard."
@@ -302,6 +311,7 @@ class Task2Controller(Node):
         # --- Top camera ---
         self._cv_bridge = CvBridge()
         self._last_top_frame: np.ndarray | None = None
+        self._last_top_stamp_ns = 0
         _ref_path = (
             Path(get_package_share_directory("megatron"))
             / "assets/tile_reference/reference.png"
@@ -316,6 +326,11 @@ class Task2Controller(Node):
                 f"Reference tile loaded from {_ref_path}, shape={self._reference_tile.shape}"
             )
         self._ssim_threshold = 0.75  # TODO: calibrate in sim
+        if self._capture_tiles:
+            self.get_logger().info(
+                f"Tile capture enabled: {self._tile_capture_dir} "
+                f"(world={self._world_name})"
+            )
 
         # --- Speech ---
         self.speaker = Speaker()
@@ -602,6 +617,10 @@ class Task2Controller(Node):
     def _top_camera_cb(self, msg: Image):
         frame = self._cv_bridge.imgmsg_to_cv2(msg, "bgr8")
         self._last_top_frame = frame
+        self._last_top_stamp_ns = (
+            int(msg.header.stamp.sec) * 1_000_000_000
+            + int(msg.header.stamp.nanosec)
+        )
         if self.state == State.INSPECT_WORKSTATION:
             try:
                 # Annotate with ROI mean brightness so we can see the trigger threshold
@@ -1436,6 +1455,8 @@ class Task2Controller(Node):
                 pause_elapsed = now - self._tile_pause_start
                 if pause_elapsed >= 0.3 and self._last_top_frame is not None:
                     if not self._tile_scored_this_pause:
+                        if self._capture_tiles:
+                            self._capture_current_tile(self._last_top_frame)
                         defect, ssim_score = self._score_tile(self._last_top_frame)
                         self.tile_results.append(
                             {
@@ -1857,6 +1878,36 @@ class Task2Controller(Node):
         _score = ssim(ref, warped)
         score = float(_score[0] if isinstance(_score, tuple) else _score)
         return score < self._ssim_threshold, score
+
+    def _capture_current_tile(self, frame: np.ndarray) -> None:
+        box, _ = self._detect_tile(frame)
+        if box is None:
+            self.get_logger().warn("Tile capture skipped: contour was lost during pause")
+            return
+
+        pose = None
+        current_xy = self._current_xy()
+        current_yaw = self._current_yaw()
+        if current_xy is not None and current_yaw is not None:
+            pose = {
+                "x": float(current_xy[0]),
+                "y": float(current_xy[1]),
+                "yaw": float(current_yaw),
+            }
+        try:
+            metadata_path = save_tile_capture(
+                self._tile_capture_dir,
+                frame,
+                box,
+                world=self._world_name,
+                station=self._inspection_color or "unknown",
+                tile_index=self._tile_index,
+                stamp_ns=self._last_top_stamp_ns,
+                pose=pose,
+            )
+            self.get_logger().info(f"Captured tile sample: {metadata_path}")
+        except (OSError, ValueError, cv2.error) as exc:
+            self.get_logger().error(f"Tile capture failed: {exc}")
 
     # ── Navigation helpers ─────────────────────────────────────────────
 

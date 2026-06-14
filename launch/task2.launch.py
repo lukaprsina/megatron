@@ -7,6 +7,7 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 
 
+# keep the unused nodes, they are disabled when working on other nodes
 def generate_launch_description():
     pkg_megatron = get_package_share_directory("megatron")
 
@@ -54,6 +55,17 @@ def generate_launch_description():
             default_value="false",
             choices=["true", "false"],
             description="Perception-only teleop mode (no autonomous patrol)",
+        ),
+        DeclareLaunchArgument(
+            "capture_tiles",
+            default_value="false",
+            choices=["true", "false"],
+            description="Save centered workstation frames and canonical tile warps",
+        ),
+        DeclareLaunchArgument(
+            "tile_capture_dir",
+            default_value="/tmp/megatron_tile_captures",
+            description="Writable directory for camera-domain tile captures",
         ),
         DeclareLaunchArgument(
             "personnel_dir",
@@ -156,6 +168,9 @@ def generate_launch_description():
                     [pkg_megatron, "waypoints", "bluelinepoint.yaml"]
                 ),
                 "manual_mode": LaunchConfiguration("manual_mode"),
+                "capture_tiles": LaunchConfiguration("capture_tiles"),
+                "tile_capture_dir": LaunchConfiguration("tile_capture_dir"),
+                "world_name": LaunchConfiguration("world"),
             }
         ],
     )
