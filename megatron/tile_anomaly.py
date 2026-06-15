@@ -74,6 +74,7 @@ class _ReferenceVariant:
     image: np.ndarray
     normalized: np.ndarray
     gray: np.ndarray
+    gray_small: np.ndarray  # 96×96 standardized, cached for fast reference selection
 
 
 def order_quad(points: np.ndarray) -> np.ndarray:
@@ -140,12 +141,17 @@ class TileAnomalyDetector:
                     np.ascontiguousarray(np.rot90(source, turns))
                 )
                 normalized = normalize_lab(rotated, self.config.image_size)
+                gray = normalized[:, :, 0]
+                gray_small = _standardize(
+                    cv2.resize(gray, (96, 96), interpolation=cv2.INTER_AREA)
+                )
                 self._references.append(
                     _ReferenceVariant(
                         name=f"{name}@{turns * 90}",
                         image=rotated,
                         normalized=normalized,
-                        gray=normalized[:, :, 0],
+                        gray=gray,
+                        gray_small=gray_small,
                     )
                 )
         if not self._references:
@@ -192,7 +198,6 @@ class TileAnomalyDetector:
             self_evidence = self._build_self_evidence(sample, include_lines=False)
             self_mask, self_components = self._build_self_mask(self_evidence)
             self_area = int(cv2.countNonZero(self_mask))
-            line_area = int(cv2.countNonZero(self_evidence["line_filtered"]))
             color_area = int(
                 cv2.countNonZero(self_evidence["self_color_filtered"])
             )
@@ -226,7 +231,7 @@ class TileAnomalyDetector:
                 reference_name=variant.name,
                 alignment_error=alignment_error,
                 reason="reference alignment quality is inadequate",
-                normalized_sample=normalized_sample,
+                normalized_sample=cv2.cvtColor(normalized_sample, cv2.COLOR_LAB2BGR),
             )
 
         evidence = self._build_evidence(normalized_sample, aligned)
@@ -272,16 +277,13 @@ class TileAnomalyDetector:
         )
 
     def _select_reference(self, sample_gray: np.ndarray) -> _ReferenceVariant:
-        size = 96
-        sample_small = cv2.resize(sample_gray, (size, size), interpolation=cv2.INTER_AREA)
-        sample_small = _standardize(sample_small)
+        sample_small = _standardize(
+            cv2.resize(sample_gray, (96, 96), interpolation=cv2.INTER_AREA)
+        )
         best = self._references[0]
         best_error = float("inf")
         for variant in self._references:
-            ref_small = cv2.resize(
-                variant.gray, (size, size), interpolation=cv2.INTER_AREA
-            )
-            error = float(np.mean(np.abs(sample_small - _standardize(ref_small))))
+            error = float(np.mean(np.abs(sample_small - variant.gray_small)))
             if error < best_error:
                 best = variant
                 best_error = error

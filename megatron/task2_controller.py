@@ -1253,19 +1253,23 @@ class Task2Controller(Node):
             self.get_logger().error("No pose available — can't start inspection.")
             return
 
+        target_yaw = math.pi if color == "red" else math.pi / 2
         if self.current_pose is not None:
             rx = self.current_pose.position.x
             ry = self.current_pose.position.y
             delta = ws_pos - np.array([rx, ry])
             dist = float(np.linalg.norm(delta))
             approach_xy = ws_pos - (delta / dist) * 0.4 if dist > 0.6 else ws_pos
+            self.get_logger().info(
+                f"[inspection] approach goal: ({approach_xy[0]:.2f}, {approach_xy[1]:.2f}) yaw={target_yaw:.2f} "
+                f"(ws={ws_pos[0]:.2f},{ws_pos[1]:.2f} robot={rx:.2f},{ry:.2f} dist={dist:.2f})"
+            )
         else:
             approach_xy = ws_pos
-        target_yaw = math.pi if color == "red" else math.pi / 2
-        self.get_logger().info(
-            f"[inspection] approach goal: ({approach_xy[0]:.2f}, {approach_xy[1]:.2f}) yaw={target_yaw:.2f} "
-            f"(ws={ws_pos[0]:.2f},{ws_pos[1]:.2f} robot={rx:.2f},{ry:.2f} dist={dist:.2f})"
-        )
+            self.get_logger().info(
+                f"[inspection] approach goal: ({approach_xy[0]:.2f}, {approach_xy[1]:.2f}) yaw={target_yaw:.2f} "
+                f"(ws={ws_pos[0]:.2f},{ws_pos[1]:.2f} no robot pose)"
+            )
         self._send_nav_goal(approach_xy[0], approach_xy[1], target_yaw)
 
     def _handle_inspection(self):
@@ -1407,27 +1411,13 @@ class Task2Controller(Node):
             if elapsed_p3 < 0.5:
                 return
             if self._inspection_color == "green" and self._inspection_side_samples:
-                sorted_samples = sorted(self._inspection_side_samples)
-                self._inspection_side_target = sorted_samples[len(sorted_samples) // 2]
+                self._inspection_side_target = float(
+                    np.median(self._inspection_side_samples)
+                )
             else:
                 self._inspection_side_target = None
-            self.get_logger().info(
-                "[inspection] phase 3 calibrated: "
-                f"scan_yaw={self._inspection_scan_yaw} "
-                f"side_target={self._inspection_side_target} "
-                f"n_samples={len(self._inspection_side_samples)}"
-            )
-            self._inspection_phase = 4
-            self._phase_start_time = now
-            self._yellow_seen = False
-            return
-
-        # Phase 4 — Initialize scanning at the calibrated right-side waypoint.
-        if self._inspection_phase == 4:
             self._stop_cmd_vel()
             self._yellow_seen = False
-            self._inspection_phase = 5
-            self._phase_start_time = now
             self._tile_pause_start = None
             self._tile_visible = False
             self._tile_hit_count = 0
@@ -1435,9 +1425,14 @@ class Task2Controller(Node):
             self._inspection_front_hit_count = 0
             self._inspection_scan_start = self._current_xy()
             self.get_logger().info(
-                f"[inspection] phase 4 scan start={self._inspection_scan_start} "
-                f"yaw={self._inspection_scan_yaw}"
+                "[inspection] phase 3 calibrated: "
+                f"scan_yaw={self._inspection_scan_yaw} "
+                f"side_target={self._inspection_side_target} "
+                f"n_samples={len(self._inspection_side_samples)} "
+                f"scan_start={self._inspection_scan_start}"
             )
+            self._inspection_phase = 5
+            self._phase_start_time = now
             return
 
         # Phase 5 — Forward tile scan (contour enter/leave + anomaly detection)
@@ -1558,7 +1553,7 @@ class Task2Controller(Node):
                     self._tile_miss_count = 0
                     self.get_logger().info("[phase5] tile left view")
 
-            self._send_cmd_vel(0.05, self._belt_follow_correction(1.0))
+            self._send_cmd_vel(0.05, self._belt_follow_correction())
             return
 
     # ── NAVIGATE_ROOM2_ENTRY ─────────────────────────────────────────
@@ -1635,7 +1630,7 @@ class Task2Controller(Node):
     # ── Report ────────────────────────────────────────────────────────
 
     def _generate_report(self):
-        """Write a simple text report. Replace with FPDF2 in Phase 5."""
+        """Write a plain-text inspection report."""
         lines = ["# Task 2 Inspection Report\n"]
         lines.append("## Ring Counts")
         for color, count in sorted(self.ring_counts.items()):
@@ -1784,7 +1779,7 @@ class Task2Controller(Node):
             return None
         return dist
 
-    def _belt_follow_correction(self, direction: float) -> float:
+    def _belt_follow_correction(self) -> float:
         current_yaw = self._current_yaw()
         yaw_correction = 0.0
         if current_yaw is not None and self._inspection_scan_yaw is not None:
@@ -1801,7 +1796,7 @@ class Task2Controller(Node):
                 belt_side_sign = math.copysign(
                     1.0, math.sin(self._belt_world_perp() - (current_yaw or 0.0))
                 )
-                distance_correction = direction * belt_side_sign * 0.25 * distance_error
+                distance_correction = belt_side_sign * 0.25 * distance_error
                 distance_active = True
 
         # Distance takes priority: suppress yaw correction while lateral position
@@ -1812,20 +1807,13 @@ class Task2Controller(Node):
         CLAMP = 0.10
         correction = max(-CLAMP, min(CLAMP, yaw_correction + distance_correction))
         self.get_logger().info(
-            f"[inspection] belt follow dir={direction:+.0f} side={side} "
+            f"[inspection] belt follow side={side} "
             f"target={self._inspection_side_target} "
             f"yaw_cmd={yaw_correction:+.3f} "
             f"distance_cmd={distance_correction:+.3f} cmd={correction:+.3f}",
             throttle_duration_sec=0.5,
         )
         return correction
-
-    @staticmethod
-    def _order_points(points: np.ndarray) -> np.ndarray:
-        ordered_by_y = points[points[:, 1].argsort()]
-        top = ordered_by_y[:2][ordered_by_y[:2, 0].argsort()]
-        bottom = ordered_by_y[2:][ordered_by_y[2:, 0].argsort()]
-        return np.array([top[0], top[1], bottom[1], bottom[0]], dtype=np.float32)
 
     def _detect_tile(self, frame: np.ndarray) -> tuple[np.ndarray | None, np.ndarray]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -1891,24 +1879,6 @@ class Task2Controller(Node):
         box = cv2.boxPoints(cv2.minAreaRect(best))
         box[:, 1] += crop_y
         return box.astype(np.float32), full_mask
-
-    def _compute_belt_tilt(self, frame: np.ndarray) -> float | None:
-        """Return tilt angle (rad) of dominant lines in the top-camera view."""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        lines = cv2.HoughLinesP(
-            edges, 1, math.pi / 180, threshold=80, minLineLength=60, maxLineGap=10
-        )
-        if lines is None:
-            return None
-        angles = [
-            math.atan2(int(ln[0][3]) - int(ln[0][1]), int(ln[0][2]) - int(ln[0][0]))
-            for ln in lines
-        ]
-        median_angle = float(np.median(angles))
-        if abs(median_angle) > math.pi / 4:
-            median_angle -= math.copysign(math.pi / 2, median_angle)
-        return median_angle
 
     def _score_tile(self, frame: np.ndarray) -> TileAnomalyResult:
         """Score a tile frame using TileAnomalyDetector."""
