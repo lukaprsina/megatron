@@ -28,7 +28,6 @@ tile_detector:
   ecc_epsilon: 0.0001
 
 dataset:
-  source: supplied task2 world textures
-  good_unique: 4
-  damaged_unique: 15
-  note: Thresholds are provisional until camera-warp captures are available.
+  source: camera-domain captures across task2 / task2_blue_demo / task2_green_demo / task2_yellow_demo
+  good_unique: 9
+  note: Thresholds calibrated on latest-only canonical captures; see evaluate/ for per-world results.

@@ -3,6 +3,17 @@ from glob import glob
 
 from setuptools import find_packages, setup
 
+
+def _tree(src_root: str, share_root: str) -> list[tuple[str, list[str]]]:
+    entries: list[tuple[str, list[str]]] = []
+    for dirpath, _dirs, files in os.walk(src_root):
+        if not files:
+            continue
+        rel = os.path.relpath(dirpath, start=os.path.dirname(src_root))
+        dest = os.path.join(share_root, rel)
+        entries.append((dest, [os.path.join(dirpath, f) for f in files]))
+    return entries
+
 package_name = "megatron"
 
 setup(
@@ -30,12 +41,12 @@ setup(
             glob(os.path.join("personnel", "*")),
         ),
         (
-            os.path.join("share", package_name, "assets", "tile_reference"),
-            glob(os.path.join("assets", "tile_reference", "*")),
-        ),
-        (
             os.path.join("share", package_name, "assets", "tiles"),
-            glob(os.path.join("assets", "tiles", "*")),
+            [p for p in glob(os.path.join("assets", "tiles", "*")) if os.path.isfile(p)],
+        ),
+        *_tree(
+            os.path.join("assets", "tiles", "reference_good"),
+            os.path.join("share", package_name, "assets", "tiles"),
         ),
         (
             os.path.join("share", package_name, "assets", "wechat_qrcode"),

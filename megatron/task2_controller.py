@@ -39,13 +39,18 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from sensor_msgs.msg import Image, LaserScan
-from skimage.metrics import structural_similarity as ssim
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
 from visualization_msgs.msg import Marker, MarkerArray
 
 from megatron.speech import Speaker
+from megatron.tile_anomaly import (
+    DetectorConfig,
+    TileAnomalyDetector,
+    TileAnomalyResult,
+    warp_tile,
+)
 from megatron.tile_capture import save_tile_capture
 
 # ---------------------------------------------------------------------------
@@ -326,20 +331,23 @@ class Task2Controller(Node):
         self._cv_bridge = CvBridge()
         self._last_top_frame: np.ndarray | None = None
         self._last_top_stamp_ns = 0
-        _ref_path = (
-            Path(get_package_share_directory("megatron"))
-            / "assets/tile_reference/reference.png"
+        _share = Path(get_package_share_directory("megatron"))
+        _ref_root = _share / "assets" / "tiles" / "reference_good"
+        _model_path = _share / "assets" / "tiles" / "model.yaml"
+        _detector_config = DetectorConfig.from_yaml(_model_path)
+        _world_ref_root = _ref_root / self._world_name
+        _ref_red = sorted((_world_ref_root / "red").rglob("*.png")) if (_world_ref_root / "red").is_dir() else []
+        _ref_green = sorted((_world_ref_root / "green").rglob("*.png")) if (_world_ref_root / "green").is_dir() else []
+        if not _ref_red:
+            _ref_red = sorted(p for p in _ref_root.rglob("*.png") if "/red/" in p.as_posix())
+        if not _ref_green:
+            _ref_green = sorted(p for p in _ref_root.rglob("*.png") if "/green/" in p.as_posix())
+        self._tile_detector_red = TileAnomalyDetector.from_paths(_ref_red, _detector_config)
+        self._tile_detector_green = TileAnomalyDetector.from_paths(_ref_green, _detector_config)
+        self.get_logger().info(
+            f"Tile detectors loaded: red={len(_ref_red)} green={len(_ref_green)} refs "
+            f"from {_world_ref_root}"
         )
-        self._reference_tile = cv2.imread(str(_ref_path), cv2.IMREAD_GRAYSCALE)
-        if self._reference_tile is None:
-            self.get_logger().error(
-                f"SSIM BROKEN: reference tile not found at {_ref_path}"
-            )
-        else:
-            self.get_logger().info(
-                f"Reference tile loaded from {_ref_path}, shape={self._reference_tile.shape}"
-            )
-        self._ssim_threshold = 0.75  # TODO: calibrate in sim
         if self._capture_tiles:
             self.get_logger().info(
                 f"Tile capture enabled: {self._tile_capture_dir} "
@@ -1432,7 +1440,7 @@ class Task2Controller(Node):
             )
             return
 
-        # Phase 5 — Forward tile scan (contour enter/leave + SSIM)
+        # Phase 5 — Forward tile scan (contour enter/leave + anomaly detection)
         if self._inspection_phase == 5:
             expected_tiles = self.WORKSTATION_TILE_COUNTS.get(
                 self._inspection_color or "", 4
@@ -1494,19 +1502,21 @@ class Task2Controller(Node):
                     if not self._tile_scored_this_pause:
                         if self._capture_tiles:
                             self._capture_current_tile(self._last_top_frame)
-                        defect, ssim_score = self._score_tile(self._last_top_frame)
+                        _result = self._score_tile(self._last_top_frame)
                         self.tile_results.append(
                             {
                                 "station": self._inspection_color,
                                 "tile_id": self._tile_index,
-                                "defect": defect,
-                                "ssim": ssim_score,
+                                "status": _result.status,
+                                "defect_area": _result.defect_area,
+                                "defect_ratio": _result.defect_ratio,
                             }
                         )
                         self._tile_index += 1
                         self._tile_scored_this_pause = True
                         self.get_logger().info(
-                            f"Tile {self._tile_index - 1}: ssim={ssim_score:.3f} defect={defect}"
+                            f"Tile {self._tile_index - 1}: status={_result.status} "
+                            f"area={_result.defect_area} reason={_result.reason}"
                         )
                     if pause_elapsed >= 2.0:
                         self._tile_pause_start = None
@@ -1636,9 +1646,9 @@ class Task2Controller(Node):
             lines.append(f"  #{b['id']} {b['color']} {b['orientation']} — {leak}")
         lines.append("\n## Tile Anomalies")
         for t in self.tile_results:
-            flag = "DEFECT" if t["defect"] else "OK"
             lines.append(
-                f"  {t['station']} tile {t['tile_id']}: {flag} (ssim={t['ssim']:.3f})"
+                f"  {t['station']} tile {t['tile_id']}: {t['status']} "
+                f"(area={t['defect_area']} ratio={t['defect_ratio']:.3f})"
             )
         report_text = "\n".join(lines)
         self.get_logger().info("\n" + report_text)
@@ -1900,39 +1910,36 @@ class Task2Controller(Node):
             median_angle -= math.copysign(math.pi / 2, median_angle)
         return median_angle
 
-    def _score_tile(self, frame: np.ndarray) -> tuple[bool, float]:
-        """SSIM anomaly score against reference tile. Returns (is_defect, ssim_score)."""
-        if self._reference_tile is None:
-            return False, 1.0
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        box, thresh = self._detect_tile(frame)
-        # Publish raw and thresh for debugging
+    def _score_tile(self, frame: np.ndarray) -> TileAnomalyResult:
+        """Score a tile frame using TileAnomalyDetector."""
         try:
             self._ws_debug_raw_pub.publish(self._cv_bridge.cv2_to_imgmsg(frame, "bgr8"))
+        except Exception:
+            pass
+        box, thresh = self._detect_tile(frame)
+        try:
             self._ws_debug_thresh_pub.publish(
                 self._cv_bridge.cv2_to_imgmsg(thresh, "mono8")
             )
         except Exception:
             pass
         if box is None:
-            return False, 1.0
-        source = self._order_points(box)
-        destination = np.array(
-            [[0, 0], [511, 0], [511, 511], [0, 511]], dtype=np.float32
-        )
-        M = cv2.getPerspectiveTransform(source, destination)
-        warped = cv2.warpPerspective(gray, M, (512, 512))
-        # Publish warped for debugging
+            return TileAnomalyResult(status="UNKNOWN", reason="tile contour not detected")
+        canonical = warp_tile(frame, box)
         try:
             self._ws_debug_warped_pub.publish(
-                self._cv_bridge.cv2_to_imgmsg(warped, "mono8")
+                self._cv_bridge.cv2_to_imgmsg(
+                    cv2.cvtColor(canonical, cv2.COLOR_BGR2GRAY), "mono8"
+                )
             )
         except Exception:
             pass
-        ref = cv2.resize(self._reference_tile, (512, 512))
-        _score = ssim(ref, warped)
-        score = float(_score[0] if isinstance(_score, tuple) else _score)
-        return score < self._ssim_threshold, score
+        detector = (
+            self._tile_detector_red
+            if self._inspection_color == "red"
+            else self._tile_detector_green
+        )
+        return detector.detect(canonical)
 
     def _capture_current_tile(self, frame: np.ndarray) -> None:
         box, _ = self._detect_tile(frame)
