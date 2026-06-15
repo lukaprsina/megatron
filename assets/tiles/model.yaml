@@ -20,12 +20,12 @@ tile_detector:
   border_defect_area: 1800
   border_intrusion_min_width_ratio: 0.12
   dark_blob_threshold: 45.0
-  dark_blob_min_area: 200
+  dark_blob_min_area: 120
   component_border_margin: 12
   min_component_area: 18
   min_component_contrast: 10.0
   min_defect_area: 24
-  ecc_iterations: 35
+  ecc_iterations: 25
   ecc_epsilon: 0.0001
 
 dataset:

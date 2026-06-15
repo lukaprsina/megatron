@@ -136,6 +136,13 @@ def test_dark_crack_endpoint_at_lower_edge_is_retained() -> None:
     assert cv2.countNonZero(mask) >= 200
 
 
+def test_small_camera_domain_dark_crack_is_retained() -> None:
+    gray = np.full((512, 512), 180, dtype=np.uint8)
+    cv2.line(gray, (340, 100), (340, 145), 20, 9, cv2.LINE_AA)
+    mask = _dark_blobs(gray, threshold=45, min_area=120, margin=12)
+    assert cv2.countNonZero(mask) >= 120
+
+
 def test_cpu_runtime_is_below_100_ms_on_average() -> None:
     detector = _detector()
     samples = [cv2.imread(str(path)) for path in _unique_textures("good")]
