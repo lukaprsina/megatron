@@ -171,6 +171,29 @@ def _inspection_target_available(
     )
 
 
+def _inspection_completion_reason(
+    tile_count: int,
+    expected_tiles: int,
+    front_hit_count: int,
+    scan_distance: float,
+    max_scan_distance: float,
+    elapsed: float,
+) -> str | None:
+    if tile_count >= expected_tiles:
+        return f"{expected_tiles} tiles"
+    if front_hit_count >= 3:
+        return "front obstacle"
+    if scan_distance >= max_scan_distance:
+        return "scan distance"
+    if elapsed > 70.0:
+        return "timeout"
+    return None
+
+
+def _inspection_steering(yaw_correction: float, distance_correction: float) -> float:
+    return max(-0.10, min(0.10, yaw_correction + distance_correction))
+
+
 # ---------------------------------------------------------------------------
 # QR task text → task token
 # ---------------------------------------------------------------------------
@@ -1402,7 +1425,7 @@ class Task2Controller(Node):
         # gaps that produce unreliable readings; red relies on yaw-only control.
         if self._inspection_phase == 3:
             self._stop_cmd_vel()
-            self._inspection_scan_yaw = self._current_yaw()
+            self._inspection_scan_yaw = self._inspection_target_yaw()
             if self._inspection_color == "green":
                 sample = self._belt_side_distance()
                 if sample is not None:
@@ -1462,30 +1485,19 @@ class Task2Controller(Node):
                 f"yellow={self._yellow_seen} elapsed={elapsed:.1f}s",
                 throttle_duration_sec=1.0,
             )
-            yellow_endpoint = self._yellow_seen and scan_distance >= 1.0
-            tile_endpoint = self._tile_index >= expected_tiles
-            obstacle_endpoint = self._inspection_front_hit_count >= 3
-            if (
-                tile_endpoint
-                or obstacle_endpoint
-                or yellow_endpoint
-                or scan_distance >= max_scan_distance
-                or elapsed > 70.0
-            ):
+            completion_reason = _inspection_completion_reason(
+                self._tile_index,
+                expected_tiles,
+                self._inspection_front_hit_count,
+                scan_distance,
+                max_scan_distance,
+                elapsed,
+            )
+            if completion_reason is not None:
                 self._stop_cmd_vel()
-                reason = (
-                    f"{expected_tiles} tiles"
-                    if tile_endpoint
-                    else "front obstacle"
-                    if obstacle_endpoint
-                    else "yellow line"
-                    if yellow_endpoint
-                    else "scan distance"
-                    if scan_distance >= max_scan_distance
-                    else "timeout"
-                )
                 self.get_logger().info(
-                    f"[inspection] phase 5 complete: {reason}, tiles={self._tile_index} "
+                    f"[inspection] phase 5 complete: {completion_reason}, "
+                    f"tiles={self._tile_index} "
                     f"distance={scan_distance:.2f}m"
                 )
                 self._start_room2_navigation()
@@ -1789,7 +1801,6 @@ class Task2Controller(Node):
 
         side = self._belt_side_distance()
         distance_correction = 0.0
-        distance_active = False
         if side is not None and self._inspection_side_target is not None:
             distance_error = side - self._inspection_side_target
             if abs(distance_error) > 0.04:
@@ -1797,15 +1808,8 @@ class Task2Controller(Node):
                     1.0, math.sin(self._belt_world_perp() - (current_yaw or 0.0))
                 )
                 distance_correction = belt_side_sign * 0.25 * distance_error
-                distance_active = True
 
-        # Distance takes priority: suppress yaw correction while lateral position
-        # is outside the deadband so the two don't fight each other.
-        if distance_active:
-            yaw_correction = 0.0
-
-        CLAMP = 0.10
-        correction = max(-CLAMP, min(CLAMP, yaw_correction + distance_correction))
+        correction = _inspection_steering(yaw_correction, distance_correction)
         self.get_logger().info(
             f"[inspection] belt follow side={side} "
             f"target={self._inspection_side_target} "
