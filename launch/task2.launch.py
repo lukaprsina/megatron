@@ -7,6 +7,7 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 
 
+# keep the unused nodes, they are disabled when working on other nodes
 def generate_launch_description():
     pkg_megatron = get_package_share_directory("megatron")
 
@@ -39,9 +40,11 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "rviz_config",
-            default_value=PathJoinSubstitution(
-                [pkg_megatron, "config", "production.rviz"]
-            ),
+            default_value=PathJoinSubstitution([
+                pkg_megatron,
+                "config",
+                "production.rviz",
+            ]),
             description="RViz config file",
         ),
         DeclareLaunchArgument(
@@ -54,6 +57,17 @@ def generate_launch_description():
             default_value="false",
             choices=["true", "false"],
             description="Perception-only teleop mode (no autonomous patrol)",
+        ),
+        DeclareLaunchArgument(
+            "capture_tiles",
+            default_value="false",
+            choices=["true", "false"],
+            description="Save centered workstation frames and canonical tile warps",
+        ),
+        DeclareLaunchArgument(
+            "tile_capture_dir",
+            default_value="/tmp/megatron_tile_captures",
+            description="Writable directory for camera-domain tile captures",
         ),
         DeclareLaunchArgument(
             "personnel_dir",
@@ -149,10 +163,20 @@ def generate_launch_description():
         parameters=[
             {
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
-                "waypoints_file": PathJoinSubstitution(
-                    [pkg_megatron, "waypoints", "full_map01.yaml"]
-                ),
+                "waypoints_file": PathJoinSubstitution([
+                    pkg_megatron,
+                    "waypoints",
+                    "task2-00.yaml",
+                ]),
+                "room2_entry_file": PathJoinSubstitution([
+                    pkg_megatron,
+                    "waypoints",
+                    "bluelinepoint.yaml",
+                ]),
                 "manual_mode": LaunchConfiguration("manual_mode"),
+                "capture_tiles": LaunchConfiguration("capture_tiles"),
+                "tile_capture_dir": LaunchConfiguration("tile_capture_dir"),
+                "world_name": LaunchConfiguration("world"),
             }
         ],
     )
@@ -183,7 +207,7 @@ def generate_launch_description():
 
     workstation_detector = Node(
         package="megatron",
-        executable="workstation_detector",
+        executable="workstation_detector2",
         name="workstation_detector",
         output="screen",
         parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
@@ -203,6 +227,20 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("visualization")),
     )
 
+    workstation_visualizer = Node(
+        package="megatron",
+        executable="workstation_visualizer",
+        name="workstation_visualizer",
+        output="screen",
+        parameters=[
+            {
+                "use_sim_time": LaunchConfiguration("use_sim_time"),
+                "show_window": LaunchConfiguration("show_debug_window"),
+            }
+        ],
+        condition=IfCondition(LaunchConfiguration("visualization")),
+    )
+
     ld = LaunchDescription(args)
     ld.add_action(sim_arm_nav)
     ld.add_action(rviz)
@@ -212,10 +250,11 @@ def generate_launch_description():
     ld.add_action(ring_detector)
     ld.add_action(qr_reader)
     ld.add_action(arm_mover)
-    #ld.add_action(yellow_line_injector)
+    # ld.add_action(yellow_line_injector)
     ld.add_action(blue_line_follower)
     ld.add_action(cylinder_detector)
     ld.add_action(workstation_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
+    ld.add_action(workstation_visualizer)
     return ld

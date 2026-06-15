@@ -1,7 +1,8 @@
 """Task 2 mission controller.
 
 State machine:
-  INIT → PATROL → APPROACH_TARGET → INTERACT → INSPECT_WORKSTATION → FOLLOW_BLUE_LINE → DONE
+  INIT → PATROL → APPROACH_TARGET → INTERACT → INSPECT_WORKSTATION
+       → NAVIGATE_ROOM2_ENTRY → FOLLOW_BLUE_LINE → DONE
 
 Detectors publish PoseStamped on their respective topics; this controller deduplicates
 by position and queues pending_targets for approach.
@@ -12,10 +13,13 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import cast
 
+import cv2
 import numpy as np
 import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
+from ament_index_python.packages import get_package_share_directory
+from cv_bridge import CvBridge
 from geometry_msgs.msg import (
     PointStamped,
     PoseStamped,
@@ -34,13 +38,20 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
 from visualization_msgs.msg import Marker, MarkerArray
 
 from megatron.speech import Speaker
+from megatron.tile_anomaly import (
+    DetectorConfig,
+    TileAnomalyDetector,
+    TileAnomalyResult,
+    warp_tile,
+)
+from megatron.tile_capture import save_tile_capture
 
 # ---------------------------------------------------------------------------
 # State machine
@@ -53,6 +64,7 @@ class State(Enum):
     APPROACH_TARGET = auto()
     INTERACT = auto()
     INSPECT_WORKSTATION = auto()
+    NAVIGATE_ROOM2_ENTRY = auto()
     FOLLOW_BLUE_LINE = auto()
     DONE = auto()
 
@@ -146,6 +158,42 @@ def _normalize_angle(a: float) -> float:
     return a
 
 
+def _inspection_waypoint_index(color: str) -> int | None:
+    return {"red": 0, "green": 1}.get(color)
+
+
+def _inspection_target_available(
+    color: str, confirmed_colors: set[str], waypoint_count: int
+) -> bool:
+    waypoint_index = _inspection_waypoint_index(color)
+    return color in confirmed_colors or (
+        waypoint_index is not None and waypoint_index < waypoint_count
+    )
+
+
+def _inspection_completion_reason(
+    tile_count: int,
+    expected_tiles: int,
+    front_hit_count: int,
+    scan_distance: float,
+    max_scan_distance: float,
+    elapsed: float,
+) -> str | None:
+    if tile_count >= expected_tiles:
+        return f"{expected_tiles} tiles"
+    if front_hit_count >= 3:
+        return "front obstacle"
+    if scan_distance >= max_scan_distance:
+        return "scan distance"
+    if elapsed > 70.0:
+        return "timeout"
+    return None
+
+
+def _inspection_steering(yaw_correction: float, distance_correction: float) -> float:
+    return max(-0.10, min(0.10, yaw_correction + distance_correction))
+
+
 # ---------------------------------------------------------------------------
 # QR task text → task token
 # ---------------------------------------------------------------------------
@@ -177,7 +225,9 @@ def _parse_qr_task(text: str) -> str | None:
 
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
-    DEDUP_DISTANCE = 0.01  # metres — two detections within this are the same object
+    DEDUP_DISTANCE = 0.5  # metres — two detections within this are the same object
+    WORKSTATION_TILE_COUNTS = {"red": 4, "green": 5}
+    WORKSTATION_SCAN_DISTANCES = {"red": 2.4, "green": 3.0}
     MAX_RETRY_CYCLES = (
         20  # bump distance up to 3× approach_retry_offset before giving up
     )
@@ -187,17 +237,38 @@ class Task2Controller(Node):
 
         # --- Parameters ---
         self.declare_parameter("waypoints_file", "waypoints/task.yaml")
+        self.declare_parameter("room2_entry_file", "waypoints/bluelinepoint.yaml")
         self.declare_parameter("face_approach_distance", 0.50)
         self.declare_parameter("barrel_approach_distance", 0.60)
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.20)
         self.declare_parameter("manual_mode", False)
         self.declare_parameter("avoidance_blind_distance", 0.40)
+        self.declare_parameter("capture_tiles", False)
+        self.declare_parameter("tile_capture_dir", "/tmp/megatron_tile_captures")
+        self.declare_parameter("world_name", "task2")
 
         wp_file = cast(str, self.get_parameter("waypoints_file").value)
         self.waypoints = load_waypoints_from_yaml(wp_file)
         self.get_logger().info(f"Loaded {len(self.waypoints)} waypoints from {wp_file}")
+        room2_file = cast(str, self.get_parameter("room2_entry_file").value)
+        room2_entries = load_waypoints_from_yaml(room2_file)
+        if len(room2_entries) != 1:
+            raise ValueError(
+                f"Room 2 entry file must contain exactly one waypoint: {room2_file}"
+            )
+        self.room2_entry = room2_entries[0]
+        self.get_logger().info(
+            f"Loaded room 2 entry from {room2_file}: "
+            f"({self.room2_entry[0]:.2f}, {self.room2_entry[1]:.2f}) "
+            f"yaw={self.room2_entry[2]:.2f}"
+        )
         self.manual_mode = cast(bool, self.get_parameter("manual_mode").value)
+        self._capture_tiles = cast(bool, self.get_parameter("capture_tiles").value)
+        self._tile_capture_dir = Path(
+            cast(str, self.get_parameter("tile_capture_dir").value)
+        ).expanduser()
+        self._world_name = cast(str, self.get_parameter("world_name").value)
         if self.manual_mode:
             self.get_logger().info(
                 "MANUAL MODE — perception only, no navigation. Drive with keyboard."
@@ -226,6 +297,9 @@ class Task2Controller(Node):
         self._last_feedback_distance: float | None = None
         self._last_feedback_time: float | None = None
         self._nav_update = False  # Turn when the navigation needs to be updated
+        self._room2_nav_attempt = 0
+        self._room2_nav_started: float | None = None
+        self._room2_goal_sent = False
 
         # --- Costmap ---
         self.costmap = None
@@ -259,11 +333,49 @@ class Task2Controller(Node):
         # --- Inspection state ---
         self._inspection_phase = 0
         self._inspection_color: str | None = None
-        self._last_scan_ranges = None
+        self._last_scan: LaserScan | None = None
         self._yellow_seen = False
         self._tile_index = 0
         self._phase_start_time: float | None = None
         self._tile_pause_start: float | None = None
+        self._tile_scored_this_pause = False
+        self._arm_settle_until: float | None = None
+        self._prev_inspection_phase: int = -1
+        self._inspection_scan_yaw: float | None = None
+        self._inspection_side_target: float | None = None
+        self._inspection_side_samples: list[float] = []
+        self._tile_visible = False
+        self._tile_hit_count = 0
+        self._tile_miss_count = 0
+        self._inspection_scan_start: np.ndarray | None = None
+        self._inspection_front_hit_count = 0
+
+        # --- Top camera ---
+        self._cv_bridge = CvBridge()
+        self._last_top_frame: np.ndarray | None = None
+        self._last_top_stamp_ns = 0
+        _share = Path(get_package_share_directory("megatron"))
+        _ref_root = _share / "assets" / "tiles" / "reference_good"
+        _model_path = _share / "assets" / "tiles" / "model.yaml"
+        _detector_config = DetectorConfig.from_yaml(_model_path)
+        _world_ref_root = _ref_root / self._world_name
+        _ref_red = sorted((_world_ref_root / "red").rglob("*.png")) if (_world_ref_root / "red").is_dir() else []
+        _ref_green = sorted((_world_ref_root / "green").rglob("*.png")) if (_world_ref_root / "green").is_dir() else []
+        if not _ref_red:
+            _ref_red = sorted(p for p in _ref_root.rglob("*.png") if "/red/" in p.as_posix())
+        if not _ref_green:
+            _ref_green = sorted(p for p in _ref_root.rglob("*.png") if "/green/" in p.as_posix())
+        self._tile_detector_red = TileAnomalyDetector.from_paths(_ref_red, _detector_config)
+        self._tile_detector_green = TileAnomalyDetector.from_paths(_ref_green, _detector_config)
+        self.get_logger().info(
+            f"Tile detectors loaded: red={len(_ref_red)} green={len(_ref_green)} refs "
+            f"from {_world_ref_root}"
+        )
+        if self._capture_tiles:
+            self.get_logger().info(
+                f"Tile capture enabled: {self._tile_capture_dir} "
+                f"(world={self._world_name})"
+            )
 
         # --- Speech ---
         self.speaker = Speaker()
@@ -284,6 +396,21 @@ class Task2Controller(Node):
         self.approaching_object_pub = self.create_publisher(
             Marker, "/approaching_object", 10
         )
+        self._ws_debug_live_pub = self.create_publisher(
+            Image, "/workstation_debug/live", 1
+        )
+        self._ws_debug_raw_pub = self.create_publisher(
+            Image, "/workstation_debug/raw", 1
+        )
+        self._ws_debug_thresh_pub = self.create_publisher(
+            Image, "/workstation_debug/thresh", 1
+        )
+        self._ws_debug_warped_pub = self.create_publisher(
+            Image, "/workstation_debug/warped", 1
+        )
+        self._ws_debug_phase_pub = self.create_publisher(
+            String, "/workstation_debug/phase", 1
+        )
 
         # --- Subscribers ---
         self.create_subscription(
@@ -302,6 +429,12 @@ class Task2Controller(Node):
             LaserScan, "/scan", self._scan_cb, qos_profile_sensor_data
         )
         self.create_subscription(Bool, "/yellow_line_seen", self._yellow_seen_cb, 10)
+        self.create_subscription(
+            Image,
+            "/top_camera/rgb/preview/image_raw",
+            self._top_camera_cb,
+            qos_profile_sensor_data,
+        )
         costmap_qos = QoSProfile(
             depth=1,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
@@ -310,6 +443,8 @@ class Task2Controller(Node):
         self.create_subscription(
             OccupancyGrid, "/global_costmap/costmap", self._costmap_cb, costmap_qos
         )
+        self.create_subscription(String, "/robot_state", self._robot_state_cb, 10)
+
         # --- Nav2 action client ---
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self._spill_check_client = self.create_client(Trigger, "/spill_check")
@@ -333,7 +468,7 @@ class Task2Controller(Node):
     def _face_cb(self, msg: PoseStamped):
         parts = msg.header.frame_id.split("|")
         label = parts[1] if len(parts) > 1 else "unknown"
-        id = parts[2] if len(parts) > 1 else "ID_NONDE"
+        id = parts[2] if len(parts) > 2 else "ID_NONDE"
 
         pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
         nx, ny = _quaternion_to_normal_2d(msg.pose.orientation)
@@ -346,7 +481,7 @@ class Task2Controller(Node):
                     and self.current_target["type"] == "face"
                     and self.current_target["id"] == id
                 ):  # update approach goal
-                    self.get_logger().info("Seting up to recalculate approach")
+                    old_pos = np.array(f["pos"])
                     f["pos"] = pos
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
@@ -354,7 +489,9 @@ class Task2Controller(Node):
                     self.current_target["pos"] = pos
                     self.current_target["normal"] = (nx, ny)
                     self.current_target["last_seen"] = now
-                    self._nav_update = True
+                    if np.linalg.norm(pos[:2] - old_pos[:2]) > 0.05:
+                        self.get_logger().info("Seting up to recalculate approach")
+                        self._nav_update = True
                     return
 
                 elif np.linalg.norm(pos - f["pos"]) < self.DEDUP_DISTANCE:
@@ -364,6 +501,8 @@ class Task2Controller(Node):
                     f["pos"] = pos
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
+                    if not f.get("approached", False) and self.state == State.PATROL:
+                        self._requeue_if_not_pending("face", f)
                     return
                 else:
                     return
@@ -438,6 +577,12 @@ class Task2Controller(Node):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
                     self._nav_update = True
+                if (
+                    b["orientation"] == "horizontal"
+                    and not b.get("approached", False)
+                    and self.state == State.PATROL
+                ):
+                    self._requeue_if_not_pending("barrel", b)
                 return
 
         self.get_logger().info(
@@ -467,11 +612,123 @@ class Task2Controller(Node):
         self._qr_task_raw = msg.data
         self.get_logger().info(f"QR received: {msg.data!r}")
 
+    def _robot_state_cb(self, msg: String):
+        try:
+            new_state = State[msg.data]
+        except KeyError:
+            self.get_logger().warn(f"Unknown state from /robot_state: {msg.data!r}")
+            return
+
+        if new_state == self.state:
+            return
+
+        self.get_logger().info(
+            f"Manual state override from /robot_state: {self.state.name} → {new_state.name}"
+        )
+        self._cancel_nav()
+        self._stop_cmd_vel()
+
+        if new_state == State.INSPECT_WORKSTATION:
+            if self.assigned_task is None and self._qr_task_raw not in (None, ""):
+                task_token = _parse_qr_task(self._qr_task_raw)
+                self._qr_task_raw = None
+                if task_token and task_token not in ("nothing", "report"):
+                    self.assigned_task = task_token
+                    self.get_logger().info(
+                        f"Eagerly parsed QR: assigned_task = {task_token!r}"
+                    )
+
+            color = (
+                self.assigned_task.split("_")[1]
+                if self.assigned_task and self.assigned_task.startswith("defects")
+                else next(iter(self.workstation_poses.keys()), None)
+            )
+            if color is None:
+                self.get_logger().error(
+                    "No task assigned and no workstations detected — "
+                    "can't enter INSPECT_WORKSTATION"
+                )
+                return
+            self._start_inspection(color)
+
+        self._transition(new_state)
+
     def _scan_cb(self, msg: LaserScan):
-        self._last_scan_ranges = msg.ranges
+        self._last_scan = msg
 
     def _yellow_seen_cb(self, msg: Bool):
         self._yellow_seen = msg.data
+
+    def _top_camera_cb(self, msg: Image):
+        frame = self._cv_bridge.imgmsg_to_cv2(msg, "bgr8")
+        self._last_top_frame = frame
+        self._last_top_stamp_ns = (
+            int(msg.header.stamp.sec) * 1_000_000_000
+            + int(msg.header.stamp.nanosec)
+        )
+        if self.state == State.INSPECT_WORKSTATION:
+            try:
+                # Annotate with ROI mean brightness so we can see the trigger threshold
+                h, w = frame.shape[:2]
+                roi = frame[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
+                brightness = float(roi.mean())
+                annotated = frame.copy()
+                cv2.rectangle(
+                    annotated,
+                    (w // 4, h // 4),
+                    (3 * w // 4, 3 * h // 4),
+                    (0, 255, 255),
+                    2,
+                )
+                cv2.putText(
+                    annotated,
+                    f"ROI mean: {brightness:.1f}",
+                    (8, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+                if self._inspection_phase == 5:
+                    tile_box, _ = self._detect_tile(frame)
+                    if tile_box is not None:
+                        cv2.drawContours(
+                            annotated,
+                            [tile_box.astype(np.int32)],
+                            -1,
+                            (0, 255, 0),
+                            2,
+                        )
+                        cv2.putText(
+                            annotated,
+                            "TILE",
+                            (8, 42),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55,
+                            (0, 255, 0),
+                            1,
+                            cv2.LINE_AA,
+                        )
+                self._ws_debug_live_pub.publish(
+                    self._cv_bridge.cv2_to_imgmsg(annotated, "bgr8")
+                )
+            except Exception:
+                pass
+        if self.state == State.INSPECT_WORKSTATION and self._inspection_phase in (4, 5):
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            h = frame.shape[0]
+            yellow = cv2.inRange(
+                hsv[-h // 8 :, :],
+                np.array([18, 100, 80], dtype=np.uint8),
+                np.array([35, 255, 255], dtype=np.uint8),
+            )
+            yellow_ratio = cv2.countNonZero(yellow) / yellow.size
+            self._yellow_seen = yellow_ratio >= 0.05
+            self.get_logger().info(
+                f"[inspection] yellow ROI={yellow_ratio:.3f} seen={self._yellow_seen}",
+                throttle_duration_sec=0.5,
+            )
 
     def _costmap_cb(self, msg: OccupancyGrid):
         self.costmap = msg
@@ -514,6 +771,8 @@ class Task2Controller(Node):
             self._handle_interact()
         elif self.state == State.INSPECT_WORKSTATION:
             self._handle_inspection()
+        elif self.state == State.NAVIGATE_ROOM2_ENTRY:
+            self._handle_room2_navigation()
         elif self.state == State.FOLLOW_BLUE_LINE:
             self._handle_follow_blue_line()
         elif self.state == State.DONE:
@@ -588,7 +847,7 @@ class Task2Controller(Node):
         if not self.pending_targets:
             self.get_logger().info("No targets to approach — heading to room 2.")
             self._pub_arm("look_down")
-            self._transition(State.FOLLOW_BLUE_LINE)
+            self._start_room2_navigation()
             return
 
         target = self.pending_targets.pop(0)
@@ -621,7 +880,6 @@ class Task2Controller(Node):
             return
 
         if self._nav_succeeded():
-            self.get_logger().info("DEBUG!! NAV SUCCEDED ")
             self._publish_approaching_object(0.0, 0.0, none=True)
             self._transition(State.INTERACT)
             self._start_interact()
@@ -703,34 +961,28 @@ class Task2Controller(Node):
         base = math.atan2(ny, nx)
         px, py = float(pos[0]), float(pos[1])
 
-        def f(x):
-            return (x**2) / 25**2
+        # All candidates at fixed approach distance; angular offsets spread the fan
+        def f(_x):
+            return 1.0
 
-        # degrees = [val for i in range(0,30,5) for val in (i, -i)]
         degrees = [
             0,
-            2,
-            -2,
-            3,
-            -3,
             5,
             -5,
-            7,
-            -7,
-            9,
-            -9,
             10,
             -10,
             15,
             -15,
-            # 20,          -20,
-            # 25,          -25,
-            # 30,          -30,
-            # 35,          -35,
-            # 40,          -40,
-            # 50,          -50,
-            # 60,          -60,
-            # 70,          -70,
+            20,
+            -20,
+            25,
+            -25,
+            30,
+            -30,
+            40,
+            -40,
+            50,
+            -50,
         ]
         offsets = [math.radians(d) for d in degrees]
         return [
@@ -950,11 +1202,33 @@ class Task2Controller(Node):
                 self.current_target = None
                 self._next_post_patrol_target()
         else:
+            if self.assigned_task and self.assigned_task.startswith("defects"):
+                color = self.assigned_task.split("_")[1]
+                waypoint_index = _inspection_waypoint_index(color)
+                if _inspection_target_available(
+                    color, set(self.workstation_poses), len(self.waypoints)
+                ):
+                    if color not in self.workstation_poses:
+                        self.get_logger().warn(
+                            f"Workstation '{color}' was not confirmed; using calibrated "
+                            f"inspection waypoint{waypoint_index}."
+                        )
+                    self.get_logger().info(
+                        f"Post-patrol done — starting {color} workstation inspection."
+                    )
+                    self._start_inspection(color)
+                    self._transition(State.INSPECT_WORKSTATION)
+                    return
+                else:
+                    self.get_logger().error(
+                        f"Defects task for '{color}' has neither a confirmed pose nor "
+                        "a calibrated inspection waypoint — skipping."
+                    )
             self.get_logger().info(
                 "All post-patrol targets handled — heading to room 2."
             )
             self._pub_arm("look_down")
-            self._transition(State.FOLLOW_BLUE_LINE)
+            self._start_room2_navigation()
 
     # ── INSPECT_WORKSTATION ───────────────────────────────────────────
 
@@ -963,36 +1237,391 @@ class Task2Controller(Node):
         self._inspection_phase = 0
         self._tile_index = 0
         self._yellow_seen = False
+        self._inspection_scan_yaw = None
+        self._inspection_side_target = None
+        self._inspection_side_samples = []
+        self._tile_visible = False
+        self._tile_hit_count = 0
+        self._tile_miss_count = 0
+        self._inspection_scan_start = None
+        self._inspection_front_hit_count = 0
+        self._prev_inspection_phase = -1
         self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
-        ws_pos = self.workstation_poses[color]
-        self._send_nav_goal(
-            ws_pos[0], ws_pos[1], math.pi if color == "red" else math.pi / 2
-        )
+
+        # The first two patrol waypoints are calibrated inspection approaches:
+        # safely offset from each belt and facing it head-on.
+        waypoint_index = _inspection_waypoint_index(color)
+        if waypoint_index is not None and waypoint_index < len(self.waypoints):
+            approach_x, approach_y, approach_yaw = self.waypoints[waypoint_index]
+            self.get_logger().info(
+                f"[inspection] using calibrated {color} approach "
+                f"waypoint{waypoint_index}: "
+                f"({approach_x:.2f}, {approach_y:.2f}) yaw={approach_yaw:.2f}"
+            )
+            self._send_nav_goal(approach_x, approach_y, approach_yaw)
+            return
+
+        if color in self.workstation_poses:
+            ws_pos = self.workstation_poses[color]
+        elif self.current_pose is not None:
+            self.get_logger().warn(
+                f"Workstation '{color}' pose unknown — using current position."
+            )
+            ws_pos = np.array(
+                [
+                    self.current_pose.position.x,
+                    self.current_pose.position.y,
+                ]
+            )
+        else:
+            self.get_logger().error("No pose available — can't start inspection.")
+            return
+
+        target_yaw = math.pi if color == "red" else math.pi / 2
+        if self.current_pose is not None:
+            rx = self.current_pose.position.x
+            ry = self.current_pose.position.y
+            delta = ws_pos - np.array([rx, ry])
+            dist = float(np.linalg.norm(delta))
+            approach_xy = ws_pos - (delta / dist) * 0.4 if dist > 0.6 else ws_pos
+            self.get_logger().info(
+                f"[inspection] approach goal: ({approach_xy[0]:.2f}, {approach_xy[1]:.2f}) yaw={target_yaw:.2f} "
+                f"(ws={ws_pos[0]:.2f},{ws_pos[1]:.2f} robot={rx:.2f},{ry:.2f} dist={dist:.2f})"
+            )
+        else:
+            approach_xy = ws_pos
+            self.get_logger().info(
+                f"[inspection] approach goal: ({approach_xy[0]:.2f}, {approach_xy[1]:.2f}) yaw={target_yaw:.2f} "
+                f"(ws={ws_pos[0]:.2f},{ws_pos[1]:.2f} no robot pose)"
+            )
+        self._send_nav_goal(approach_xy[0], approach_xy[1], target_yaw)
 
     def _handle_inspection(self):
-        # Phase 0: navigate to workstation
-        if self._inspection_phase == 0 and not self._is_nav_complete():
+        if self._phase_start_time is None:
             return
-        if self._inspection_phase == 0 and self._is_nav_complete():
-            arm_pose = (
-                "look_at_belt_right"
-                if self._inspection_color == "red"
-                else "look_at_belt_left"
+        self._ws_debug_phase_pub.publish(
+            String(
+                data=f"phase={self._inspection_phase} color={self._inspection_color}"
             )
+        )
+        if self._inspection_phase != self._prev_inspection_phase:
+            self.get_logger().info(
+                f"[inspection] → phase {self._inspection_phase} (was {self._prev_inspection_phase})"
+            )
+            self._prev_inspection_phase = self._inspection_phase
+        # Phase 0: navigate to workstation (Nav2) — 90 s timeout
+        if self._inspection_phase == 0:
+            now = self.get_clock().now().nanoseconds / 1e9
+            elapsed = now - self._phase_start_time
+            if not self._is_nav_complete() and elapsed < 90.0:
+                return
+            if elapsed >= 90.0:
+                self._abort_inspection("phase 0 navigation timed out")
+                return
+            if not self._nav_succeeded():
+                self._abort_inspection(
+                    f"phase 0 navigation failed with status {self._nav_status_name()}"
+                )
+                return
+
+            pose = self._current_xy()
+            yaw = self._current_yaw()
+            pose_text = (
+                f"({pose[0]:.2f}, {pose[1]:.2f})" if pose is not None else "unknown"
+            )
+            yaw_text = f"{yaw:.3f}" if yaw is not None else "unknown"
+            self.get_logger().info(
+                f"[inspection] phase 0 nav succeeded in {elapsed:.1f}s; "
+                f"pose={pose_text} yaw={yaw_text}"
+            )
+            # Clear our completed action before direct velocity control begins.
+            self._cancel_nav()
+            self._stop_cmd_vel()
+            arm_pose = "look_at_belt_right"
+            self.get_logger().info(f"[inspection] moving top camera to {arm_pose}")
             self._pub_arm(arm_pose)
+            self._arm_settle_until = now + 5.0
             self._inspection_phase = 1
-            self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
+            self._phase_start_time = now
             return
 
-        # TODO Phase 4: implement inspection phases 1–5.
-        # Stub: phases 1+ skip straight to FOLLOW_BLUE_LINE.
-        # Remove this block when real phase logic is added.
-        if self._inspection_phase >= 1:
-            self.get_logger().warn(
-                "INSPECT_WORKSTATION not yet implemented — skipping to FOLLOW_BLUE_LINE."
+        now = self.get_clock().now().nanoseconds / 1e9
+        elapsed = now - self._phase_start_time
+
+        # Phase 1 — Approach to a 0.60 m front LiDAR stand-off.
+        if self._inspection_phase == 1:
+            if self._arm_settle_until is not None and now < self._arm_settle_until:
+                return  # wait for arm to finish swinging before driving
+            if self._arm_settle_until is not None:
+                self._arm_settle_until = None
+                self._phase_start_time = now
+                elapsed = 0.0
+                self.get_logger().info(
+                    "[inspection] arm settled; starting wall approach"
+                )
+
+            front_distance = self._min_scan_distance(-math.pi / 2, math.radians(30.0))
+            if front_distance is None:
+                self._stop_cmd_vel()
+                self.get_logger().warn(
+                    "[inspection] phase 1 waiting for valid front LiDAR",
+                    throttle_duration_sec=1.0,
+                )
+                return
+
+            self.get_logger().info(
+                f"[inspection] phase 1 front={front_distance:.3f}m elapsed={elapsed:.1f}s",
+                throttle_duration_sec=0.5,
             )
-            self._pub_arm("look_down")
+            if front_distance <= 0.60 or elapsed > 12.0:
+                self._stop_cmd_vel()
+                reason = "wall reached" if front_distance <= 0.60 else "timeout"
+                self.get_logger().info(
+                    f"[inspection] phase 1 complete: {reason}, front={front_distance:.3f}m"
+                )
+                self._inspection_phase = 2
+                self._phase_start_time = now
+            else:
+                speed = 0.03 if front_distance <= 0.80 else 0.08
+                self._send_cmd_vel(speed, 0.0)
+            return
+
+        # Phase 2 — Turn parallel to the belt in the direction of its center.
+        if self._inspection_phase == 2:
+            target_yaw = self._inspection_target_yaw()
+            if self.current_pose is not None:
+                q = self.current_pose.orientation
+                cur_yaw = _quaternion_to_yaw([q.w, q.x, q.y, q.z])
+                error = _normalize_angle(target_yaw - cur_yaw)
+                self.get_logger().info(
+                    f"[inspection] phase 2 yaw={cur_yaw:.3f} "
+                    f"target={target_yaw:.3f} error={error:+.3f}",
+                    throttle_duration_sec=0.5,
+                )
+                if abs(error) < 0.10:
+                    self._stop_cmd_vel()
+                    self.get_logger().info(
+                        f"[inspection] phase 2 aligned within tolerance; "
+                        f"yaw error={error:+.3f} rad"
+                    )
+                    self._inspection_phase = 3
+                    self._phase_start_time = now
+                elif elapsed > 15.0:
+                    self._abort_inspection(
+                        f"phase 2 could not align to belt; yaw error={error:+.3f} rad"
+                    )
+                else:
+                    gain = 0.6 if abs(error) < 0.30 else 1.0
+                    self._send_cmd_vel(
+                        0.0,
+                        max(-0.4, min(0.4, gain * error)),
+                    )
+            elif elapsed > 15.0:
+                self._abort_inspection("phase 2 has no current robot pose")
+            return
+
+        # Phase 3 — Capture the map-aligned scan heading and side distance.
+        # Capture the map-aligned scan heading and (for green only) calibrate the
+        # lateral distance target. Red's calibration position sits on structural
+        # gaps that produce unreliable readings; red relies on yaw-only control.
+        if self._inspection_phase == 3:
+            self._stop_cmd_vel()
+            self._inspection_scan_yaw = self._inspection_target_yaw()
+            if self._inspection_color == "green":
+                sample = self._belt_side_distance()
+                if sample is not None:
+                    self._inspection_side_samples.append(sample)
+            elapsed_p3 = now - self._phase_start_time
+            if elapsed_p3 < 0.5:
+                return
+            if self._inspection_color == "green" and self._inspection_side_samples:
+                self._inspection_side_target = float(
+                    np.median(self._inspection_side_samples)
+                )
+            else:
+                self._inspection_side_target = None
+            self._stop_cmd_vel()
+            self._yellow_seen = False
+            self._tile_pause_start = None
+            self._tile_visible = False
+            self._tile_hit_count = 0
+            self._tile_miss_count = 0
+            self._inspection_front_hit_count = 0
+            self._inspection_scan_start = self._current_xy()
+            self.get_logger().info(
+                "[inspection] phase 3 calibrated: "
+                f"scan_yaw={self._inspection_scan_yaw} "
+                f"side_target={self._inspection_side_target} "
+                f"n_samples={len(self._inspection_side_samples)} "
+                f"scan_start={self._inspection_scan_start}"
+            )
+            self._inspection_phase = 5
+            self._phase_start_time = now
+            return
+
+        # Phase 5 — Forward tile scan (contour enter/leave + anomaly detection)
+        if self._inspection_phase == 5:
+            expected_tiles = self.WORKSTATION_TILE_COUNTS.get(
+                self._inspection_color or "", 4
+            )
+            max_scan_distance = self.WORKSTATION_SCAN_DISTANCES.get(
+                self._inspection_color or "", 2.4
+            )
+            scan_distance = self._inspection_scan_distance()
+            front_distance = self._min_scan_distance(-math.pi / 2, math.radians(15.0))
+            if (
+                scan_distance >= 1.0
+                and front_distance is not None
+                and front_distance <= 0.50
+            ):
+                self._inspection_front_hit_count += 1
+            else:
+                self._inspection_front_hit_count = 0
+
+            self.get_logger().info(
+                f"[inspection] phase 5 progress: "
+                f"distance={scan_distance:.2f}/{max_scan_distance:.2f}m "
+                f"tiles={self._tile_index}/{expected_tiles} front={front_distance} "
+                f"front_hits={self._inspection_front_hit_count}/3 "
+                f"yellow={self._yellow_seen} elapsed={elapsed:.1f}s",
+                throttle_duration_sec=1.0,
+            )
+            completion_reason = _inspection_completion_reason(
+                self._tile_index,
+                expected_tiles,
+                self._inspection_front_hit_count,
+                scan_distance,
+                max_scan_distance,
+                elapsed,
+            )
+            if completion_reason is not None:
+                self._stop_cmd_vel()
+                self.get_logger().info(
+                    f"[inspection] phase 5 complete: {completion_reason}, "
+                    f"tiles={self._tile_index} "
+                    f"distance={scan_distance:.2f}m"
+                )
+                self._start_room2_navigation()
+                return
+
+            if self._tile_pause_start is not None:
+                pause_elapsed = now - self._tile_pause_start
+                if pause_elapsed >= 0.3 and self._last_top_frame is not None:
+                    if not self._tile_scored_this_pause:
+                        if self._capture_tiles:
+                            self._capture_current_tile(self._last_top_frame)
+                        _result = self._score_tile(self._last_top_frame)
+                        self.tile_results.append(
+                            {
+                                "station": self._inspection_color,
+                                "tile_id": self._tile_index,
+                                "status": _result.status,
+                                "defect_area": _result.defect_area,
+                                "defect_ratio": _result.defect_ratio,
+                            }
+                        )
+                        self._tile_index += 1
+                        self._tile_scored_this_pause = True
+                        self.get_logger().info(
+                            f"Tile {self._tile_index - 1}: status={_result.status} "
+                            f"area={_result.defect_area} reason={_result.reason}"
+                        )
+                    if pause_elapsed >= 2.0:
+                        self._tile_pause_start = None
+                        self._tile_scored_this_pause = False
+                return
+
+            if self._last_top_frame is not None:
+                tile_box, _ = self._detect_tile(self._last_top_frame)
+                if tile_box is not None:
+                    self._tile_hit_count += 1
+                    self._tile_miss_count = 0
+                else:
+                    self._tile_miss_count += 1
+                    self._tile_hit_count = 0
+
+                tile_centered = False
+                if tile_box is not None:
+                    tile_center_x = float(tile_box[:, 0].mean())
+                    frame_width = self._last_top_frame.shape[1]
+                    tile_centered = (
+                        0.42 * frame_width <= tile_center_x <= 0.58 * frame_width
+                    )
+
+                if (
+                    not self._tile_visible
+                    and self._tile_hit_count >= 3
+                    and tile_centered
+                ):
+                    self._tile_visible = True
+                    self.get_logger().info(
+                        f"[phase5] tile {self._tile_index} centered; pausing to score"
+                    )
+                    self._stop_cmd_vel()
+                    self._tile_pause_start = now
+                    self._tile_scored_this_pause = False
+                    return
+                if self._tile_visible and self._tile_miss_count >= 5:
+                    self._tile_visible = False
+                    self._tile_miss_count = 0
+                    self.get_logger().info("[phase5] tile left view")
+
+            self._send_cmd_vel(0.05, self._belt_follow_correction())
+            return
+
+    # ── NAVIGATE_ROOM2_ENTRY ─────────────────────────────────────────
+
+    def _start_room2_navigation(self):
+        self._stop_cmd_vel()
+        self._cancel_nav()
+        # Blue-line following depends on this calibrated downward camera view.
+        # Centralizing it here covers inspection success, abort, and skip paths.
+        self._pub_arm("look_down")
+        self._room2_nav_attempt = 0
+        self._room2_goal_sent = False
+        self._transition(State.NAVIGATE_ROOM2_ENTRY)
+        self._send_room2_entry_goal()
+
+    def _send_room2_entry_goal(self):
+        x, y, yaw = self.room2_entry
+        self._room2_nav_started = self.get_clock().now().nanoseconds / 1e9
+        self.get_logger().info(
+            f"Navigating to room 2 entry (attempt {self._room2_nav_attempt + 1}/2): "
+            f"({x:.2f}, {y:.2f}) yaw={yaw:.2f}"
+        )
+        self._room2_goal_sent = self._send_nav_goal(x, y, yaw)
+
+    def _handle_room2_navigation(self):
+        now = self.get_clock().now().nanoseconds / 1e9
+        timed_out = (
+            self._room2_nav_started is not None and now - self._room2_nav_started > 90.0
+        )
+        if self._room2_goal_sent and not timed_out and not self._is_nav_complete():
+            return
+
+        if self._room2_goal_sent and self._nav_succeeded():
+            self.get_logger().info(
+                "Reached room 2 entry — starting blue-line following."
+            )
             self._transition(State.FOLLOW_BLUE_LINE)
+            return
+
+        status = "TIMEOUT" if timed_out else self._nav_status_name()
+        if self._room2_nav_attempt < 1:
+            self._room2_nav_attempt += 1
+            self.get_logger().warn(
+                f"Room 2 entry navigation failed ({status}); retrying once."
+            )
+            self._cancel_nav()
+            self._send_room2_entry_goal()
+            return
+
+        self.get_logger().error(
+            f"Room 2 entry navigation failed after two attempts ({status}); "
+            "falling back to blue-line following."
+        )
+        self._cancel_nav()
+        self._transition(State.FOLLOW_BLUE_LINE)
 
     # ── FOLLOW_BLUE_LINE ──────────────────────────────────────────────
 
@@ -1000,8 +1629,8 @@ class Task2Controller(Node):
         # blue_line_follower.py activates on /robot_state == "FOLLOW_BLUE_LINE"
         if self._qr_task_raw is not None:
             task_token = _parse_qr_task(self._qr_task_raw)
-            self._qr_task_raw = None
             if task_token == "report":
+                self._qr_task_raw = None
                 self.get_logger().info("CTO QR received — generating report.")
                 self._generate_report()
                 self._transition(State.DONE)
@@ -1014,7 +1643,7 @@ class Task2Controller(Node):
     # ── Report ────────────────────────────────────────────────────────
 
     def _generate_report(self):
-        """Write a simple text report. Replace with FPDF2 in Phase 5."""
+        """Write a plain-text inspection report."""
         lines = ["# Task 2 Inspection Report\n"]
         lines.append("## Ring Counts")
         for color, count in sorted(self.ring_counts.items()):
@@ -1025,9 +1654,9 @@ class Task2Controller(Node):
             lines.append(f"  #{b['id']} {b['color']} {b['orientation']} — {leak}")
         lines.append("\n## Tile Anomalies")
         for t in self.tile_results:
-            flag = "DEFECT" if t["defect"] else "OK"
             lines.append(
-                f"  {t['station']} tile {t['tile_id']}: {flag} (ssim={t['ssim']:.3f})"
+                f"  {t['station']} tile {t['tile_id']}: {t['status']} "
+                f"(area={t['defect_area']} ratio={t['defect_ratio']:.3f})"
             )
         report_text = "\n".join(lines)
         self.get_logger().info("\n" + report_text)
@@ -1048,6 +1677,274 @@ class Task2Controller(Node):
         msg = String()
         msg.data = pose_name
         self.arm_pub.publish(msg)
+
+    def _send_cmd_vel(self, linear: float, angular: float):
+        t = Twist()
+        t.linear.x = linear
+        t.angular.z = angular
+        self.cmd_vel_pub.publish(t)
+
+    def _stop_cmd_vel(self):
+        self._send_cmd_vel(0.0, 0.0)
+
+    def _min_scan_distance(self, center_angle: float, half_cone: float) -> float | None:
+        scan = self._last_scan
+        if scan is None:
+            return None
+
+        minimum = float("inf")
+        for index, distance in enumerate(scan.ranges):
+            if not math.isfinite(distance):
+                continue
+            if distance < scan.range_min or distance > scan.range_max:
+                continue
+            angle = scan.angle_min + index * scan.angle_increment
+            error = _normalize_angle(angle - center_angle)
+            if abs(error) <= half_cone:
+                minimum = min(minimum, distance)
+        return minimum if math.isfinite(minimum) else None
+
+    def _current_yaw(self) -> float | None:
+        if self.current_pose is None:
+            return None
+        q = self.current_pose.orientation
+        return _quaternion_to_yaw([q.w, q.x, q.y, q.z])
+
+    def _current_xy(self) -> np.ndarray | None:
+        if self.current_pose is None:
+            return None
+        return np.array(
+            [self.current_pose.position.x, self.current_pose.position.y],
+            dtype=float,
+        )
+
+    def _abort_inspection(self, reason: str):
+        self.get_logger().error(f"[inspection] aborted: {reason}")
+        self._stop_cmd_vel()
+        self._cancel_nav()
+        self._start_room2_navigation()
+
+    def _inspection_scan_distance(self) -> float:
+        current_xy = self._current_xy()
+        if current_xy is None or self._inspection_scan_start is None:
+            return 0.0
+        return float(np.linalg.norm(current_xy - self._inspection_scan_start))
+
+    def _inspection_target_yaw(self) -> float:
+        # Workstation colors have known belt axes, but each axis has two possible
+        # headings. Choose the one whose forward vector points toward the detected
+        # workstation center from the robot's current position.
+        axis_yaw = 0.0 if self._inspection_color == "red" else math.pi / 2
+        current_xy = self._current_xy()
+        workstation_xy = self.workstation_poses.get(self._inspection_color or "")
+        if current_xy is None or workstation_xy is None:
+            self.get_logger().warn(
+                f"[inspection] missing geometry for scan direction; using yaw={axis_yaw:.3f}"
+            )
+            return axis_yaw
+
+        toward_center = workstation_xy - current_xy
+        axis = np.array([math.cos(axis_yaw), math.sin(axis_yaw)])
+        if float(np.dot(axis, toward_center)) < 0.0:
+            axis_yaw = _normalize_angle(axis_yaw + math.pi)
+        self.get_logger().info(
+            f"[inspection] scan direction robot=({current_xy[0]:.2f},{current_xy[1]:.2f}) "
+            f"workstation=({workstation_xy[0]:.2f},{workstation_xy[1]:.2f}) "
+            f"target_yaw={axis_yaw:.3f}",
+            throttle_duration_sec=1.0,
+        )
+        return axis_yaw
+
+    def _median_scan_distance(
+        self, center_angle: float, half_cone: float
+    ) -> float | None:
+        scan = self._last_scan
+        if scan is None:
+            return None
+
+        distances = []
+        for index, distance in enumerate(scan.ranges):
+            if not math.isfinite(distance):
+                continue
+            if distance < scan.range_min or distance > scan.range_max:
+                continue
+            angle = scan.angle_min + index * scan.angle_increment
+            if abs(_normalize_angle(angle - center_angle)) <= half_cone:
+                distances.append(distance)
+        return float(np.median(distances)) if distances else None
+
+    def _belt_world_perp(self) -> float:
+        return math.pi / 2 if self._inspection_color == "red" else math.pi
+
+    def _belt_side_distance(self) -> float | None:
+        current_yaw = self._current_yaw()
+        if current_yaw is None:
+            return None
+        body_angle = _normalize_angle(self._belt_world_perp() - current_yaw - math.pi / 2)
+        dist = self._median_scan_distance(body_angle, math.radians(8.0))
+        if dist is None:
+            return None
+        # Reject structural gaps where the perpendicular ray shoots past the belt face.
+        # Red belt face is ~1.8 m away; green is ~0.5 m away. Use per-belt ceilings
+        # well above the observed face range but below the nearest gap reading.
+        max_valid = 2.5 if self._inspection_color == "red" else 1.0
+        if dist > max_valid:
+            return None
+        return dist
+
+    def _belt_follow_correction(self) -> float:
+        current_yaw = self._current_yaw()
+        yaw_correction = 0.0
+        if current_yaw is not None and self._inspection_scan_yaw is not None:
+            yaw_error = _normalize_angle(self._inspection_scan_yaw - current_yaw)
+            if abs(yaw_error) > 0.03:
+                yaw_correction = 0.35 * yaw_error
+
+        side = self._belt_side_distance()
+        distance_correction = 0.0
+        if side is not None and self._inspection_side_target is not None:
+            distance_error = side - self._inspection_side_target
+            if abs(distance_error) > 0.04:
+                belt_side_sign = math.copysign(
+                    1.0, math.sin(self._belt_world_perp() - (current_yaw or 0.0))
+                )
+                distance_correction = belt_side_sign * 0.25 * distance_error
+
+        correction = _inspection_steering(yaw_correction, distance_correction)
+        self.get_logger().info(
+            f"[inspection] belt follow side={side} "
+            f"target={self._inspection_side_target} "
+            f"yaw_cmd={yaw_correction:+.3f} "
+            f"distance_cmd={distance_correction:+.3f} cmd={correction:+.3f}",
+            throttle_duration_sec=0.5,
+        )
+        return correction
+
+    def _detect_tile(self, frame: np.ndarray) -> tuple[np.ndarray | None, np.ndarray]:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        crop_y = gray.shape[0] // 5
+        crop = gray[crop_y:, :]
+        _, threshold = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        center_y, center_x = crop.shape[0] // 2, crop.shape[1] // 2
+        if threshold[center_y, center_x] == 0:
+            threshold = 255 - threshold
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        threshold = cv2.morphologyEx(threshold, cv2.MORPH_CLOSE, kernel)
+
+        full_mask = np.zeros_like(gray)
+        full_mask[crop_y:, :] = threshold
+        contours, _ = cv2.findContours(
+            threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        frame_area = crop.shape[0] * crop.shape[1]
+        best = None
+        best_metrics = None
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < frame_area * 0.05 or area > frame_area * 0.50:
+                continue
+            box = cv2.boxPoints(cv2.minAreaRect(contour))
+            width = float(np.linalg.norm(box[0] - box[1]))
+            height = float(np.linalg.norm(box[1] - box[2]))
+            aspect = max(width, height) / max(min(width, height), 1.0)
+            if aspect > 1.65:
+                continue
+            contour_mask = np.zeros_like(crop)
+            cv2.drawContours(contour_mask, [contour], -1, (255,), -1)
+            mean_brightness = float(cv2.mean(crop, mask=contour_mask)[0])
+            if mean_brightness < 70.0:
+                continue
+            center_x, center_y = box.mean(axis=0)
+            if not (0.12 * crop.shape[1] <= center_x <= 0.88 * crop.shape[1]):
+                continue
+            if best is None or area > cv2.contourArea(best):
+                best = contour
+                best_metrics = (
+                    area / frame_area,
+                    aspect,
+                    center_x,
+                    center_y,
+                    mean_brightness,
+                )
+
+        if best is None:
+            return None, full_mask
+        if (
+            self.state == State.INSPECT_WORKSTATION
+            and self._inspection_phase == 5
+            and best_metrics is not None
+        ):
+            area_ratio, aspect, center_x, center_y, mean_brightness = best_metrics
+            self.get_logger().info(
+                f"[inspection] tile candidate area={area_ratio:.3f} "
+                f"aspect={aspect:.2f} center=({center_x:.0f},{center_y + crop_y:.0f}) "
+                f"brightness={mean_brightness:.1f}",
+                throttle_duration_sec=0.5,
+            )
+        box = cv2.boxPoints(cv2.minAreaRect(best))
+        box[:, 1] += crop_y
+        return box.astype(np.float32), full_mask
+
+    def _score_tile(self, frame: np.ndarray) -> TileAnomalyResult:
+        """Score a tile frame using TileAnomalyDetector."""
+        try:
+            self._ws_debug_raw_pub.publish(self._cv_bridge.cv2_to_imgmsg(frame, "bgr8"))
+        except Exception:
+            pass
+        box, thresh = self._detect_tile(frame)
+        try:
+            self._ws_debug_thresh_pub.publish(
+                self._cv_bridge.cv2_to_imgmsg(thresh, "mono8")
+            )
+        except Exception:
+            pass
+        if box is None:
+            return TileAnomalyResult(status="UNKNOWN", reason="tile contour not detected")
+        canonical = warp_tile(frame, box)
+        try:
+            self._ws_debug_warped_pub.publish(
+                self._cv_bridge.cv2_to_imgmsg(
+                    cv2.cvtColor(canonical, cv2.COLOR_BGR2GRAY), "mono8"
+                )
+            )
+        except Exception:
+            pass
+        detector = (
+            self._tile_detector_red
+            if self._inspection_color == "red"
+            else self._tile_detector_green
+        )
+        return detector.detect(canonical)
+
+    def _capture_current_tile(self, frame: np.ndarray) -> None:
+        box, _ = self._detect_tile(frame)
+        if box is None:
+            self.get_logger().warn("Tile capture skipped: contour was lost during pause")
+            return
+
+        pose = None
+        current_xy = self._current_xy()
+        current_yaw = self._current_yaw()
+        if current_xy is not None and current_yaw is not None:
+            pose = {
+                "x": float(current_xy[0]),
+                "y": float(current_xy[1]),
+                "yaw": float(current_yaw),
+            }
+        try:
+            metadata_path = save_tile_capture(
+                self._tile_capture_dir,
+                frame,
+                box,
+                world=self._world_name,
+                station=self._inspection_color or "unknown",
+                tile_index=self._tile_index,
+                stamp_ns=self._last_top_stamp_ns,
+                pose=pose,
+            )
+            self.get_logger().info(f"Captured tile sample: {metadata_path}")
+        except (OSError, ValueError, cv2.error) as exc:
+            self.get_logger().error(f"Tile capture failed: {exc}")
 
     # ── Navigation helpers ─────────────────────────────────────────────
 
@@ -1184,6 +2081,28 @@ class Task2Controller(Node):
         except Exception:
             return False
         return result is not None and result.status == GoalStatus.STATUS_SUCCEEDED
+
+    def _nav_status_name(self) -> str:
+        if self._nav_rejected:
+            return "REJECTED"
+        if self.nav_result_future is None or not self.nav_result_future.done():
+            return "INCOMPLETE"
+        try:
+            result = self.nav_result_future.result()
+        except Exception as exc:
+            return f"ERROR({exc})"
+        if result is None:
+            return "NO_RESULT"
+        names = {
+            GoalStatus.STATUS_UNKNOWN: "UNKNOWN",
+            GoalStatus.STATUS_ACCEPTED: "ACCEPTED",
+            GoalStatus.STATUS_EXECUTING: "EXECUTING",
+            GoalStatus.STATUS_CANCELING: "CANCELING",
+            GoalStatus.STATUS_SUCCEEDED: "SUCCEEDED",
+            GoalStatus.STATUS_CANCELED: "CANCELED",
+            GoalStatus.STATUS_ABORTED: "ABORTED",
+        }
+        return names.get(result.status, str(result.status))
 
     def _nav_update_target(self) -> bool:
         if not self._is_nav_complete():
