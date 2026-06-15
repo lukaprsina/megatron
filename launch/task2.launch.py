@@ -40,9 +40,11 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "rviz_config",
-            default_value=PathJoinSubstitution(
-                [pkg_megatron, "config", "production.rviz"]
-            ),
+            default_value=PathJoinSubstitution([
+                pkg_megatron,
+                "config",
+                "production.rviz",
+            ]),
             description="RViz config file",
         ),
         DeclareLaunchArgument(
@@ -161,12 +163,16 @@ def generate_launch_description():
         parameters=[
             {
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
-                "waypoints_file": PathJoinSubstitution(
-                    [pkg_megatron, "waypoints", "workstation.yaml"]
-                ),
-                "room2_entry_file": PathJoinSubstitution(
-                    [pkg_megatron, "waypoints", "bluelinepoint.yaml"]
-                ),
+                "waypoints_file": PathJoinSubstitution([
+                    pkg_megatron,
+                    "waypoints",
+                    "task2-00.yaml",
+                ]),
+                "room2_entry_file": PathJoinSubstitution([
+                    pkg_megatron,
+                    "waypoints",
+                    "bluelinepoint.yaml",
+                ]),
                 "manual_mode": LaunchConfiguration("manual_mode"),
                 "capture_tiles": LaunchConfiguration("capture_tiles"),
                 "tile_capture_dir": LaunchConfiguration("tile_capture_dir"),
@@ -239,14 +245,14 @@ def generate_launch_description():
     ld.add_action(sim_arm_nav)
     ld.add_action(rviz)
     ld.add_action(keepout_filter_launch)
-    # ld.add_action(cylinder_segmentation)
+    ld.add_action(cylinder_segmentation)
     ld.add_action(face_detector)
-    # ld.add_action(ring_detector)
-    # ld.add_action(qr_reader)
+    ld.add_action(ring_detector)
+    ld.add_action(qr_reader)
     ld.add_action(arm_mover)
     # ld.add_action(yellow_line_injector)
     ld.add_action(blue_line_follower)
-    # ld.add_action(cylinder_detector)
+    ld.add_action(cylinder_detector)
     ld.add_action(workstation_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
