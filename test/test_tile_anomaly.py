@@ -15,6 +15,8 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 from megatron.tile_anomaly import (  # noqa: E402
     DetectorConfig,
     TileAnomalyDetector,
+    _dark_blobs,
+    _lateral_border_intrusions,
     order_quad,
     warp_tile,
 )
@@ -64,8 +66,7 @@ def test_all_unique_supplied_textures_are_classified() -> None:
     assert len(damaged) == 15
     assert all(detector.detect(cv2.imread(str(path))).status == "OK" for path in good)
     assert all(
-        detector.detect(cv2.imread(str(path))).status == "DEFECT"
-        for path in damaged
+        detector.detect(cv2.imread(str(path))).status == "DEFECT" for path in damaged
     )
 
 
@@ -110,6 +111,29 @@ def test_low_information_image_is_unknown() -> None:
     result = _detector().detect(np.full((512, 512, 3), 128, dtype=np.uint8))
     assert result.status == "UNKNOWN"
     assert result.reason == "tile image has insufficient contrast"
+
+
+def test_narrow_conveyor_rail_is_not_a_side_intrusion() -> None:
+    gray = np.full((512, 512), 180, dtype=np.uint8)
+    gray[:, -24:] = 20
+    mask = _lateral_border_intrusions(gray, min_area=1800, min_width_ratio=0.12)
+    assert cv2.countNonZero(mask) == 0
+
+
+def test_wide_side_separation_is_a_side_intrusion() -> None:
+    gray = np.full((512, 512), 180, dtype=np.uint8)
+    polygon = np.array([[512, 100], [512, 410], [420, 330], [435, 170]])
+    cv2.fillConvexPoly(gray, polygon, (20,))
+    mask = _lateral_border_intrusions(gray, min_area=1800, min_width_ratio=0.12)
+    assert cv2.countNonZero(mask) >= 1800
+
+
+def test_dark_crack_endpoint_at_lower_edge_is_retained() -> None:
+    gray = np.full((512, 512), 180, dtype=np.uint8)
+    cv2.line(gray, (390, 180), (390, 511), 30, 8, cv2.LINE_AA)
+    cv2.ellipse(gray, (390, 490), (55, 25), 0, 0, 360, 25, -1)
+    mask = _dark_blobs(gray, threshold=45, min_area=200, margin=12)
+    assert cv2.countNonZero(mask) >= 200
 
 
 def test_cpu_runtime_is_below_100_ms_on_average() -> None:

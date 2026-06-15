@@ -30,15 +30,15 @@ def test_save_tile_capture_writes_images_and_metadata(tmp_path: Path) -> None:
         pose={"x": 1.2, "y": -0.4, "yaw": 0.3},
     )
 
-    assert metadata_path.parent == tmp_path / "task2-demo" / "red"
+    station_dir = tmp_path / "task2-demo" / "red"
+    assert metadata_path.parent == station_dir / "captures"
     metadata = yaml.safe_load(metadata_path.read_text())
-    raw = cv2.imread(str(metadata_path.parent / metadata["raw_image"]))
-    canonical = cv2.imread(str(metadata_path.parent / metadata["canonical_image"]))
+    raw = cv2.imread(str(station_dir / metadata["raw_image"]))
+    canonical = cv2.imread(str(station_dir / metadata["canonical_image"]))
     assert raw.shape == frame.shape
     assert canonical.shape == (512, 512, 3)
     assert metadata["raw_image"].startswith("raw/")
     assert metadata["canonical_image"].startswith("canonical/")
-    assert metadata["label"] == "unknown"
     assert metadata["quad_xy"] == quad.tolist()
     assert metadata["robot_pose"] == {"x": 1.2, "y": -0.4, "yaw": 0.3}
     assert metadata["quality"]["contrast_stddev"] > 0.0

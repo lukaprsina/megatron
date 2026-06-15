@@ -18,8 +18,9 @@ tile_detector:
   min_segment_length: 20.0
   strong_line_area: 64
   border_defect_area: 1800
+  border_intrusion_min_width_ratio: 0.12
   dark_blob_threshold: 45.0
-  dark_blob_min_area: 300
+  dark_blob_min_area: 200
   component_border_margin: 12
   min_component_area: 18
   min_component_contrast: 10.0

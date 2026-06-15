@@ -33,8 +33,9 @@ class DetectorConfig:
     min_segment_length: float = 20.0
     strong_line_area: int = 64
     border_defect_area: int = 1800
+    border_intrusion_min_width_ratio: float = 0.12
     dark_blob_threshold: float = 45.0
-    dark_blob_min_area: int = 300
+    dark_blob_min_area: int = 200
     component_border_margin: int = 12
     min_component_area: int = 18
     min_component_contrast: float = 10.0
@@ -362,6 +363,7 @@ class TileAnomalyDetector:
         border_intrusion = _lateral_border_intrusions(
             gray,
             self.config.border_defect_area,
+            self.config.border_intrusion_min_width_ratio,
         )
         dark_blob = _dark_blobs(
             gray,
@@ -615,7 +617,9 @@ def _filter_components(mask: np.ndarray, margin: int, min_area: int) -> np.ndarr
     return output
 
 
-def _lateral_border_intrusions(gray: np.ndarray, min_area: int) -> np.ndarray:
+def _lateral_border_intrusions(
+    gray: np.ndarray, min_area: int, min_width_ratio: float
+) -> np.ndarray:
     original_shape = gray.shape
     gray = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
     background = cv2.GaussianBlur(gray, (0, 0), 12.5)
@@ -636,7 +640,13 @@ def _lateral_border_intrusions(gray: np.ndarray, min_area: int) -> np.ndarray:
         center_y = float(centroids[label, 1])
         touches_side = x <= 1 or x + component_width >= width - 1
         away_from_corners = 0.2 * height <= center_y <= 0.8 * height
-        if area >= max(1, min_area // 4) and touches_side and away_from_corners:
+        wide_enough = component_width >= min_width_ratio * width
+        if (
+            area >= max(1, min_area // 4)
+            and touches_side
+            and away_from_corners
+            and wide_enough
+        ):
             output[labels == label] = 255
     return cv2.resize(
         output, original_shape[::-1], interpolation=cv2.INTER_NEAREST
@@ -656,9 +666,37 @@ def _dark_blobs(
         cv2.MORPH_OPEN,
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
     )
-    output = _filter_components(
-        candidate, max(1, margin // 2), max(1, min_area // 4)
-    )
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate)
+    output = np.zeros_like(candidate)
+    height, width = candidate.shape
+    scaled_margin = max(1, margin // 2)
+    scaled_min_area = max(1, min_area // 4)
+    for label in range(1, count):
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < scaled_min_area:
+            continue
+        clear_sides = (
+            x >= scaled_margin
+            and x + component_width <= width - scaled_margin
+        )
+        interior = (
+            clear_sides
+            and y >= scaled_margin
+            and y + component_height <= height - scaled_margin
+        )
+        crack_endpoint = (
+            x >= 1
+            and x + component_width <= width - 1
+            and y + component_height >= height - scaled_margin
+            and component_width >= 0.10 * width
+            and component_height >= 0.05 * height
+        )
+        if interior or crack_endpoint:
+            output[labels == label] = 255
     return cv2.resize(
         output, original_shape[::-1], interpolation=cv2.INTER_NEAREST
     )
