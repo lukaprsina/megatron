@@ -485,6 +485,7 @@ class Task2Controller(Node):
                     f["pos"] = pos
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
+                    f["label"] = label
 
                     self.current_target["pos"] = pos
                     self.current_target["normal"] = (nx, ny)
@@ -501,6 +502,8 @@ class Task2Controller(Node):
                     f["pos"] = pos
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
+                    f["label"] = label
+                    
                     if not f.get("approached", False) and self.state == State.PATROL:
                         self._requeue_if_not_pending("face", f)
                     return
@@ -2220,7 +2223,7 @@ class Task2Controller(Node):
         if not (0 <= mx < w and 0 <= my < h):
             return False
         cost = self.costmap.data[my * w + mx]
-        if cost >= 50 or cost < 0:
+        if cost >= 80 or cost < 0:
             c_type = (
                 self.current_target["type"]
                 if self.current_target is not None
