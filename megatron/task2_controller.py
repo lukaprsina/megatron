@@ -239,6 +239,7 @@ class Task2Controller(Node):
         # --- Parameters ---
         self.declare_parameter("waypoints_file", "waypoints/task.yaml")
         self.declare_parameter("room2_entry_file", "waypoints/bluelinepoint.yaml")
+        self.declare_parameter("workstation_file", "waypoints/workstation.yaml")
         self.declare_parameter("face_approach_distance", 0.50)
         self.declare_parameter("barrel_approach_distance", 0.60)
         self.declare_parameter("barrel_lateral_offset", 0.30)
@@ -263,6 +264,21 @@ class Task2Controller(Node):
             f"Loaded room 2 entry from {room2_file}: "
             f"({self.room2_entry[0]:.2f}, {self.room2_entry[1]:.2f}) "
             f"yaw={self.room2_entry[2]:.2f}"
+        )
+        ws_file = cast(str, self.get_parameter("workstation_file").value)
+        ws_entries = load_waypoints_from_yaml(ws_file)
+        if len(ws_entries) != 2:
+            raise ValueError(
+                f"Workstation file must contain exactly two waypoints (red, green): {ws_file}"
+            )
+        self._workstation_approaches: dict[str, tuple[float, float, float]] = {
+            "red": ws_entries[0],
+            "green": ws_entries[1],
+        }
+        self.get_logger().info(
+            f"Loaded workstation approaches from {ws_file}: "
+            f"red=({ws_entries[0][0]:.2f}, {ws_entries[0][1]:.2f}) "
+            f"green=({ws_entries[1][0]:.2f}, {ws_entries[1][1]:.2f})"
         )
         self.manual_mode = cast(bool, self.get_parameter("manual_mode").value)
         self._capture_tiles = cast(bool, self.get_parameter("capture_tiles").value)
@@ -853,7 +869,7 @@ class Task2Controller(Node):
         self.get_logger().info("Patrol loop complete — building post-patrol queue.")
         self._patrol_complete = True
 
-        for f in self.found_faces[:1]:
+        for f in self.found_faces:
             if not f.get("approached", False):
                 self.pending_targets.append(f)
                 self.get_logger().info(
@@ -1241,7 +1257,6 @@ class Task2Controller(Node):
             # barrel task
             if self.barrel_task and not self.barrel_task_done:
                 self.barrel_task_done = True
-                self.speaker.speak("Approaching barrels")
                 for b in self.found_barrels:
                     if not b.get("approached", False):
                         self._requeue_if_not_pending("barrel", b)
@@ -1249,32 +1264,25 @@ class Task2Controller(Node):
                             f"Queuing {b.get('orientation')} {b.get('color')} barrel "
                             f"at ({b['pos'][0]:.2f}, {b['pos'][1]:.2f})"
                         )
-                self._next_post_patrol_target()
-                return
-            
-            # workstation 
-            if self.assigned_task and self.assigned_task.startswith("defects"):
-                color = self.assigned_task.split("_")[1]
-                waypoint_index = _inspection_waypoint_index(color)
-                if _inspection_target_available(
-                    color, set(self.workstation_poses), len(self.waypoints)
-                ):
-                    if color not in self.workstation_poses:
-                        self.get_logger().warn(
-                            f"Workstation '{color}' was not confirmed; using calibrated "
-                            f"inspection waypoint{waypoint_index}."
-                        )
-                    self.get_logger().info(
-                        f"Post-patrol done — starting {color} workstation inspection."
-                    )
-                    self._start_inspection(color)
-                    self._transition(State.INSPECT_WORKSTATION)
+
+                if self.pending_targets: #pending targets is not empty
+                    self.speaker.speak("Inspecting barrels")
+                    self._next_post_patrol_target()
                     return
-                else:
-                    self.get_logger().error(
-                        f"Defects task for '{color}' has neither a confirmed pose nor "
-                        "a calibrated inspection waypoint — skipping."
-                    )
+                else: # pending targets are empty, which means None barrels were found
+                    # continue with the workstation task 
+                    pass
+                    
+            
+            # workstation
+            if self.workstation_color is not None and self.workstation_color in self.workstation_poses:
+                color = self.workstation_color
+                self.get_logger().info(
+                    f"Post-patrol done — starting {color} workstation inspection."
+                )
+                self._start_inspection(color)
+                self._transition(State.INSPECT_WORKSTATION)
+                return
             self.get_logger().info(
                 "All post-patrol targets handled — heading to room 2."
             )
@@ -1299,53 +1307,12 @@ class Task2Controller(Node):
         self._prev_inspection_phase = -1
         self._phase_start_time = self.get_clock().now().nanoseconds / 1e9
 
-        # The first two patrol waypoints are calibrated inspection approaches:
-        # safely offset from each belt and facing it head-on.
-        waypoint_index = _inspection_waypoint_index(color)
-        if waypoint_index is not None and waypoint_index < len(self.waypoints):
-            approach_x, approach_y, approach_yaw = self.waypoints[waypoint_index]
-            self.get_logger().info(
-                f"[inspection] using calibrated {color} approach "
-                f"waypoint{waypoint_index}: "
-                f"({approach_x:.2f}, {approach_y:.2f}) yaw={approach_yaw:.2f}"
-            )
-            self._send_nav_goal(approach_x, approach_y, approach_yaw)
-            return
-
-        if color in self.workstation_poses:
-            ws_pos = self.workstation_poses[color]
-        elif self.current_pose is not None:
-            self.get_logger().warn(
-                f"Workstation '{color}' pose unknown — using current position."
-            )
-            ws_pos = np.array(
-                [
-                    self.current_pose.position.x,
-                    self.current_pose.position.y,
-                ]
-            )
-        else:
-            self.get_logger().error("No pose available — can't start inspection.")
-            return
-
-        target_yaw = math.pi if color == "red" else math.pi / 2
-        if self.current_pose is not None:
-            rx = self.current_pose.position.x
-            ry = self.current_pose.position.y
-            delta = ws_pos - np.array([rx, ry])
-            dist = float(np.linalg.norm(delta))
-            approach_xy = ws_pos - (delta / dist) * 0.4 if dist > 0.6 else ws_pos
-            self.get_logger().info(
-                f"[inspection] approach goal: ({approach_xy[0]:.2f}, {approach_xy[1]:.2f}) yaw={target_yaw:.2f} "
-                f"(ws={ws_pos[0]:.2f},{ws_pos[1]:.2f} robot={rx:.2f},{ry:.2f} dist={dist:.2f})"
-            )
-        else:
-            approach_xy = ws_pos
-            self.get_logger().info(
-                f"[inspection] approach goal: ({approach_xy[0]:.2f}, {approach_xy[1]:.2f}) yaw={target_yaw:.2f} "
-                f"(ws={ws_pos[0]:.2f},{ws_pos[1]:.2f} no robot pose)"
-            )
-        self._send_nav_goal(approach_xy[0], approach_xy[1], target_yaw)
+        approach_x, approach_y, approach_yaw = self._workstation_approaches[color]
+        self.get_logger().info(
+            f"[inspection] navigating to {color} workstation approach: "
+            f"({approach_x:.2f}, {approach_y:.2f}) yaw={approach_yaw:.2f}"
+        )
+        self._send_nav_goal(approach_x, approach_y, approach_yaw)
 
     def _handle_inspection(self):
         if self._phase_start_time is None:
