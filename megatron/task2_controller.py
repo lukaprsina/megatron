@@ -226,6 +226,7 @@ def _parse_qr_task(text: str) -> str | None:
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.5  # metres — two detections within this are the same object
+    MIN_UPDATE_DISTANCE = 0.05
     WORKSTATION_TILE_COUNTS = {"red": 4, "green": 5}
     WORKSTATION_SCAN_DISTANCES = {"red": 2.4, "green": 3.0}
     MAX_RETRY_CYCLES = (
@@ -329,6 +330,9 @@ class Task2Controller(Node):
 
         # --- Interact tracking ---
         self._qr_task_raw: str | None = None
+        self.barrel_task = False
+        self.barrel_task_done = False
+        self.workstation_color: str | None = None  # "red" or "green" from QR
 
         # --- Inspection state ---
         self._inspection_phase = 0
@@ -490,7 +494,7 @@ class Task2Controller(Node):
                     self.current_target["pos"] = pos
                     self.current_target["normal"] = (nx, ny)
                     self.current_target["last_seen"] = now
-                    if np.linalg.norm(pos[:2] - old_pos[:2]) > 0.05:
+                    if np.linalg.norm(pos[:2] - old_pos[:2]) > self.MIN_UPDATE_DISTANCE:
                         self.get_logger().info("Seting up to recalculate approach")
                         self._nav_update = True
                     return
@@ -533,17 +537,26 @@ class Task2Controller(Node):
 
         for r in self.found_rings:
             if np.linalg.norm(pos - r["pos"]) < self.DEDUP_DISTANCE:
-                r["pos"] = pos
-                r["last_seen"] = now
                 if (
                     self.current_target is not None
                     and self.current_target.get("type") == "ring"
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
-                    < self.DEDUP_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) > self.MIN_UPDATE_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) < self.DEDUP_DISTANCE
+
                 ):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
                     self._nav_update = True
+
+                # elif np.linalg.norm(pos - r["pos"]) < self.DEDUP_DISTANCE:
+                #     self.get_logger().info(
+                #         f"Requing Ring {r['color']} since the new detected location is more far away"
+                #     )
+                #     # if not f.get("approached", False) and self.state == State.PATROL:
+                #     #     self._requeue_if_not_pending("face", f)
+                #     return
+                r["pos"] = pos
+                r["last_seen"] = now
                 return
 
         self.get_logger().info(f"New ring ({color}) at ({pos[0]:.2f}, {pos[1]:.2f})")
@@ -566,23 +579,32 @@ class Task2Controller(Node):
 
         for b in self.found_barrels:
             if np.linalg.norm(pos - b["pos"]) < self.DEDUP_DISTANCE:
-                b["pos"] = pos
-                b["last_seen"] = now
                 if (
                     self.current_target is not None
                     and self.current_target.get("type") == "barrel"
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
-                    < self.DEDUP_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) > self.MIN_UPDATE_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) < self.DEDUP_DISTANCE
                 ):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
                     self._nav_update = True
+                    # self.get_logger().info("Set flag Nav Update to TRUE from barrel cb")
+                
+                # elif np.linalg.norm(pos - b["pos"]) < self.DEDUP_DISTANCE:
+                    # self.get_logger().info(
+                    #     f"Requing barrel {b['color']} since the new detected location is more far away"
+                    # )
+                    # if not f.get("approached", False) and self.state == State.PATROL:
+                    #     self._requeue_if_not_pending("face", f)
+                #     return
                 # if (
                 #     b["orientation"] == "horizontal"
                 #     and not b.get("approached", False)
                 #     and self.state == State.PATROL
                 # ):
                 #     self._requeue_if_not_pending("barrel", b)
+                b["pos"] = pos
+                b["last_seen"] = now
                 return
 
         self.get_logger().info(
@@ -596,6 +618,8 @@ class Task2Controller(Node):
             "quat": msg.pose.orientation,
             "approached": False,
             "last_seen": now,
+            "detection_rx": self.current_pose.position.x if self.current_pose else None,
+            "detection_ry": self.current_pose.position.y if self.current_pose else None,
         }
         self.found_barrels.append(entry)
 
@@ -604,9 +628,9 @@ class Task2Controller(Node):
         self.workstation_poses[color] = np.array(
             [msg.pose.position.x, msg.pose.position.y]
         )
-        self.get_logger().info(
-            f"Workstation '{color}' at ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
-        )
+        # self.get_logger().info(
+        #     f"Workstation '{color}' at ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
+        # )
 
     def _qr_cb(self, msg: String):
         self._qr_task_raw = msg.data
@@ -829,21 +853,12 @@ class Task2Controller(Node):
         self.get_logger().info("Patrol loop complete — building post-patrol queue.")
         self._patrol_complete = True
 
-        for f in self.found_faces:
+        for f in self.found_faces[:1]:
             if not f.get("approached", False):
                 self.pending_targets.append(f)
                 self.get_logger().info(
                     f"Queuing face {f.get('id')} at ({f['pos'][0]:.2f}, {f['pos'][1]:.2f})"
                 )
-                
-        if self.barrel_task:
-            for b in self.found_barrels:
-                if not b.get("approached", False):
-                    self.pending_targets.append(b)
-                    self.get_logger().info(
-                        f"Queuing {b.get('orientation')} {b.get('color')} barrel "
-                        f"at ({b['pos'][0]:.2f}, {b['pos'][1]:.2f})"
-                    )
 
         if not self.pending_targets:
             self.get_logger().info("No targets to approach — heading to room 2.")
@@ -874,6 +889,8 @@ class Task2Controller(Node):
             self._cancel_nav()
             self._nav_update = False
             if self.current_target is not None:
+                self.get_logger().info(f"approach is updated for {self.current_target}")
+                self._approach_attempt = 0
                 self._send_approach(self.current_target, self._approach_attempt)
             return
 
@@ -887,6 +904,7 @@ class Task2Controller(Node):
             return
 
         if self._nav_aborted():
+            self.get_logger().info("approach aborted resending approach")
             self._approach_attempt += 1
             if self.current_target is not None:
                 if not self._send_approach(self.current_target, self._approach_attempt):
@@ -908,8 +926,9 @@ class Task2Controller(Node):
         Returns True if a nav goal was sent, False if all candidates at all
         retry distances have been exhausted.
         """
-
         _type = target["type"]
+        self.get_logger().info(f"Sending approach to {_type} at {target["pos"]}")
+
         if _type == "face":
             n_candidates = 8
             base_dist = cast(float, self.get_parameter("face_approach_distance").value)
@@ -1007,10 +1026,15 @@ class Task2Controller(Node):
         px, py = float(pos[0]), float(pos[1])
 
         if target.get("orientation", "vertical") == "vertical":
-            # Approach from robot's current direction toward barrel
-            if self.current_pose is not None:
+            # Approach from the direction the barrel was first seen from.
+            # Using detection-time pose avoids trajectories that cross walls
+            # when the robot has moved since detection.
+            rx = target.get("detection_rx")
+            ry = target.get("detection_ry")
+            if rx is None and self.current_pose is not None:
                 rx = self.current_pose.position.x
                 ry = self.current_pose.position.y
+            if rx is not None and ry is not None:
                 dx, dy = px - rx, py - ry
                 d = math.sqrt(dx**2 + dy**2)
                 if d > 1e-3:
@@ -1146,7 +1170,8 @@ class Task2Controller(Node):
             self.get_logger().info("Waitting for qr task")
             return
 
-        task_token = _parse_qr_task(self._qr_task_raw)
+        qr_raw = self._qr_task_raw
+        task_token = _parse_qr_task(qr_raw)
         self._qr_task_raw = None
 
         if task_token == "emergency":
@@ -1158,10 +1183,17 @@ class Task2Controller(Node):
             rclpy.shutdown()
             return
 
-        if task_token and task_token != "nothing" and task_token != "report":
-            self.assigned_task = task_token
-            # TODO: not used
-            _color_word = task_token.split("_")[1] if "_" in task_token else task_token
+        if task_token is not None and task_token != "nothing" and task_token != "emergency":
+            if "defects" in task_token:
+                if "red" in task_token:
+                    self.workstation_color = "red"
+                elif "green" in task_token:
+                    self.workstation_color = "green"
+                self.get_logger().info(f"Workstation color set to '{self.workstation_color}' from QR.")
+
+            elif task_token == "barrels":
+                self.barrel_task = True
+
             self.speaker.speak(
                 f"OK. I will {task_token.replace('_', ' ').replace('defects', 'detect anomalies on the')}."
             )
@@ -1169,9 +1201,6 @@ class Task2Controller(Node):
             self.speaker.speak("OK, no task for me. Continuing patrol.")
         else:
             self.speaker.speak("Understood.")
-
-        if task_token == "barrels":
-            self.barrel_task = True
         
         self._mark_approached(target)
         self._resume_patrol()
@@ -1206,6 +1235,21 @@ class Task2Controller(Node):
                 self.current_target = None
                 self._next_post_patrol_target()
         else:
+            # barrel task
+            if self.barrel_task and not self.barrel_task_done:
+                self.barrel_task_done = True
+                self.speaker.speak("Approaching barrels")
+                for b in self.found_barrels:
+                    if not b.get("approached", False):
+                        self._requeue_if_not_pending("barrel", b)
+                        self.get_logger().info(
+                            f"Queuing {b.get('orientation')} {b.get('color')} barrel "
+                            f"at ({b['pos'][0]:.2f}, {b['pos'][1]:.2f})"
+                        )
+                self._next_post_patrol_target()
+                return
+            
+            # workstation 
             if self.assigned_task and self.assigned_task.startswith("defects"):
                 color = self.assigned_task.split("_")[1]
                 waypoint_index = _inspection_waypoint_index(color)
@@ -2037,6 +2081,7 @@ class Task2Controller(Node):
         self._last_feedback_time = self.get_clock().now().nanoseconds / 1e9
 
     def _cancel_nav(self):
+        self.get_logger().warning("Canceling Nav2 goal ")
         self._nav_seq += 1  # invalidates any in-flight callback
         if self.nav_goal_handle is not None:
             self.nav_goal_handle.cancel_goal_async()
