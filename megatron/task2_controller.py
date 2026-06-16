@@ -1057,10 +1057,13 @@ class Task2Controller(Node):
             )
         else:
             ax_yaw = 0.0
-        # Two perpendiculars; pick the one toward robot
+        # Two perpendiculars; pick the one toward robot at detection time
         perp_x, perp_y = -math.sin(ax_yaw), math.cos(ax_yaw)
-        if self.current_pose is not None:
+        rx = target.get("detection_rx")
+        ry = target.get("detection_ry")
+        if rx is None and self.current_pose is not None:
             rx, ry = self.current_pose.position.x, self.current_pose.position.y
+        if rx is not None and ry is not None:
             if (ry - px) * perp_x + (ry - py) * perp_y < 0:
                 perp_x, perp_y = -perp_x, -perp_y
         # Lateral shift to robot-right (cross product of approach direction and Z-up)
