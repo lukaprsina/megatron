@@ -158,18 +158,6 @@ def _normalize_angle(a: float) -> float:
     return a
 
 
-def _inspection_waypoint_index(color: str) -> int | None:
-    return {"red": 0, "green": 1}.get(color)
-
-
-def _inspection_target_available(
-    color: str, confirmed_colors: set[str], waypoint_count: int
-) -> bool:
-    waypoint_index = _inspection_waypoint_index(color)
-    return color in confirmed_colors or (
-        waypoint_index is not None and waypoint_index < waypoint_count
-    )
-
 
 def _inspection_completion_reason(
     tile_count: int,
