@@ -277,11 +277,13 @@ class IncrementalTrackManager:
         confirmation_count: int = 3,
         compact_inlier_radius: float = 0.35,
         compact_min_fraction: float = 0.6,
+        max_cam_dist: float | None = None,
     ):
         self.dedup_distance = dedup_distance
         self.confirmation_count = confirmation_count
         self.compact_inlier_radius = compact_inlier_radius
         self.compact_min_fraction = compact_min_fraction
+        self.max_cam_dist = max_cam_dist
         self._tracks: list[dict] = []
         self._next_id = 1
 
@@ -332,6 +334,9 @@ class IncrementalTrackManager:
         map_point = np.asarray(map_point, dtype=np.float64)
         normal = np.asarray(normal, dtype=np.float64)
         cam_dist = float(cam_dist)
+
+        if self.max_cam_dist is not None and cam_dist > self.max_cam_dist:
+            return "ignored", None
 
         obs = {
             "map_pos": map_point,

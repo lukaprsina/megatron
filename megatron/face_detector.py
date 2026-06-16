@@ -117,6 +117,7 @@ class FaceDetectorNode(Node):
         self.track_manager = IncrementalTrackManager(
             dedup_distance=self.dedup_distance,
             confirmation_count=self.confirmation_count,
+            max_cam_dist=2.5,
         )
 
         # Rate limiting
@@ -278,7 +279,6 @@ class FaceDetectorNode(Node):
                 person_name = self._recognize_face(face_crop)
 
                 cam_dist = float(np.linalg.norm(centroid))
-
                 # Feed to tracker
                 status, track = self.track_manager.add_observation(
                     map_point,
@@ -288,6 +288,8 @@ class FaceDetectorNode(Node):
                     label=person_name,
                 )
 
+                if track is None:
+                    continue
                 if status == "confirmed":
                     self._publish_detection(track, rgb_msg.header.stamp)
                     pos, _, _ = self.track_manager.get_best_estimate(track)
@@ -362,7 +364,7 @@ class FaceDetectorNode(Node):
         marker_array = MarkerArray()
         markers = []
         for track in self.track_manager.get_confirmed_tracks():
-            pos, normal, label = self.track_manager.get_best_estimate(track)
+            pos, normal, label, cam_dist = self.track_manager.get_best_estimate_temp(track)
 
             # Shift markers to match the published (shifted) position
             nx, ny = normal[0], normal[1]
@@ -410,7 +412,8 @@ class FaceDetectorNode(Node):
             t.color.a = 1.0
 
             label = "Unknown" if label is None else label
-            t.text = f"{label} (ID: {track['id']})"
+            cam_dist = 0.000 if cam_dist is None else cam_dist
+            t.text = f"{label} (ID: {track['id']}) dist: {cam_dist:.2f}"
             t.lifetime.sec = 0
             markers.append(t)
 

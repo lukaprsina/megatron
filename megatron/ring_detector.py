@@ -387,6 +387,7 @@ class RingDetectorNode(Node):
         self.track_manager = IncrementalTrackManager(
             dedup_distance=self.dedup_distance,
             confirmation_count=self.confirmation_count,
+            max_cam_dist=2.5,
         )
 
         # Rate limiting
@@ -688,6 +689,8 @@ class RingDetectorNode(Node):
                 map_point, map_normal, cam_dist, rgb_msg.header.stamp, label=color_name
             )
 
+            if track is None:
+                continue
             if status == "confirmed":
                 self._publish_detection(track, rgb_msg.header.stamp)
                 pos, _, _ = self.track_manager.get_best_estimate(track)
