@@ -407,7 +407,39 @@ class IncrementalTrackManager:
         label = Counter(valid_labels).most_common(1)[0][0] if valid_labels else None
 
         return pos, n, label
+    # temp!!! TODO remove this 
+    def get_best_estimate_temp(self, track):
+        """Robust estimate: median of compact inliers + weighted normal.
 
+        Returns (position, normal, label).
+        """
+        observations = track["observations"]
+        if not observations:
+            return np.zeros(3), np.array([1.0, 0.0, 0.0]), None, None
+
+        inliers, _, _ = self._compact_points(track)
+        pts = inliers if len(inliers) >= 3 else observations
+
+        positions = np.array([o["map_pos"] for o in pts])
+        normals = np.array([o["normal"] for o in pts])
+        labels = [o.get("label") for o in pts]
+        cam_dists = np.array([o["cam_dist"] for o in pts])
+
+        weights = np.array([1.0 / (o["cam_dist"] ** 2 + 0.01) for o in pts])
+
+        pos = np.median(positions, axis=0)
+        n = np.average(normals, axis=0, weights=weights)
+        n_len = np.linalg.norm(n)
+        if n_len > 1e-6:
+            n = n / n_len
+        else:
+            n = np.array([1.0, 0.0, 0.0])
+
+        valid_labels = [lb for lb in labels if lb is not None]
+        label = Counter(valid_labels).most_common(1)[0][0] if valid_labels else None
+        cam_dist = cam_dists.mean()
+
+        return pos, n, label, cam_dist
     def get_confirmed_tracks(self):
         return [t for t in self._tracks if t["confirmed"]]
 

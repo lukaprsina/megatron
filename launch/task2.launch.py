@@ -173,6 +173,11 @@ def generate_launch_description():
                     "waypoints",
                     "bluelinepoint.yaml",
                 ]),
+                "workstation_file": PathJoinSubstitution([
+                    pkg_megatron,
+                    "waypoints",
+                    "workstation.yaml",
+                ]),
                 "manual_mode": LaunchConfiguration("manual_mode"),
                 "capture_tiles": LaunchConfiguration("capture_tiles"),
                 "tile_capture_dir": LaunchConfiguration("tile_capture_dir"),
