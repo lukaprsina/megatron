@@ -45,6 +45,7 @@ MAX_RAW_PTS = 300
 SAME_COLOUR_SUPPRESS_RADIUS = 0.48
 SAME_COLOUR_SUPPRESS_RADIUS_H = 1.5
 MIN_MARK_DIST = 0.18  # m — physical overlap guard
+MAX_DETECTION_DISTANCE = 2.5  # m — ignore markers further than this from the robot
 
 SPILL_Z_LO = 0.005  # m above map ground
 SPILL_Z_HI = 0.15  # m above map ground
@@ -228,6 +229,16 @@ class CylinderDetector(Node):
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
+
+        try:
+            tf = self.tf_buffer.lookup_transform("map", "base_link", rclpy.time.Time())
+            rx = tf.transform.translation.x
+            ry = tf.transform.translation.y
+            if math.sqrt((x - rx) ** 2 + (y - ry) ** 2) > MAX_DETECTION_DISTANCE:
+                return
+        except Exception:
+            pass  # no TF yet — let the detection through
+
         colour = _rgb_to_colour_name(msg.color.r, msg.color.g, msg.color.b)
         orientation = msg.text if msg.text in ("vertical", "horizontal") else "vertical"
         radius = CLUSTER_RADIUS_H if orientation == "horizontal" else CLUSTER_RADIUS
@@ -254,8 +265,35 @@ class CylinderDetector(Node):
             just_confirmed = not best.confirmed
             if just_confirmed:
                 best.confirmed = True
-                self._suppress_duplicates(best)
-                self._publish_marker_array()
+                # Check if an already-confirmed cluster nearby owns this region first.
+                # This handles the race where both barrel ends reach CONFIRM_THRESH
+                # before either suppresses the other.
+                cx, cy, cz = best.robust_centroid
+                suppress_r = (
+                    SAME_COLOUR_SUPPRESS_RADIUS_H
+                    if best.best_orientation == "horizontal"
+                    else SAME_COLOUR_SUPPRESS_RADIUS
+                )
+                for c in self.clusters:
+                    if c is best or not c.confirmed or c.suppressed:
+                        continue
+                    if c.best_orientation != best.best_orientation:
+                        continue
+                    if not _colours_compatible(c.best_colour, best.best_colour):
+                        continue
+                    if c.dist2d(cx, cy) < suppress_r:
+                        best.suppressed = True
+                        self.get_logger().info(
+                            f"Barrel end suppressed (duplicate of cluster "
+                            f"{c.cluster_id}): {best.best_colour}/"
+                            f"{best.best_orientation} at ({cx:.2f}, {cy:.2f})"
+                        )
+                        break
+                if not best.suppressed:
+                    self._suppress_duplicates(best)
+                    self._publish_marker_array()
+            if best.suppressed:
+                return
             cx, cy, cz = best.robust_centroid
             if just_confirmed:
                 self.get_logger().info(
