@@ -2215,25 +2215,43 @@ class Task2Controller(Node):
 
     # ── Costmap check ──────────────────────────────────────────────────
 
-    def _cost_at_goal_ok(self, x: float, y: float) -> bool:
+    def _cost_at_goal_ok(self, x: float, y: float, kernel = 5) -> bool:
         if self.costmap is None:
             return True
         mx, my = self._world_to_map(x, y)
         w, h = self.costmap.info.width, self.costmap.info.height
-        if not (0 <= mx < w and 0 <= my < h):
+        half = kernel // 2
+        costs = []
+
+        for dy in range(-half, half + 1):
+            for dx in range(-half, half + 1):
+                nx_, ny_ = mx + dx, my + dy
+                if 0 <= nx_ < w and 0 <= ny_ < h:
+                    c = self.costmap.data[ny_ * w + nx_]
+                    if c >= 0:
+                        costs.append(c)
+        if not costs:
             return False
-        cost = self.costmap.data[my * w + mx]
-        if cost >= 80 or cost < 0:
-            c_type = (
-                self.current_target["type"]
-                if self.current_target is not None
-                else "NONE"
-            )
-            self.get_logger().warn(
-                f"Approach {c_type}({x:.2f}, {y:.2f}) blocked (cost={cost})."
-            )
+        median_cost = sorted(costs)[len(costs) // 2]
+        if median_cost >= 80:
+            self.get_logger().warn(f"Approach blocked (median cost={median_cost}).")
             return False
         return True
+
+        # if not (0 <= mx < w and 0 <= my < h):
+        #     return False
+        # cost = self.costmap.data[my * w + mx]
+        # if cost >= 80 or cost < 0:
+        #     c_type = (
+        #         self.current_target["type"]
+        #         if self.current_target is not None
+        #         else "NONE"
+        #     )
+        #     self.get_logger().warn(
+        #         f"Approach {c_type}({x:.2f}, {y:.2f}) blocked (cost={cost})."
+        #     )
+        #     return False
+        # return True
 
     def _world_to_map(self, x: float, y: float):
         assert self.costmap is not None
