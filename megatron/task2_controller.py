@@ -504,8 +504,8 @@ class Task2Controller(Node):
                     f["last_seen"] = now
                     f["label"] = label
                     
-                    if not f.get("approached", False) and self.state == State.PATROL:
-                        self._requeue_if_not_pending("face", f)
+                    # if not f.get("approached", False) and self.state == State.PATROL:
+                    #     self._requeue_if_not_pending("face", f)
                     return
                 else:
                     return
@@ -520,13 +520,10 @@ class Task2Controller(Node):
             "normal": (nx, ny),
             "label": label,
             "approached": False,
-            # "re_approach": True,
             "last_seen": now,
         }
         self.found_faces.append(entry)
-        if self.state == State.PATROL:
-            self.get_logger().info(f"New face {label}(ID:{id}) added to pending")
-            self.pending_targets.append(dict(entry))
+        self.get_logger().info(f"New face {label}(ID:{id}) detected ")
 
     def _ring_cb(self, msg: PoseStamped):
         parts = msg.header.frame_id.split("|")
@@ -580,12 +577,12 @@ class Task2Controller(Node):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
                     self._nav_update = True
-                if (
-                    b["orientation"] == "horizontal"
-                    and not b.get("approached", False)
-                    and self.state == State.PATROL
-                ):
-                    self._requeue_if_not_pending("barrel", b)
+                # if (
+                #     b["orientation"] == "horizontal"
+                #     and not b.get("approached", False)
+                #     and self.state == State.PATROL
+                # ):
+                #     self._requeue_if_not_pending("barrel", b)
                 return
 
         self.get_logger().info(
@@ -758,7 +755,7 @@ class Task2Controller(Node):
         self.get_logger().info(
             f"Re-queuing unapproached {obj_type} at ({pos[0]:.2f}, {pos[1]:.2f})"
         )
-        self.pending_targets.append(dict(track))
+        self.pending_targets.append(track)
 
     # ── Main tick ──────────────────────────────────────────────────────
 
@@ -834,18 +831,19 @@ class Task2Controller(Node):
 
         for f in self.found_faces:
             if not f.get("approached", False):
-                self.pending_targets.append(dict(f))
+                self.pending_targets.append(f)
                 self.get_logger().info(
                     f"Queuing face {f.get('id')} at ({f['pos'][0]:.2f}, {f['pos'][1]:.2f})"
                 )
-
-        for b in self.found_barrels:
-            if not b.get("approached", False):
-                self.pending_targets.append(dict(b))
-                self.get_logger().info(
-                    f"Queuing {b.get('orientation')} {b.get('color')} barrel "
-                    f"at ({b['pos'][0]:.2f}, {b['pos'][1]:.2f})"
-                )
+                
+        if self.barrel_task:
+            for b in self.found_barrels:
+                if not b.get("approached", False):
+                    self.pending_targets.append(b)
+                    self.get_logger().info(
+                        f"Queuing {b.get('orientation')} {b.get('color')} barrel "
+                        f"at ({b['pos'][0]:.2f}, {b['pos'][1]:.2f})"
+                    )
 
         if not self.pending_targets:
             self.get_logger().info("No targets to approach — heading to room 2.")
@@ -1172,6 +1170,9 @@ class Task2Controller(Node):
         else:
             self.speaker.speak("Understood.")
 
+        if task_token == "barrels":
+            self.barrel_task = True
+        
         self._mark_approached(target)
         self._resume_patrol()
 
