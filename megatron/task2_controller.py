@@ -237,6 +237,7 @@ class Task2Controller(Node):
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.20)
         self.declare_parameter("approach_stuck_timeout", 15.0)
+        self.declare_parameter("qr_wait_timeout", 20.0)
         self.declare_parameter("manual_mode", False)
         self.declare_parameter("avoidance_blind_distance", 0.40)
         self.declare_parameter("capture_tiles", False)
@@ -314,6 +315,7 @@ class Task2Controller(Node):
 
         # --- Costmap ---
         self.costmap = None
+        self.local_costmap = None
 
         # --- Detection tracking ---
         # Each entry: {'pos': np.array, 'normal': (nx,ny), 'type': str,
@@ -344,6 +346,7 @@ class Task2Controller(Node):
 
         # --- Interact tracking ---
         self._qr_task_raw: str | None = None
+        self._qr_wait_start_time: float | None = None
         self.ring_task = False
         self.barrel_task = False
         self.barrel_task_done = False
@@ -481,6 +484,12 @@ class Task2Controller(Node):
         )
         self.create_subscription(
             OccupancyGrid, "/global_costmap/costmap", self._costmap_cb, costmap_qos
+        )
+        self.create_subscription(
+            OccupancyGrid,
+            "/local_costmap/costmap",
+            self._local_costmap_cb,
+            costmap_qos,
         )
         self.create_subscription(String, "/robot_state", self._robot_state_cb, 10)
 
@@ -792,6 +801,9 @@ class Task2Controller(Node):
 
     def _costmap_cb(self, msg: OccupancyGrid):
         self.costmap = msg
+
+    def _local_costmap_cb(self, msg: OccupancyGrid):
+        self.local_costmap = msg
 
     # ── Dedup helper ──────────────────────────────────────────────────
 
@@ -1177,6 +1189,7 @@ class Task2Controller(Node):
             # pronoun = "woman" if "she" in label.lower() else "man"
             self.speaker.speak(f"Hi {name}! What task should I perform?")
             self._qr_task_raw = None
+            self._qr_wait_start_time = self.get_clock().now().nanoseconds / 1e9
 
         elif target["type"] == "barrel":
             self.speaker.speak(f"Inspecting {target['color']} barrel.")
@@ -1261,9 +1274,24 @@ class Task2Controller(Node):
         if (
             self._qr_task_raw is None or self._qr_task_raw == ""
         ):  # if qr_task is not seen it is failed
+            timeout = cast(float, self.get_parameter("qr_wait_timeout").value)
+            start = self._qr_wait_start_time
+            if (
+                start is not None
+                and self.get_clock().now().nanoseconds / 1e9 - start > timeout
+            ):
+                self.get_logger().warn(
+                    "Timed out waiting for QR task — giving up on this worker."
+                )
+                self.speaker.speak("I couldn't read your task. Moving on.")
+                self._qr_wait_start_time = None
+                self._mark_approached(target)
+                self._resume_patrol()
+                return
             self.get_logger().info("Waitting for qr task")
             return
 
+        self._qr_wait_start_time = None
         qr_raw = self._qr_task_raw
         task_token = _parse_qr_task(qr_raw)
         self._qr_task_raw = None
@@ -2325,50 +2353,62 @@ class Task2Controller(Node):
 
     # ── Costmap check ──────────────────────────────────────────────────
 
-    def _cost_at_goal_ok(self, x: float, y: float, kernel=5) -> bool:
-        if self.costmap is None:
-            return True
-        mx, my = self._world_to_map(x, y)
-        w, h = self.costmap.info.width, self.costmap.info.height
-        half = kernel // 2
+    # Robot footprint radius (~0.189 m, see nav2.yaml) plus a small safety
+    # margin. The check window must cover at least this much, or a goal can
+    # pass while the robot's actual body still overlaps a near-obstacle cell.
+    APPROACH_CLEARANCE_RADIUS_M = 0.28
+
+    def _cost_ok_on(
+        self, costmap: OccupancyGrid, x: float, y: float, out_of_bounds_ok: bool
+    ) -> bool:
+        mx, my = self._world_to_map(costmap, x, y)
+        w, h = costmap.info.width, costmap.info.height
+        half = max(1, round(self.APPROACH_CLEARANCE_RADIUS_M / costmap.info.resolution))
         costs = []
 
         for dy in range(-half, half + 1):
             for dx in range(-half, half + 1):
                 nx_, ny_ = mx + dx, my + dy
                 if 0 <= nx_ < w and 0 <= ny_ < h:
-                    c = self.costmap.data[ny_ * w + nx_]
+                    c = costmap.data[ny_ * w + nx_]
                     if c >= 0:
                         costs.append(c)
         if not costs:
-            return False
+            # No cells in this costmap cover the point at all — e.g. the
+            # local costmap is a small window around the robot and the
+            # candidate is still far away. That's "no information," not
+            # "blocked"; only the global costmap (which covers the whole
+            # known map) should treat unseen ground as blocked.
+            return out_of_bounds_ok
         median_cost = sorted(costs)[len(costs) // 2]
-        if median_cost >= 80:
-            self.get_logger().warn(f"Approach blocked (median cost={median_cost}).")
+        return median_cost < 80
+
+    def _cost_at_goal_ok(self, x: float, y: float) -> bool:
+        """Check the goal clears both costmaps.
+
+        The global costmap is what we have readily available for planning,
+        but Nav2's controller_server and behavior_server (the things that
+        actually drive and recover) act on the local costmap, which has its
+        own more reactive voxel layer. A goal can look clear on one and not
+        the other, so both must agree before we commit to it.
+        """
+        if self.costmap is not None and not self._cost_ok_on(
+            self.costmap, x, y, out_of_bounds_ok=False
+        ):
+            self.get_logger().warn("Approach blocked (global costmap).")
+            return False
+        if self.local_costmap is not None and not self._cost_ok_on(
+            self.local_costmap, x, y, out_of_bounds_ok=True
+        ):
+            self.get_logger().warn("Approach blocked (local costmap).")
             return False
         return True
 
-        # if not (0 <= mx < w and 0 <= my < h):
-        #     return False
-        # cost = self.costmap.data[my * w + mx]
-        # if cost >= 80 or cost < 0:
-        #     c_type = (
-        #         self.current_target["type"]
-        #         if self.current_target is not None
-        #         else "NONE"
-        #     )
-        #     self.get_logger().warn(
-        #         f"Approach {c_type}({x:.2f}, {y:.2f}) blocked (cost={cost})."
-        #     )
-        #     return False
-        # return True
-
-    def _world_to_map(self, x: float, y: float):
-        assert self.costmap is not None
-        res = self.costmap.info.resolution
+    def _world_to_map(self, costmap: OccupancyGrid, x: float, y: float):
+        res = costmap.info.resolution
         ox, oy = (
-            self.costmap.info.origin.position.x,
-            self.costmap.info.origin.position.y,
+            costmap.info.origin.position.x,
+            costmap.info.origin.position.y,
         )
         return int((x - ox) / res), int((y - oy) / res)
 

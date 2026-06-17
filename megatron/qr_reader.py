@@ -71,30 +71,34 @@ class QRReader(Node):
             return
 
         self.busy = True
-        current_image = self.latest_image
-        if current_image is None:
-            self.get_logger().warn("No image received yet for qr_reader debug view")
-            return
-
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(current_image, desired_encoding="bgr8")
-        except CvBridgeError as exc:
-            self.get_logger().warn(f"Failed to convert QR image: {exc}")
-            return
+            current_image = self.latest_image
+            if current_image is None:
+                self.get_logger().warn("No image received yet for qr_reader debug view")
+                return
 
-        msg = self.handle_qr(cv_image)
-        if msg is None:
-            msg = String()
-            msg.data = ""
+            try:
+                cv_image = self.bridge.imgmsg_to_cv2(
+                    current_image, desired_encoding="bgr8"
+                )
+            except CvBridgeError as exc:
+                self.get_logger().warn(f"Failed to convert QR image: {exc}")
+                return
 
-        self.publish_task.publish(msg)
-        self.get_logger().info(f"DEBUG published {msg.data}")
+            msg = self.handle_qr(cv_image)
+            if msg is None:
+                msg = String()
+                msg.data = ""
 
-        self.busy = False
-        self.latest_cv_image = cv_image
-        self.debug_image_pub.publish(
-            self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
-        )
+            self.publish_task.publish(msg)
+            self.get_logger().info(f"DEBUG published {msg.data}")
+
+            self.latest_cv_image = cv_image
+            self.debug_image_pub.publish(
+                self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
+            )
+        finally:
+            self.busy = False
 
     def handle_qr(self, cv_image) -> String | None:
         if self.detector is None:
