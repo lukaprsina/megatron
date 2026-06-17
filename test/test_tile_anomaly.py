@@ -18,6 +18,7 @@ from megatron.tile_anomaly import (  # noqa: E402
     _dark_blobs,
     _lateral_border_intrusions,
     order_quad,
+    quad_from_contour,
     warp_tile,
 )
 
@@ -46,6 +47,32 @@ def test_order_quad_is_stable_for_shuffled_points() -> None:
     expected = np.array([[10, 20], [90, 15], [95, 80], [5, 85]], np.float32)
     shuffled = expected[[2, 0, 3, 1]]
     assert np.allclose(order_quad(shuffled), expected)
+
+
+def test_quad_from_contour_recovers_perspective_trapezoid() -> None:
+    # Simulates a tile viewed at an angle: a trapezoid, not a rectangle.
+    trapezoid = np.array([[40, 20], [160, 35], [150, 140], [50, 130]], np.float32)
+    mask = np.zeros((180, 200), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, trapezoid.astype(np.int32), 255)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contour = max(contours, key=cv2.contourArea)
+
+    quad = quad_from_contour(contour)
+    assert quad is not None
+    assert np.allclose(quad, order_quad(trapezoid), atol=2.0)
+
+    rect_box = cv2.boxPoints(cv2.minAreaRect(contour))
+    assert not np.allclose(quad, order_quad(rect_box), atol=2.0)
+
+
+def test_quad_from_contour_falls_back_when_no_quad() -> None:
+    # A triangle never reduces to 4 vertices at any approxPolyDP epsilon.
+    triangle = np.array([[60, 10], [110, 100], [10, 100]], np.int32)
+    mask = np.zeros((120, 120), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, triangle, 255)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contour = max(contours, key=cv2.contourArea)
+    assert quad_from_contour(contour) is None
 
 
 def test_warp_tile_extracts_complete_inset_region() -> None:

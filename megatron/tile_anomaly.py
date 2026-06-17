@@ -91,6 +91,25 @@ def order_quad(points: np.ndarray) -> np.ndarray:
     return ordered.astype(np.float32)
 
 
+def quad_from_contour(contour: np.ndarray) -> np.ndarray | None:
+    """Return the contour's true 4 corners, or None if it isn't quad-like.
+
+    Unlike cv2.boxPoints(cv2.minAreaRect(contour)), which fits the minimum
+    rotated rectangle, this follows the contour's own shape — so a tile
+    photographed at an angle (a trapezoid in image space) is matched by its
+    actual corners rather than by a rectangle that doesn't align with them.
+    """
+    hull = cv2.convexHull(contour)
+    perimeter = cv2.arcLength(hull, True)
+    if perimeter <= 0:
+        return None
+    for epsilon_factor in np.arange(0.02, 0.061, 0.005):
+        approx = cv2.approxPolyDP(hull, epsilon_factor * perimeter, True)
+        if len(approx) == 4:
+            return order_quad(approx.reshape(4, 2).astype(np.float32))
+    return None
+
+
 def warp_tile(
     image: np.ndarray,
     quad: np.ndarray,

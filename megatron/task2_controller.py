@@ -50,6 +50,7 @@ from megatron.tile_anomaly import (
     DetectorConfig,
     TileAnomalyDetector,
     TileAnomalyResult,
+    quad_from_contour,
     warp_tile,
 )
 from megatron.tile_capture import save_tile_capture
@@ -1909,7 +1910,9 @@ class Task2Controller(Node):
                 f"brightness={mean_brightness:.1f}",
                 throttle_duration_sec=0.5,
             )
-        box = cv2.boxPoints(cv2.minAreaRect(best))
+        box = quad_from_contour(best)
+        if box is None:
+            box = cv2.boxPoints(cv2.minAreaRect(best))
         box[:, 1] += crop_y
         return box.astype(np.float32), full_mask
 
