@@ -364,7 +364,9 @@ class FaceDetectorNode(Node):
         marker_array = MarkerArray()
         markers = []
         for track in self.track_manager.get_confirmed_tracks():
-            pos, normal, label, cam_dist = self.track_manager.get_best_estimate_temp(track)
+            pos, normal, label, cam_dist = self.track_manager.get_best_estimate_temp(
+                track
+            )
 
             # Shift markers to match the published (shifted) position
             nx, ny = normal[0], normal[1]

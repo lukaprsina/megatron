@@ -2360,7 +2360,7 @@ class Task2Controller(Node):
 
     def _cost_ok_on(
         self, costmap: OccupancyGrid, x: float, y: float, out_of_bounds_ok: bool
-    ) -> bool:
+    ) -> tuple[bool, float | None]:
         mx, my = self._world_to_map(costmap, x, y)
         w, h = costmap.info.width, costmap.info.height
         half = max(1, round(self.APPROACH_CLEARANCE_RADIUS_M / costmap.info.resolution))
@@ -2379,9 +2379,9 @@ class Task2Controller(Node):
             # candidate is still far away. That's "no information," not
             # "blocked"; only the global costmap (which covers the whole
             # known map) should treat unseen ground as blocked.
-            return out_of_bounds_ok
+            return out_of_bounds_ok, None
         median_cost = sorted(costs)[len(costs) // 2]
-        return median_cost < 80
+        return median_cost < 150, median_cost
 
     def _cost_at_goal_ok(self, x: float, y: float) -> bool:
         """Check the goal clears both costmaps.
@@ -2392,16 +2392,24 @@ class Task2Controller(Node):
         own more reactive voxel layer. A goal can look clear on one and not
         the other, so both must agree before we commit to it.
         """
-        if self.costmap is not None and not self._cost_ok_on(
-            self.costmap, x, y, out_of_bounds_ok=False
-        ):
-            self.get_logger().warn("Approach blocked (global costmap).")
-            return False
-        if self.local_costmap is not None and not self._cost_ok_on(
-            self.local_costmap, x, y, out_of_bounds_ok=True
-        ):
-            self.get_logger().warn("Approach blocked (local costmap).")
-            return False
+        if self.costmap is not None:
+            ok, median_cost = self._cost_ok_on(
+                self.costmap, x, y, out_of_bounds_ok=False
+            )
+            if not ok:
+                self.get_logger().warn(
+                    f"Approach blocked (global costmap), median_cost={median_cost}."
+                )
+                return False
+        if self.local_costmap is not None:
+            ok, median_cost = self._cost_ok_on(
+                self.local_costmap, x, y, out_of_bounds_ok=True
+            )
+            if not ok:
+                self.get_logger().warn(
+                    f"Approach blocked (local costmap), median_cost={median_cost}."
+                )
+                return False
         return True
 
     def _world_to_map(self, costmap: OccupancyGrid, x: float, y: float):
