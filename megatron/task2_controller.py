@@ -316,6 +316,7 @@ class Task2Controller(Node):
         # --- Costmap ---
         self.costmap = None
         self.local_costmap = None
+        self.keepout_mask = None
 
         # --- Detection tracking ---
         # Each entry: {'pos': np.array, 'normal': (nx,ny), 'type': str,
@@ -489,6 +490,12 @@ class Task2Controller(Node):
             OccupancyGrid,
             "/local_costmap/costmap",
             self._local_costmap_cb,
+            costmap_qos,
+        )
+        self.create_subscription(
+            OccupancyGrid,
+            "/keepout_filter_mask",
+            self._keepout_mask_cb,
             costmap_qos,
         )
         self.create_subscription(String, "/robot_state", self._robot_state_cb, 10)
@@ -804,6 +811,9 @@ class Task2Controller(Node):
 
     def _local_costmap_cb(self, msg: OccupancyGrid):
         self.local_costmap = msg
+
+    def _keepout_mask_cb(self, msg: OccupancyGrid):
+        self.keepout_mask = msg
 
     # ── Dedup helper ──────────────────────────────────────────────────
 
@@ -2359,7 +2369,12 @@ class Task2Controller(Node):
     APPROACH_CLEARANCE_RADIUS_M = 0.28
 
     def _cost_ok_on(
-        self, costmap: OccupancyGrid, x: float, y: float, out_of_bounds_ok: bool
+        self,
+        costmap: OccupancyGrid,
+        x: float,
+        y: float,
+        out_of_bounds_ok: bool,
+        threshold: float = 150,
     ) -> tuple[bool, float | None]:
         mx, my = self._world_to_map(costmap, x, y)
         w, h = costmap.info.width, costmap.info.height
@@ -2381,7 +2396,7 @@ class Task2Controller(Node):
             # known map) should treat unseen ground as blocked.
             return out_of_bounds_ok, None
         median_cost = sorted(costs)[len(costs) // 2]
-        return median_cost < 150, median_cost
+        return median_cost < threshold, median_cost
 
     def _cost_at_goal_ok(self, x: float, y: float) -> bool:
         """Check the goal clears both costmaps.
@@ -2391,7 +2406,19 @@ class Task2Controller(Node):
         actually drive and recover) act on the local costmap, which has its
         own more reactive voxel layer. A goal can look clear on one and not
         the other, so both must agree before we commit to it.
+
+        The keepout mask is checked separately from the live costmap: Nav2's
+        recovery behaviors call clearEntirely on the costmap, which briefly
+        wipes the KeepoutFilter's painted cells until it re-subscribes and
+        repaints — sampling the costmap in that window can read a keepout
+        cell as clear. The mask topic itself is latched and never cleared,
+        so checking it directly is immune to that race.
         """
+        if self.keepout_mask is not None and not self._cost_ok_on(
+            self.keepout_mask, x, y, out_of_bounds_ok=True, threshold=50
+        )[0]:
+            self.get_logger().warn("Approach blocked (keepout mask).")
+            return False
         if self.costmap is not None:
             ok, median_cost = self._cost_ok_on(
                 self.costmap, x, y, out_of_bounds_ok=False
