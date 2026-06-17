@@ -8,6 +8,7 @@ the controller at report time.
 from dataclasses import dataclass, field
 from datetime import date as _date
 from pathlib import Path
+from ament_index_python.packages import get_package_share_directory
 
 from markdown_pdf import MarkdownPdf, Section
 
@@ -121,6 +122,7 @@ table tbody tr:hover {
 # ---------------------------------------------------------------------------
 # ReportBuilder
 # ---------------------------------------------------------------------------
+REPORT_PATH = Path(get_package_share_directory("megatron")) / "assets" / "report.pdf"
 
 
 class ReportBuilder:
@@ -234,13 +236,12 @@ class ReportBuilder:
     def save_pdf(
         self,
         tasks: list,
-        path: str | Path = "/tmp/megatron_report.pdf",
         robot_name: str = "Megatron",
         report_date: str | None = None,
     ) -> Path:
         """Render tasks and write a PDF. Returns the output path."""
         markdown = self.build(tasks, robot_name=robot_name, report_date=report_date)
-        out = Path(path)
+        out = REPORT_PATH
         pdf = MarkdownPdf()
         pdf.add_section(Section(markdown))
         pdf.save(str(out))
