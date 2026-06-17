@@ -124,7 +124,7 @@ class QRReader(Node):
             sr_proto = model_dir / "sr.prototxt"
             sr_model = model_dir / "sr.caffemodel"
 
-            self.detector = cv2.wechat_qrcode_WeChatQRCode(  # pyright: ignore[reportAttributeAccessIssue]
+            self.detector = cv2.wechat_qrcode_WeChatQRCode(  # pyright: ignore[reportAttributeAccessIssue]  # ty: ignore[unresolved-attribute]
                 str(detect_proto),
                 str(detect_model),
                 str(sr_proto),

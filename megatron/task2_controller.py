@@ -9,9 +9,10 @@ by position and queues pending_targets for approach.
 """
 
 import math
+from collections.abc import Sequence
 from enum import Enum, auto
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -123,17 +124,18 @@ def load_waypoints_from_yaml(path):
     for entry in candidates:
         x = y = yaw = None
         if isinstance(entry, dict):
-            pose = entry.get("pose")
-            orient = entry.get("orientation")
+            pose = cast(Sequence[Any], entry.get("pose"))
+            orient = cast(Sequence[Any], entry.get("orientation"))
             if pose and len(pose) >= 2:
                 x, y = float(pose[0]), float(pose[1])
             if orient and len(orient) == 4:
                 yaw = _quaternion_to_yaw(orient)
         elif isinstance(entry, (list, tuple)):
-            if len(entry) >= 2:
-                x, y = float(entry[0]), float(entry[1])
-            if len(entry) >= 3:
-                yaw = float(entry[2])
+            seq = cast(Sequence[Any], entry)
+            if len(seq) >= 2:
+                x, y = float(seq[0]), float(seq[1])
+            if len(seq) >= 3:
+                yaw = float(seq[2])
         if x is None or y is None:
             continue
         out.append((x, y, yaw or 0.0))
@@ -158,7 +160,6 @@ def _normalize_angle(a: float) -> float:
     while a < -math.pi:
         a += 2 * math.pi
     return a
-
 
 
 def _inspection_completion_reason(
@@ -212,6 +213,7 @@ def _parse_qr_task(text: str) -> str | None:
 # Controller node
 # ---------------------------------------------------------------------------
 
+
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.5  # metres — two detections within this are the same object
@@ -220,8 +222,8 @@ class Task2Controller(Node):
     WORKSTATION_SCAN_DISTANCES = {"red": 2.4, "green": 3.0}
     MAX_RETRY_CYCLES = (
         20  # bump distance up to 3× approach_retry_offset before giving up
-    )   
-    WAYPOINT_WAIT_TIME = 0.2 # ms
+    )
+    WAYPOINT_WAIT_TIME = 0.2  # ms
 
     def __init__(self):
         super().__init__("task2_controller")
@@ -234,6 +236,7 @@ class Task2Controller(Node):
         self.declare_parameter("barrel_approach_distance", 0.60)
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.20)
+        self.declare_parameter("approach_stuck_timeout", 15.0)
         self.declare_parameter("manual_mode", False)
         self.declare_parameter("avoidance_blind_distance", 0.40)
         self.declare_parameter("capture_tiles", False)
@@ -304,6 +307,7 @@ class Task2Controller(Node):
         self._last_feedback_distance: float | None = None
         self._last_feedback_time: float | None = None
         self._nav_update = False  # Turn when the navigation needs to be updated
+        self._nav_goal_sent_time: float | None = None
         self._room2_nav_attempt = 0
         self._room2_nav_started: float | None = None
         self._room2_goal_sent = False
@@ -375,14 +379,30 @@ class Task2Controller(Node):
         _model_path = _share / "assets" / "tiles" / "model.yaml"
         _detector_config = DetectorConfig.from_yaml(_model_path)
         _world_ref_root = _ref_root / self._world_name
-        _ref_red = sorted((_world_ref_root / "red").rglob("*.png")) if (_world_ref_root / "red").is_dir() else []
-        _ref_green = sorted((_world_ref_root / "green").rglob("*.png")) if (_world_ref_root / "green").is_dir() else []
+        _ref_red = (
+            sorted((_world_ref_root / "red").rglob("*.png"))
+            if (_world_ref_root / "red").is_dir()
+            else []
+        )
+        _ref_green = (
+            sorted((_world_ref_root / "green").rglob("*.png"))
+            if (_world_ref_root / "green").is_dir()
+            else []
+        )
         if not _ref_red:
-            _ref_red = sorted(p for p in _ref_root.rglob("*.png") if "/red/" in p.as_posix())
+            _ref_red = sorted(
+                p for p in _ref_root.rglob("*.png") if "/red/" in p.as_posix()
+            )
         if not _ref_green:
-            _ref_green = sorted(p for p in _ref_root.rglob("*.png") if "/green/" in p.as_posix())
-        self._tile_detector_red = TileAnomalyDetector.from_paths(_ref_red, _detector_config)
-        self._tile_detector_green = TileAnomalyDetector.from_paths(_ref_green, _detector_config)
+            _ref_green = sorted(
+                p for p in _ref_root.rglob("*.png") if "/green/" in p.as_posix()
+            )
+        self._tile_detector_red = TileAnomalyDetector.from_paths(
+            _ref_red, _detector_config
+        )
+        self._tile_detector_green = TileAnomalyDetector.from_paths(
+            _ref_green, _detector_config
+        )
         self.get_logger().info(
             f"Tile detectors loaded: red={len(_ref_red)} green={len(_ref_green)} refs "
             f"from {_world_ref_root}"
@@ -408,7 +428,9 @@ class Task2Controller(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel_unstamped", 10)
         self.arm_pub = self.create_publisher(String, "/arm_command", 10)
         self._spill_target_pub = self.create_publisher(PointStamped, "/spill_target", 1)
-        self._snapshot_bottom_pub = self.create_publisher(String, "/megatron/snapshot/bottom", 10)
+        self._snapshot_bottom_pub = self.create_publisher(
+            String, "/megatron/snapshot/bottom", 10
+        )
         self.goal_marker_pub = self.create_publisher(MarkerArray, "/goal_markers", 10)
         self.approaching_object_pub = self.create_publisher(
             Marker, "/approaching_object", 10
@@ -520,7 +542,7 @@ class Task2Controller(Node):
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
                     f["label"] = label
-                    
+
                     # if not f.get("approached", False) and self.state == State.PATROL:
                     #     self._requeue_if_not_pending("face", f)
                     return
@@ -553,9 +575,10 @@ class Task2Controller(Node):
                 if (
                     self.current_target is not None
                     and self.current_target.get("type") == "ring"
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) > self.MIN_UPDATE_DISTANCE
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) < self.DEDUP_DISTANCE
-
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    > self.MIN_UPDATE_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    < self.DEDUP_DISTANCE
                 ):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
@@ -573,14 +596,12 @@ class Task2Controller(Node):
                 return
 
         self.get_logger().info(f"New ring ({color}) at ({pos[0]:.2f}, {pos[1]:.2f})")
-        self.found_rings.append(
-            {
-                "type": "ring",
-                "pos": pos,
-                "color": color,
-                "last_seen": self.get_clock().now(),
-            }
-        )
+        self.found_rings.append({
+            "type": "ring",
+            "pos": pos,
+            "color": color,
+            "last_seen": self.get_clock().now(),
+        })
         self.ring_counts[color] = self.ring_counts.get(color, 0) + 1
 
     def _cylinder_cb(self, msg: PoseStamped):
@@ -595,20 +616,22 @@ class Task2Controller(Node):
                 if (
                     self.current_target is not None
                     and self.current_target.get("type") == "barrel"
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) > self.MIN_UPDATE_DISTANCE
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) < self.DEDUP_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    > self.MIN_UPDATE_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    < self.DEDUP_DISTANCE
                 ):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
                     self._nav_update = True
                     # self.get_logger().info("Set flag Nav Update to TRUE from barrel cb")
-                
+
                 # elif np.linalg.norm(pos - b["pos"]) < self.DEDUP_DISTANCE:
-                    # self.get_logger().info(
-                    #     f"Requing barrel {b['color']} since the new detected location is more far away"
-                    # )
-                    # if not f.get("approached", False) and self.state == State.PATROL:
-                    #     self._requeue_if_not_pending("face", f)
+                # self.get_logger().info(
+                #     f"Requing barrel {b['color']} since the new detected location is more far away"
+                # )
+                # if not f.get("approached", False) and self.state == State.PATROL:
+                #     self._requeue_if_not_pending("face", f)
                 #     return
                 # if (
                 #     b["orientation"] == "horizontal"
@@ -638,9 +661,10 @@ class Task2Controller(Node):
 
     def _workstation_cb(self, msg: Marker):
         color = msg.ns  # "red" or "green"
-        self.workstation_poses[color] = np.array(
-            [msg.pose.position.x, msg.pose.position.y]
-        )
+        self.workstation_poses[color] = np.array([
+            msg.pose.position.x,
+            msg.pose.position.y,
+        ])
         # self.get_logger().info(
         #     f"Workstation '{color}' at ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
         # )
@@ -699,9 +723,8 @@ class Task2Controller(Node):
     def _top_camera_cb(self, msg: Image):
         frame = self._cv_bridge.imgmsg_to_cv2(msg, "bgr8")
         self._last_top_frame = frame
-        self._last_top_stamp_ns = (
-            int(msg.header.stamp.sec) * 1_000_000_000
-            + int(msg.header.stamp.nanosec)
+        self._last_top_stamp_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(
+            msg.header.stamp.nanosec
         )
         if self.state == State.INSPECT_WORKSTATION:
             try:
@@ -863,7 +886,6 @@ class Task2Controller(Node):
         if self._nav_aborted():
             self.get_logger().warn(f"Waypoint {self.waypoint_index} aborted, skipping.")
 
-        
         self.waypoint_index += 1
 
         if self.waypoint_index >= len(self.waypoints):
@@ -919,6 +941,12 @@ class Task2Controller(Node):
             return
 
         if not self._is_nav_complete():
+            if self._approach_is_stuck():
+                self.get_logger().warn(
+                    "Nav2 stuck recovering on approach goal — cancelling and resending."
+                )
+                self._cancel_nav()
+                self._handle_approach_failure()
             return
 
         if self._nav_succeeded():
@@ -929,20 +957,37 @@ class Task2Controller(Node):
 
         if self._nav_aborted():
             self.get_logger().info("approach aborted resending approach")
-            self._approach_attempt += 1
-            if self.current_target is not None:
-                if not self._send_approach(self.current_target, self._approach_attempt):
-                    self.get_logger().warn(
-                        "All approach candidates exhausted — re-queuing target."
-                    )
-                    self.current_target["approached"] = False
-                    self.pending_targets.append(self.current_target)
-                    self.current_target = None
-                    if self._patrol_complete:
-                        self._next_post_patrol_target()
-                    else:
-                        self._transition(State.PATROL)
-                        self._send_next_waypoint()
+            self._handle_approach_failure()
+
+    def _approach_is_stuck(self) -> bool:
+        """True if the in-flight approach goal has been pending too long.
+
+        Nav2's own recovery behaviours (spin/backup) can loop forever if the
+        robot is wedged against an obstacle, never returning a terminal
+        status — so we time out independently instead of waiting on
+        _nav_aborted()/_nav_succeeded().
+        """
+        if self._nav_goal_sent_time is None:
+            return False
+        timeout = cast(float, self.get_parameter("approach_stuck_timeout").value)
+        elapsed = self.get_clock().now().nanoseconds / 1e9 - self._nav_goal_sent_time
+        return elapsed > timeout
+
+    def _handle_approach_failure(self):
+        self._approach_attempt += 1
+        if self.current_target is not None:
+            if not self._send_approach(self.current_target, self._approach_attempt):
+                self.get_logger().warn(
+                    "All approach candidates exhausted — re-queuing target."
+                )
+                self.current_target["approached"] = False
+                self.pending_targets.append(self.current_target)
+                self.current_target = None
+                if self._patrol_complete:
+                    self._next_post_patrol_target()
+                else:
+                    self._transition(State.PATROL)
+                    self._send_next_waypoint()
 
     def _send_approach(self, target: dict, attempt: int) -> bool:
         """Try candidate at `attempt`, costmap-skip forward if blocked.
@@ -951,7 +996,7 @@ class Task2Controller(Node):
         retry distances have been exhausted.
         """
         _type = target["type"]
-        self.get_logger().info(f"Sending approach to {_type} at {target["pos"]}")
+        self.get_logger().info(f"Sending approach to {_type} at {target['pos']}")
 
         if _type == "face":
             n_candidates = 8
@@ -961,8 +1006,9 @@ class Task2Controller(Node):
                 return self._face_approach_candidates(
                     target["pos"], target["normal"], distance=d
                 )
+
         else:
-            n_candidates = 1
+            n_candidates = len(self.BARREL_FAN_DEGREES)
             base_dist = cast(
                 float, self.get_parameter("barrel_approach_distance").value
             )
@@ -1038,8 +1084,16 @@ class Task2Controller(Node):
             for i, o in enumerate(offsets)
         ]
 
+    BARREL_FAN_DEGREES = [0, 15, -15]  # barrels are cylindrical — only need a small fan
+
     def _barrel_approach_candidates(self, target: dict, distance=None):
-        """Single approach candidate — position-based (no fanout)."""
+        """Small fan of candidates around the primary approach direction.
+
+        Barrels are radially symmetric, so unlike faces we don't need a wide
+        8-way fan — a few small angular offsets around the direction the
+        barrel was first seen from are enough to route around a locally
+        blocked costmap cell.
+        """
         pos = target["pos"]
         dist = (
             distance
@@ -1067,10 +1121,15 @@ class Task2Controller(Node):
                     dx, dy = 1.0, 0.0
             else:
                 dx, dy = 1.0, 0.0
-            ax = px - dx * dist
-            ay = py - dy * dist
-            yaw = math.atan2(dy, dx)
-            return [(ax, ay, yaw)]
+            base_angle = math.atan2(dy, dx)
+            return [
+                (
+                    px - math.cos(base_angle + o) * dist,
+                    py - math.sin(base_angle + o) * dist,
+                    math.atan2(math.sin(base_angle + o), math.cos(base_angle + o)),
+                )
+                for o in (math.radians(d) for d in self.BARREL_FAN_DEGREES)
+            ]
 
         # Horizontal barrel: perpendicular to axis + lateral shift
         q = target.get("quat")
@@ -1088,14 +1147,20 @@ class Task2Controller(Node):
         if rx is None and self.current_pose is not None:
             rx, ry = self.current_pose.position.x, self.current_pose.position.y
         if rx is not None and ry is not None:
-            if (ry - px) * perp_x + (ry - py) * perp_y < 0:
+            if (rx - px) * perp_x + (ry - py) * perp_y < 0:
                 perp_x, perp_y = -perp_x, -perp_y
-        # Lateral shift to robot-right (cross product of approach direction and Z-up)
-        right_x = -perp_y  # rotate approach 90° CW in XY
-        right_y = perp_x
-        approach_x = px + perp_x * dist + right_x * lateral
-        approach_y = py + perp_y * dist + right_y * lateral
-        yaw = math.atan2(-perp_y, -perp_x)
+        base_angle = math.atan2(perp_y, perp_x)
+        candidates = []
+        for d in self.BARREL_FAN_DEGREES:
+            angle = base_angle + math.radians(d)
+            cx, cy = math.cos(angle), math.sin(angle)
+            # Lateral shift to robot-right (cross product of approach direction and Z-up)
+            right_x, right_y = -cy, cx  # rotate approach 90° CW in XY
+            approach_x = px + cx * dist + right_x * lateral
+            approach_y = py + cy * dist + right_y * lateral
+            yaw = math.atan2(-cy, -cx)
+            candidates.append((approach_x, approach_y, yaw))
+        return candidates
         return [(approach_x, approach_y, yaw)]
 
     # ── INTERACT ──────────────────────────────────────────────────────
@@ -1114,7 +1179,7 @@ class Task2Controller(Node):
             self._qr_task_raw = None
 
         elif target["type"] == "barrel":
-            self.speaker.speak(f"Inspecting {target["color"]} barrel.")
+            self.speaker.speak(f"Inspecting {target['color']} barrel.")
             self._spill_future = None
             self._spill_start_time = None
 
@@ -1179,17 +1244,15 @@ class Task2Controller(Node):
             else:
                 self.speaker.speak("Barrel OK.")
 
-            self.barrel_report.append(
-                {
-                    "id": len(self.barrel_report) + 1,
-                    "color": target.get("color", "unknown"),
-                    "orientation": orientation,
-                    "leaking": leaking,
-                    "spill_count": spill_count,
-                    "spill_threshold": 4000,
-                    "pos": target["pos"].tolist(),
-                }
-            )
+            self.barrel_report.append({
+                "id": len(self.barrel_report) + 1,
+                "color": target.get("color", "unknown"),
+                "orientation": orientation,
+                "leaking": leaking,
+                "spill_count": spill_count,
+                "spill_threshold": 4000,
+                "pos": target["pos"].tolist(),
+            })
             self._mark_approached(target)
             self._resume_patrol()
             return
@@ -1214,7 +1277,11 @@ class Task2Controller(Node):
             rclpy.shutdown()
             return
 
-        if task_token is not None and task_token != "nothing" and task_token != "emergency":
+        if (
+            task_token is not None
+            and task_token != "nothing"
+            and task_token != "emergency"
+        ):
             requestor = (target.get("label") or "Unknown") if target else "Unknown"
             if "defects" in task_token:
                 self._anomaly_requestor = requestor
@@ -1223,7 +1290,9 @@ class Task2Controller(Node):
                     self.workstation_color = "red"
                 elif "green" in task_token:
                     self.workstation_color = "green"
-                self.get_logger().info(f"Workstation color set to '{self.workstation_color}' from QR.")
+                self.get_logger().info(
+                    f"Workstation color set to '{self.workstation_color}' from QR."
+                )
 
             elif task_token == "barrels":
                 self._barrel_requestor = requestor
@@ -1240,7 +1309,7 @@ class Task2Controller(Node):
             self.speaker.speak("OK, no task for me. Continuing patrol.")
         else:
             self.speaker.speak("Understood.")
-        
+
         self._mark_approached(target)
         self._resume_patrol()
 
@@ -1285,17 +1354,19 @@ class Task2Controller(Node):
                             f"at ({b['pos'][0]:.2f}, {b['pos'][1]:.2f})"
                         )
 
-                if self.pending_targets: #pending targets is not empty
+                if self.pending_targets:  # pending targets is not empty
                     self.speaker.speak("Inspecting barrels")
                     self._next_post_patrol_target()
                     return
-                else: # pending targets are empty, which means None barrels were found
-                    # continue with the workstation task 
+                else:  # pending targets are empty, which means None barrels were found
+                    # continue with the workstation task
                     pass
-                    
-            
+
             # workstation
-            if self.workstation_color is not None and self.workstation_color in self.workstation_poses:
+            if (
+                self.workstation_color is not None
+                and self.workstation_color in self.workstation_poses
+            ):
                 color = self.workstation_color
                 self.get_logger().info(
                     f"Post-patrol done — starting {color} workstation inspection."
@@ -1549,15 +1620,13 @@ class Task2Controller(Node):
                         if self._capture_tiles:
                             self._capture_current_tile(self._last_top_frame)
                         _result = self._score_tile(self._last_top_frame)
-                        self.tile_results.append(
-                            {
-                                "station": self._inspection_color,
-                                "tile_id": self._tile_index,
-                                "status": _result.status,
-                                "defect_area": _result.defect_area,
-                                "defect_ratio": _result.defect_ratio,
-                            }
-                        )
+                        self.tile_results.append({
+                            "station": self._inspection_color,
+                            "tile_id": self._tile_index,
+                            "status": _result.status,
+                            "defect_area": _result.defect_area,
+                            "defect_ratio": _result.defect_ratio,
+                        })
                         self._tile_index += 1
                         self._tile_scored_this_pause = True
                         self.get_logger().info(
@@ -1683,9 +1752,13 @@ class Task2Controller(Node):
         """Write a PDF inspection report via ReportBuilder."""
         tasks = []
         if self.ring_task:
-            tasks.append(RingTask(requestor=self._ring_requestor, counts=self.ring_counts))
+            tasks.append(
+                RingTask(requestor=self._ring_requestor, counts=self.ring_counts)
+            )
         if self.barrel_task:
-            tasks.append(BarrelTask(requestor=self._barrel_requestor, results=self.barrel_report))
+            tasks.append(
+                BarrelTask(requestor=self._barrel_requestor, results=self.barrel_report)
+            )
         if self.anomaly_task:
             tasks.append(
                 AnomalyTask(
@@ -1809,7 +1882,9 @@ class Task2Controller(Node):
         current_yaw = self._current_yaw()
         if current_yaw is None:
             return None
-        body_angle = _normalize_angle(self._belt_world_perp() - current_yaw - math.pi / 2)
+        body_angle = _normalize_angle(
+            self._belt_world_perp() - current_yaw - math.pi / 2
+        )
         dist = self._median_scan_distance(body_angle, math.radians(8.0))
         if dist is None:
             return None
@@ -1913,7 +1988,7 @@ class Task2Controller(Node):
         box = quad_from_contour(best)
         if box is None:
             box = cv2.boxPoints(cv2.minAreaRect(best))
-        box[:, 1] += crop_y
+        box[:, 1] += crop_y  # ty: ignore[unsupported-operator]  # ndarray += int is valid at runtime; stub lacks this overload
         return box.astype(np.float32), full_mask
 
     def _score_tile(self, frame: np.ndarray) -> TileAnomalyResult:
@@ -1930,7 +2005,9 @@ class Task2Controller(Node):
         except Exception:
             pass
         if box is None:
-            return TileAnomalyResult(status="UNKNOWN", reason="tile contour not detected")
+            return TileAnomalyResult(
+                status="UNKNOWN", reason="tile contour not detected"
+            )
         canonical = warp_tile(frame, box)
         try:
             self._ws_debug_warped_pub.publish(
@@ -1950,7 +2027,9 @@ class Task2Controller(Node):
     def _capture_current_tile(self, frame: np.ndarray) -> None:
         box, _ = self._detect_tile(frame)
         if box is None:
-            self.get_logger().warn("Tile capture skipped: contour was lost during pause")
+            self.get_logger().warn(
+                "Tile capture skipped: contour was lost during pause"
+            )
             return
 
         pose = None
@@ -2040,6 +2119,7 @@ class Task2Controller(Node):
         self._nav_ever_sent = True
         self._nav_rejected = False
         self._nav_update = False
+        self._nav_goal_sent_time = self.get_clock().now().nanoseconds / 1e9
         seq = self._nav_seq
         future = self.nav_client.send_goal_async(
             goal, feedback_callback=self._nav_feedback_cb
@@ -2075,6 +2155,7 @@ class Task2Controller(Node):
         self._nav_update = False
         self._last_feedback_distance = None
         self._last_feedback_time = None
+        self._nav_goal_sent_time = None
 
     def _is_near_goal(self) -> bool:
         if self._last_feedback_distance is None or self._last_feedback_time is None:
@@ -2244,7 +2325,7 @@ class Task2Controller(Node):
 
     # ── Costmap check ──────────────────────────────────────────────────
 
-    def _cost_at_goal_ok(self, x: float, y: float, kernel = 5) -> bool:
+    def _cost_at_goal_ok(self, x: float, y: float, kernel=5) -> bool:
         if self.costmap is None:
             return True
         mx, my = self._world_to_map(x, y)
