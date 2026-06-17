@@ -66,6 +66,7 @@ class State(Enum):
     PATROL = auto()
     APPROACH_TARGET = auto()
     INTERACT = auto()
+    RETREATING = auto()
     INSPECT_WORKSTATION = auto()
     NAVIGATE_ROOM2_ENTRY = auto()
     FOLLOW_BLUE_LINE = auto()
@@ -225,6 +226,18 @@ class Task2Controller(Node):
     )
     WAYPOINT_WAIT_TIME = 0.2  # ms
 
+    # Retreat (Problem A): when an approach parks tighter than this strict
+    # cost threshold, back straight out along the line Nav2 just drove
+    # before sending the next (possibly far-away) goal — avoids handing
+    # Nav2's RegulatedPurePursuitController a near-180° goal that would
+    # trigger its own rotate-to-heading in the same tight corner.
+    RETREAT_TIGHT_COST_THRESHOLD = 80
+    RETREAT_DISTANCE_M = 0.10  # 0.35
+    RETREAT_SPEED = -0.08
+    RETREAT_MIN_REAR_CLEARANCE_M = 0.15
+    RETREAT_TIMEOUT_S = 8.0
+    REAR_SCAN_ANGLE = math.pi / 2  # opposite of the front cone used elsewhere (-pi/2)
+
     def __init__(self):
         super().__init__("task2_controller")
 
@@ -344,6 +357,11 @@ class Task2Controller(Node):
         self._approach_attempt = 0
         self._patrol_complete = False
         self._waypoint_arrive_time: float | None = None
+
+        # --- Retreat tracking (Problem A) ---
+        self._tight_parking = False
+        self._retreat_start_xy: np.ndarray | None = None
+        self._retreat_start_time: float | None = None
 
         # --- Interact tracking ---
         self._qr_task_raw: str | None = None
@@ -851,6 +869,8 @@ class Task2Controller(Node):
             # self._publish_approach_state()
         elif self.state == State.INTERACT:
             self._handle_interact()
+        elif self.state == State.RETREATING:
+            self._handle_retreating()
         elif self.state == State.INSPECT_WORKSTATION:
             self._handle_inspection()
         elif self.state == State.NAVIGATE_ROOM2_ENTRY:
@@ -973,6 +993,7 @@ class Task2Controller(Node):
 
         if self._nav_succeeded():
             self._publish_approaching_object(0.0, 0.0, none=True)
+            self._tight_parking = self._is_parking_tight()
             self._transition(State.INTERACT)
             self._start_interact()
             return
@@ -1360,11 +1381,89 @@ class Task2Controller(Node):
 
     def _resume_patrol(self):
         self.current_target = None
+        if self._tight_parking:
+            self._tight_parking = False
+            self._start_retreat()
+            return
         if self._patrol_complete:
             self._next_post_patrol_target()
         else:
             self._transition(State.PATROL)
             self._send_next_waypoint()
+
+    # ── RETREATING ────────────────────────────────────────────────────
+
+    def _is_parking_tight(self) -> bool:
+        """True if the just-parked pose is tighter than the strict threshold.
+
+        `_cost_at_goal_ok` accepts goals up to cost 150 (raised from 80 to
+        let the robot park close enough to read QR codes). That means some
+        accepted parks are right against a wall/corner — too tight for
+        Nav2's own Spin/BackUp recovery to execute later if the next goal
+        requires a sharp turn-and-exit. Re-check the actual settled pose
+        against the old strict threshold so we know whether to retreat
+        before sending the next goal.
+        """
+        xy = self._current_xy()
+        if xy is None:
+            return False
+        x, y = float(xy[0]), float(xy[1])
+        threshold = self.RETREAT_TIGHT_COST_THRESHOLD
+        if self.costmap is not None:
+            ok, _ = self._cost_ok_on(
+                self.costmap, x, y, out_of_bounds_ok=False, threshold=threshold
+            )
+            if not ok:
+                return True
+        if self.local_costmap is not None:
+            ok, _ = self._cost_ok_on(
+                self.local_costmap, x, y, out_of_bounds_ok=True, threshold=threshold
+            )
+            if not ok:
+                return True
+        return False
+
+    def _start_retreat(self):
+        self._retreat_start_xy = self._current_xy()
+        self._retreat_start_time = self.get_clock().now().nanoseconds / 1e9
+        self.get_logger().info(
+            "Tight parking detected — retreating before sending next goal."
+        )
+        self._transition(State.RETREATING)
+
+    def _handle_retreating(self):
+        now = self.get_clock().now().nanoseconds / 1e9
+        elapsed = now - (self._retreat_start_time or now)
+        current_xy = self._current_xy()
+        traveled = (
+            float(np.linalg.norm(current_xy - self._retreat_start_xy))
+            if (current_xy is not None and self._retreat_start_xy is not None)
+            else 0.0
+        )
+
+        if traveled >= self.RETREAT_DISTANCE_M or elapsed > self.RETREAT_TIMEOUT_S:
+            self._stop_cmd_vel()
+            self.get_logger().info(
+                f"Retreat complete: traveled={traveled:.2f}m elapsed={elapsed:.1f}s"
+            )
+            self._resume_patrol()
+            return
+
+        rear_clearance = self._min_scan_distance(
+            self.REAR_SCAN_ANGLE, math.radians(20.0)
+        )
+        if (
+            rear_clearance is not None
+            and rear_clearance < self.RETREAT_MIN_REAR_CLEARANCE_M
+        ):
+            self._stop_cmd_vel()
+            self.get_logger().warn(
+                f"Retreat stopped early: rear clearance {rear_clearance:.2f}m"
+            )
+            self._resume_patrol()
+            return
+
+        self._send_cmd_vel(self.RETREAT_SPEED, 0.0)
 
     def _next_post_patrol_target(self):
         if self.pending_targets:
@@ -2414,9 +2513,12 @@ class Task2Controller(Node):
         cell as clear. The mask topic itself is latched and never cleared,
         so checking it directly is immune to that race.
         """
-        if self.keepout_mask is not None and not self._cost_ok_on(
-            self.keepout_mask, x, y, out_of_bounds_ok=True, threshold=50
-        )[0]:
+        if (
+            self.keepout_mask is not None
+            and not self._cost_ok_on(
+                self.keepout_mask, x, y, out_of_bounds_ok=True, threshold=50
+            )[0]
+        ):
             self.get_logger().warn("Approach blocked (keepout mask).")
             return False
         if self.costmap is not None:
