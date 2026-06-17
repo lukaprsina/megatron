@@ -44,6 +44,7 @@ from std_srvs.srv import Trigger
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
 from visualization_msgs.msg import Marker, MarkerArray
 
+from megatron.report import AnomalyTask, BarrelTask, ReportBuilder, RingTask
 from megatron.speech import Speaker
 from megatron.tile_anomaly import (
     DetectorConfig,
@@ -210,7 +211,6 @@ def _parse_qr_task(text: str) -> str | None:
 # Controller node
 # ---------------------------------------------------------------------------
 
-
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.5  # metres — two detections within this are the same object
@@ -219,7 +219,8 @@ class Task2Controller(Node):
     WORKSTATION_SCAN_DISTANCES = {"red": 2.4, "green": 3.0}
     MAX_RETRY_CYCLES = (
         20  # bump distance up to 3× approach_retry_offset before giving up
-    )
+    )   
+    WAYPOINT_WAIT_TIME = 0.2 # ms
 
     def __init__(self):
         super().__init__("task2_controller")
@@ -320,6 +321,9 @@ class Task2Controller(Node):
 
         # --- Task assignment (from person dialogue) ---
         self.assigned_task: str | None = None
+        self._ring_requestor: str = "Unknown"
+        self._barrel_requestor: str = "Unknown"
+        self._anomaly_requestor: str = "Unknown"
         self.workstation_poses: dict[str, np.ndarray] = {}
 
         # --- Report data ---
@@ -331,11 +335,14 @@ class Task2Controller(Node):
         self.current_target: dict | None = None
         self._approach_attempt = 0
         self._patrol_complete = False
+        self._waypoint_arrive_time: float | None = None
 
         # --- Interact tracking ---
         self._qr_task_raw: str | None = None
+        self.ring_task = False
         self.barrel_task = False
         self.barrel_task_done = False
+        self.anomaly_task = False
         self.workstation_color: str | None = None  # "red" or "green" from QR
 
         # --- Inspection state ---
@@ -400,6 +407,7 @@ class Task2Controller(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel_unstamped", 10)
         self.arm_pub = self.create_publisher(String, "/arm_command", 10)
         self._spill_target_pub = self.create_publisher(PointStamped, "/spill_target", 1)
+        self._snapshot_bottom_pub = self.create_publisher(String, "/megatron/snapshot/bottom", 10)
         self.goal_marker_pub = self.create_publisher(MarkerArray, "/goal_markers", 10)
         self.approaching_object_pub = self.create_publisher(
             Marker, "/approaching_object", 10
@@ -814,6 +822,8 @@ class Task2Controller(Node):
         self.robot_state_pub.publish(msg)
         if new_state == State.PATROL:
             self._pub_arm("look_down")
+        if new_state == State.FOLLOW_BLUE_LINE:
+            self._generate_report()
         if new_state == State.DONE:
             self._cancel_nav()
             self.cmd_vel_pub.publish(Twist())
@@ -841,9 +851,18 @@ class Task2Controller(Node):
         if not self._is_nav_complete():
             return
 
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if self._waypoint_arrive_time is None:
+            self._waypoint_arrive_time = now
+            return
+        if now - self._waypoint_arrive_time < self.WAYPOINT_WAIT_TIME:
+            return
+        self._waypoint_arrive_time = None
+
         if self._nav_aborted():
             self.get_logger().warn(f"Waypoint {self.waypoint_index} aborted, skipping.")
 
+        
         self.waypoint_index += 1
 
         if self.waypoint_index >= len(self.waypoints):
@@ -1094,7 +1113,7 @@ class Task2Controller(Node):
             self._qr_task_raw = None
 
         elif target["type"] == "barrel":
-            self.speaker.speak("Inspecting barrel.")
+            self.speaker.speak(f"Inspecting {target["color"]} barrel.")
             self._spill_future = None
             self._spill_start_time = None
 
@@ -1151,6 +1170,10 @@ class Task2Controller(Node):
             # vertical barrels and error cases fall through with leaking=False
 
             if leaking:
+                barrel_id = len(self.barrel_report) + 1
+                msg = String()
+                msg.data = f"{barrel_id}_leak"
+                self._snapshot_bottom_pub.publish(msg)
                 self.speaker.speak("Alert! Alert! This barrel is leaking!")
             else:
                 self.speaker.speak("Barrel OK.")
@@ -1191,7 +1214,10 @@ class Task2Controller(Node):
             return
 
         if task_token is not None and task_token != "nothing" and task_token != "emergency":
+            requestor = (target.get("label") or "Unknown") if target else "Unknown"
             if "defects" in task_token:
+                self._anomaly_requestor = requestor
+                self.anomaly_task = True
                 if "red" in task_token:
                     self.workstation_color = "red"
                 elif "green" in task_token:
@@ -1199,7 +1225,12 @@ class Task2Controller(Node):
                 self.get_logger().info(f"Workstation color set to '{self.workstation_color}' from QR.")
 
             elif task_token == "barrels":
+                self._barrel_requestor = requestor
                 self.barrel_task = True
+
+            elif task_token == "rings":
+                self._ring_requestor = requestor
+                self.ring_task = True
 
             self.speaker.speak(
                 f"OK. I will {task_token.replace('_', ' ').replace('defects', 'detect anomalies on the')}."
@@ -1637,8 +1668,7 @@ class Task2Controller(Node):
             task_token = _parse_qr_task(self._qr_task_raw)
             if task_token == "report":
                 self._qr_task_raw = None
-                self.get_logger().info("CTO QR received — generating report.")
-                self._generate_report()
+                self.get_logger().info("CTO QR received — mission complete.")
                 self._transition(State.DONE)
                 self.speaker.speak("Inspection complete. Report delivered.")
 
@@ -1649,30 +1679,22 @@ class Task2Controller(Node):
     # ── Report ────────────────────────────────────────────────────────
 
     def _generate_report(self):
-        """Write a plain-text inspection report."""
-        lines = ["# Task 2 Inspection Report\n"]
-        lines.append("## Ring Counts")
-        for color, count in sorted(self.ring_counts.items()):
-            lines.append(f"  {color}: {count}")
-        lines.append("\n## Barrel Inspection")
-        for b in self.barrel_report:
-            leak = "LEAKING" if b["leaking"] else "OK"
-            lines.append(f"  #{b['id']} {b['color']} {b['orientation']} — {leak}")
-        lines.append("\n## Tile Anomalies")
-        for t in self.tile_results:
-            lines.append(
-                f"  {t['station']} tile {t['tile_id']}: {t['status']} "
-                f"(area={t['defect_area']} ratio={t['defect_ratio']:.3f})"
+        """Write a PDF inspection report via ReportBuilder."""
+        tasks = []
+        if self.ring_task:
+            tasks.append(RingTask(requestor=self._ring_requestor, counts=self.ring_counts))
+        if self.barrel_task:
+            tasks.append(BarrelTask(requestor=self._barrel_requestor, results=self.barrel_report))
+        if self.anomaly_task:
+            tasks.append(
+                AnomalyTask(
+                    requestor=self._anomaly_requestor,
+                    color=self._inspection_color or "unknown",
+                    results=self.tile_results,
+                )
             )
-        report_text = "\n".join(lines)
-        self.get_logger().info("\n" + report_text)
         try:
-            import os
-            import tempfile
-
-            path = os.path.join(tempfile.gettempdir(), "megatron_report.txt")
-            with open(path, "w") as fh:
-                fh.write(report_text)
+            path = ReportBuilder().save_pdf(tasks)
             self.get_logger().info(f"Report written to {path}")
         except Exception as e:
             self.get_logger().error(f"Report write failed: {e}")
