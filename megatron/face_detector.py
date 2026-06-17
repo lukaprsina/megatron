@@ -48,7 +48,7 @@ class FaceDetectorNode(Node):
         self.declare_parameter("device", "")
         self.declare_parameter("confidence_threshold", 0.5)
         self.declare_parameter("confirmation_count", 6)
-        self.declare_parameter("dedup_distance", 0.5)
+        self.declare_parameter("dedup_distance", 1)
         self.declare_parameter("min_inference_period", 0.2)
         self.declare_parameter("roi_shrink", 0.3)
         self.declare_parameter("track_max_age", 30.0)
