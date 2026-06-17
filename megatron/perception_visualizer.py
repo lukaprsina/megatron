@@ -228,6 +228,7 @@ class PerceptionVisualizer(Node):
             cv2.imshow(self.WINDOW_NAME, debug_canvas)
             cv2.waitKey(1)
 
+
     # --- Canvas construction -----------------------------------------------
 
     def _build_header(self, width: int) -> np.ndarray:
