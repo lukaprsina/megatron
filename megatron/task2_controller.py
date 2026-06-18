@@ -1963,7 +1963,7 @@ class Task2Controller(Node):
                 )
             )
         try:
-            path = ReportBuilder().save_pdf(tasks)
+            path = ReportBuilder(logger = self.get_logger()).save_pdf(tasks)
             self.get_logger().info(f"Report written to {path}")
         except Exception as e:
             self.get_logger().error(f"Report write failed: {e}")
