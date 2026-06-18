@@ -8,8 +8,8 @@ the controller at report time.
 from dataclasses import dataclass, field
 from datetime import date as _date
 from pathlib import Path
-from ament_index_python.packages import get_package_share_directory
 
+from ament_index_python.packages import get_package_share_directory
 from markdown_pdf import MarkdownPdf, Section
 
 # ---------------------------------------------------------------------------
@@ -50,8 +50,8 @@ class AnomalyTask:
         return sum(1 for r in self.results if r.get("status") == "OK")
 
     @property
-    def nok_count(self) -> int:
-        return sum(1 for r in self.results if r.get("status") == "NOK")
+    def defect_count(self) -> int:
+        return sum(1 for r in self.results if r.get("status") == "DEFECT")
 
     @property
     def total(self) -> int:
@@ -123,9 +123,14 @@ table tbody tr:hover {
 # ReportBuilder
 # ---------------------------------------------------------------------------
 REPORT_PATH = Path(get_package_share_directory("megatron")) / "assets" / "report.pdf"
+SNAPSHOT_DIR = Path(get_package_share_directory("megatron")) / "assets" / "snapshots"
 
 
 class ReportBuilder:
+    
+    def __init__(self, logger):
+        self.logger = logger
+
     def build(
         self,
         tasks: list,
@@ -174,6 +179,10 @@ class ReportBuilder:
         lines.append("---\n")
         return lines
 
+    def _leak_image_path(self, barrel_id) -> Path | None:
+        path = SNAPSHOT_DIR / f"{barrel_id}_leak.png"
+        return path if path.is_file() else None
+
     def _barrel_section(self, task: BarrelTask) -> list[str]:
         lines = ["## Task: Barrel Inspection\n"]
         lines.append(f"**Requested by:** {task.requestor}  ")
@@ -200,6 +209,16 @@ class ReportBuilder:
                 )
             lines.append("</tbody></table>\n")
 
+            for b in task.results:
+                if not b.get("leaking"):
+                    continue
+                image_path = self._leak_image_path(b.get("id", "?"))
+                if image_path is None:
+                    self.logger.info(f"image path is None for barrel_id {b.get('id')}")
+                    continue
+                lines.append(f"**ID: {b.get('id', '?')}** ")
+                lines.append(f'<img src="{image_path}" width="100">\n')
+
         lines.append("---\n")
         return lines
 
@@ -207,7 +226,7 @@ class ReportBuilder:
         lines = [f"## Task: Anomaly Detection ({task.color.capitalize()} belt)\n"]
         lines.append(f"**Requested by:** {task.requestor}  ")
         lines.append(f"**Tiles inspected:** {task.total}  ")
-        lines.append(f"**OK:** {task.ok_count}  **NOK:** {task.nok_count}\n")
+        lines.append(f"**OK:** {task.ok_count}  **DEFECT:** {task.defect_count}\n")
 
         if task.results:
             lines.append(
@@ -243,6 +262,9 @@ class ReportBuilder:
         markdown = self.build(tasks, robot_name=robot_name, report_date=report_date)
         out = REPORT_PATH
         pdf = MarkdownPdf()
-        pdf.add_section(Section(markdown))
+        # root="/" so absolute <img src> paths (snapshot files) resolve —
+        # PyMuPDF's Archive treats Section's default root "." as the only
+        # base for resolving src paths and otherwise drops the image silently.
+        pdf.add_section(Section(markdown, root="/"))
         pdf.save(str(out))
         return out
