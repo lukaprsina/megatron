@@ -2552,6 +2552,16 @@ class Task2Controller(Node):
     # rejected but a true collision-risk cell still does.
     FOOTPRINT_EDGE_COST_THRESHOLD = 150
 
+    # Sampling radius used for the off-center footprint points. Deliberately
+    # much smaller than APPROACH_CLEARANCE_RADIUS_M (0.28): that radius is
+    # tuned for "is the broad neighborhood around the candidate's center
+    # navigable," but an edge point's whole job is "is the cell right here,
+    # where the robot's body will actually be, lethal." A 0.28m disc spaced
+    # only FOOTPRINT_CHECK_RADIUS_M=0.22 from the center overlaps the
+    # center's own disc almost entirely, diluting the edge check back into
+    # the same broad-area average it was meant to catch a failure of.
+    FOOTPRINT_EDGE_SAMPLE_RADIUS_M = 0.06
+
     def _footprint_sample_points(
         self, x: float, y: float, yaw: float
     ) -> list[tuple[float, float]]:
@@ -2585,18 +2595,27 @@ class Task2Controller(Node):
         y: float,
         out_of_bounds_ok: bool,
         threshold: float = 150,
+        radius_m: float | None = None,
+        stat: str = "median",
     ) -> tuple[bool, float | None]:
         mx, my = self._world_to_map(costmap, x, y)
         w, h = costmap.info.width, costmap.info.height
-        half = max(1, round(self.APPROACH_CLEARANCE_RADIUS_M / costmap.info.resolution))
+        radius = radius_m if radius_m is not None else self.APPROACH_CLEARANCE_RADIUS_M
+        half = max(1, round(radius / costmap.info.resolution))
         costs = []
 
         for dy in range(-half, half + 1):
             for dx in range(-half, half + 1):
                 nx_, ny_ = mx + dx, my + dy
                 if 0 <= nx_ < w and 0 <= ny_ < h:
-                    c = costmap.data[ny_ * w + nx_]
-                    if c >= 0:
+                    # OccupancyGrid.data is int8, but Nav2 costmap publishers
+                    # write the raw unsigned cost (0-255) into it — any cost
+                    # >= 128 wraps to negative on deserialization (e.g. 254
+                    # arrives as -2). Mask back to the unsigned byte before
+                    # using it, or every high-cost/lethal cell silently
+                    # vanishes from `costs` instead of being counted as bad.
+                    c = costmap.data[ny_ * w + nx_] & 0xFF
+                    if c != 255:  # 255 = NO_INFORMATION, not a real cost
                         costs.append(c)
         if not costs:
             # No cells in this costmap cover the point at all — e.g. the
@@ -2605,8 +2624,8 @@ class Task2Controller(Node):
             # "blocked"; only the global costmap (which covers the whole
             # known map) should treat unseen ground as blocked.
             return out_of_bounds_ok, None
-        median_cost = sorted(costs)[len(costs) // 2]
-        return median_cost < threshold, median_cost
+        cost = max(costs) if stat == "max" else sorted(costs)[len(costs) // 2]
+        return cost < threshold, cost
 
     def _cost_at_goal_ok(self, x: float, y: float, yaw: float | None = None) -> bool:
         """Check the goal clears both costmaps.
@@ -2637,12 +2656,31 @@ class Task2Controller(Node):
         for i, (px, py) in enumerate(points):
             is_center = i == 0
             edge_kwargs = (
-                {} if is_center else {"threshold": self.FOOTPRINT_EDGE_COST_THRESHOLD}
+                {}
+                if is_center
+                else {
+                    "threshold": self.FOOTPRINT_EDGE_COST_THRESHOLD,
+                    "radius_m": self.FOOTPRINT_EDGE_SAMPLE_RADIUS_M,
+                    "stat": "max",
+                }
+            )
+            keepout_kwargs = (
+                {}
+                if is_center
+                else {
+                    "radius_m": self.FOOTPRINT_EDGE_SAMPLE_RADIUS_M,
+                    "stat": "max",
+                }
             )
             if (
                 self.keepout_mask is not None
                 and not self._cost_ok_on(
-                    self.keepout_mask, px, py, out_of_bounds_ok=True, threshold=50
+                    self.keepout_mask,
+                    px,
+                    py,
+                    out_of_bounds_ok=True,
+                    threshold=50,
+                    **keepout_kwargs,
                 )[0]
             ):
                 self.get_logger().warn(
