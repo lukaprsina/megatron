@@ -461,6 +461,9 @@ class Task2Controller(Node):
         self.approaching_object_pub = self.create_publisher(
             Marker, "/approaching_object", 10
         )
+        self.footprint_check_pub = self.create_publisher(
+            MarkerArray, "/footprint_check_points", 10
+        )
         self._ws_debug_live_pub = self.create_publisher(
             Image, "/workstation_debug/live", 1
         )
@@ -1989,7 +1992,7 @@ class Task2Controller(Node):
         distance_correction = 0.0
         if side is not None and self._inspection_side_target is not None:
             distance_error = side - self._inspection_side_target
-            if abs(distance_error) > 0.04:
+            if abs(distance_error) > 0.01:  # TODO: tweak
                 belt_side_sign = math.copysign(
                     1.0, math.sin(self._belt_world_perp() - (current_yaw or 0.0))
                 )
@@ -2446,7 +2449,7 @@ class Task2Controller(Node):
     # `_footprint_sample_points`). Set to 0 to fall back to checking only
     # the center point, e.g. if costmap/scan coverage near candidates is
     # too sparse to trust the extra points.
-    FOOTPRINT_MARGIN_SCALE = 1.3  # 1.0
+    FOOTPRINT_MARGIN_SCALE = 1.1  # 1.0
 
     # Threshold for the off-center footprint points (the footprint polygon
     # vertices around the candidate, see `_footprint_sample_points`). The painted
@@ -2496,6 +2499,37 @@ class Task2Controller(Node):
             vx, vy = vx * s, vy * s
             points.append((x + vx * fx + vy * lx, y + vx * fy + vy * ly))
         return points
+
+    def _publish_footprint_check_markers(self, points: list[tuple[float, float]]):
+        """Visualize the sampled footprint-check points (debug aid).
+
+        Publishes one small sphere per point in `points` (index 0 = center,
+        rest = polygon vertices/edge-midpoints) so the actual sampled
+        footprint shape can be eyeballed in RViz against the costmap.
+        """
+        now = self.get_clock().now().to_msg()
+        markers = []
+        for i, (px, py) in enumerate(points):
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = now
+            m.ns = "footprint_check_points"
+            m.id = i
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position.x = float(px)
+            m.pose.position.y = float(py)
+            m.pose.position.z = 0.10
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = 0.05
+            if i == 0:
+                m.color.r, m.color.g, m.color.b = 1.0, 1.0, 1.0  # center = white
+            else:
+                m.color.r, m.color.g, m.color.b = 1.0, 1.0, 0.0  # vertices = yellow
+            m.color.a = 1.0
+            m.lifetime.sec = 0
+            markers.append(m)
+        self.footprint_check_pub.publish(MarkerArray(markers=markers))
 
     def _cost_ok_on(
         self,
@@ -2561,6 +2595,8 @@ class Task2Controller(Node):
         points = (
             self._footprint_sample_points(x, y, yaw) if yaw is not None else [(x, y)]
         )
+        if yaw is not None:
+            self._publish_footprint_check_markers(points)
         global_costs: list[float] = []
         local_costs: list[float] = []
         for i, (px, py) in enumerate(points):
