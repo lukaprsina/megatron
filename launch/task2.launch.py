@@ -170,7 +170,7 @@ def generate_launch_description():
                 "waypoints_file": PathJoinSubstitution([
                     pkg_megatron,
                     "waypoints",
-                    "task2-00.yaml",
+                    "task2-01.yaml",
                 ]),
                 "room2_entry_file": PathJoinSubstitution([
                     pkg_megatron,
@@ -258,7 +258,7 @@ def generate_launch_description():
             {
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
             }
-        ]
+        ],
     )
 
     ld = LaunchDescription(args)

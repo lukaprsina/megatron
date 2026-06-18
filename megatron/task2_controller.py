@@ -1849,7 +1849,7 @@ class Task2Controller(Node):
                 )
             )
         try:
-            path = ReportBuilder(logger = self.get_logger()).save_pdf(tasks)
+            path = ReportBuilder(logger=self.get_logger()).save_pdf(tasks)
             self.get_logger().info(f"Report written to {path}")
         except Exception as e:
             self.get_logger().error(f"Report write failed: {e}")
@@ -2423,14 +2423,33 @@ class Task2Controller(Node):
     # pass while the robot's actual body still overlaps a near-obstacle cell.
     APPROACH_CLEARANCE_RADIUS_M = 0.28
 
-    # Offset from a candidate goal to each of its front/back/left/right
-    # footprint-check points (see `_footprint_sample_points`). Set to 0 to
-    # fall back to checking only the center point, e.g. if costmap/scan
-    # coverage near candidates is too sparse to trust the extra points.
-    FOOTPRINT_CHECK_RADIUS_M = 0.22
+    # The robot's actual footprint polygon (body frame, x forward/y left),
+    # copied from the `footprint:` list in nav2.yaml — keep these in sync.
+    # It's a near-regular octagon, so the diagonal vertices stick out just
+    # as far as the cardinal ones; a check that only sampled front/back/
+    # left/right left the diagonal corners completely unchecked, which is
+    # exactly where a diagonal wall edge (the "staircase" aliasing visible
+    # in the costmap) can clip the robot while every cardinal sample reads
+    # clear.
+    FOOTPRINT_VERTICES_M = [
+        (0.189, 0.000),
+        (0.134, -0.134),
+        (0.000, -0.189),
+        (-0.134, -0.134),
+        (-0.189, 0.000),
+        (-0.134, 0.134),
+        (0.000, 0.189),
+        (0.134, 0.134),
+    ]
 
-    # Threshold for the off-center footprint points (front/back/left/right
-    # of the candidate, see `_footprint_sample_points`). The painted
+    # Multiplier on FOOTPRINT_VERTICES_M's offsets (see
+    # `_footprint_sample_points`). Set to 0 to fall back to checking only
+    # the center point, e.g. if costmap/scan coverage near candidates is
+    # too sparse to trust the extra points.
+    FOOTPRINT_MARGIN_SCALE = 1.3  # 1.0
+
+    # Threshold for the off-center footprint points (the footprint polygon
+    # vertices around the candidate, see `_footprint_sample_points`). The painted
     # purple/near-obstacle inflation border reads ~90-100 and is fine for
     # the robot's body to be next to; the actual danger zone is the
     # lethal-obstacle/inscribed-radius cyan band at 253-254. Set well above
@@ -2441,17 +2460,17 @@ class Task2Controller(Node):
     # Sampling radius used for the off-center footprint points. Deliberately
     # much smaller than APPROACH_CLEARANCE_RADIUS_M (0.28): that radius is
     # tuned for "is the broad neighborhood around the candidate's center
-    # navigable," but an edge point's whole job is "is the cell right here,
+    # navigable," but a vertex point's whole job is "is the cell right here,
     # where the robot's body will actually be, lethal." A 0.28m disc spaced
-    # only FOOTPRINT_CHECK_RADIUS_M=0.22 from the center overlaps the
-    # center's own disc almost entirely, diluting the edge check back into
-    # the same broad-area average it was meant to catch a failure of.
+    # only ~0.19m from the center would overlap the center's own disc almost
+    # entirely, diluting the vertex check back into the same broad-area
+    # average it was meant to catch a failure of.
     FOOTPRINT_EDGE_SAMPLE_RADIUS_M = 0.06
 
     def _footprint_sample_points(
         self, x: float, y: float, yaw: float
     ) -> list[tuple[float, float]]:
-        """Center plus front/back/left/right points around (x, y) at `yaw`.
+        """Center plus the 8 footprint-polygon vertices around (x, y) at `yaw`.
 
         A single disc-median check at one point is blind to which side of
         the parked robot ends up against an obstacle: the candidate can
@@ -2460,19 +2479,23 @@ class Task2Controller(Node):
         pulls the median down. Gating several points spread across the
         actual footprint — each individually, not pooled into one
         statistic — catches that a single median can't.
+
+        The points used are the actual FOOTPRINT_VERTICES_M polygon, not
+        just front/back/left/right: the robot's footprint is a near-regular
+        octagon, so the diagonal vertices reach just as far as the cardinal
+        ones, and a diagonal wall edge can clip a diagonal vertex while every
+        cardinal sample still reads clear.
         """
-        r = self.FOOTPRINT_CHECK_RADIUS_M
-        if r <= 0:
+        if self.FOOTPRINT_MARGIN_SCALE <= 0:
             return [(x, y)]
         fx, fy = math.cos(yaw), math.sin(yaw)
         lx, ly = -math.sin(yaw), math.cos(yaw)
-        return [
-            (x, y),
-            (x + fx * r, y + fy * r),
-            (x - fx * r, y - fy * r),
-            (x + lx * r, y + ly * r),
-            (x - lx * r, y - ly * r),
-        ]
+        s = self.FOOTPRINT_MARGIN_SCALE
+        points = [(x, y)]
+        for vx, vy in self.FOOTPRINT_VERTICES_M:
+            vx, vy = vx * s, vy * s
+            points.append((x + vx * fx + vy * lx, y + vx * fy + vy * ly))
+        return points
 
     def _cost_ok_on(
         self,
@@ -2531,14 +2554,15 @@ class Task2Controller(Node):
 
         Pass `yaw` for any goal where the robot will actually be parked at
         that orientation (approach candidates, retreat targets) so the
-        check also covers the footprint's front/back/left/right, not just
-        the center point — see `_footprint_sample_points`. Omit it for
+        check also covers the footprint polygon's vertices, not just the
+        center point — see `_footprint_sample_points`. Omit it for
         orientation-agnostic checks.
         """
         points = (
             self._footprint_sample_points(x, y, yaw) if yaw is not None else [(x, y)]
         )
-        global_median = local_median = None
+        global_costs: list[float] = []
+        local_costs: list[float] = []
         for i, (px, py) in enumerate(points):
             is_center = i == 0
             edge_kwargs = (
@@ -2574,38 +2598,43 @@ class Task2Controller(Node):
                 )
                 return False
             if self.costmap is not None:
-                ok, global_median = self._cost_ok_on(
+                ok, global_cost = self._cost_ok_on(
                     self.costmap, px, py, out_of_bounds_ok=False, **edge_kwargs
                 )
+                if global_cost is not None:
+                    global_costs.append(global_cost)
                 self.get_logger().info(
                     f"  footprint point {i} ({'center' if is_center else 'edge'}) "
-                    f"at ({px:.2f}, {py:.2f}): global_cost={global_median}, ok={ok}"
+                    f"at ({px:.2f}, {py:.2f}): global_cost={global_cost}, ok={ok}"
                 )
                 if not ok:
                     self.get_logger().warn(
                         f"Approach blocked (global costmap) at ({px:.2f}, "
-                        f"{py:.2f}), median_cost={global_median}, "
+                        f"{py:.2f}), median_cost={global_cost}, "
                         f"point={'center' if is_center else 'edge'}."
                     )
                     return False
             if self.local_costmap is not None:
-                ok, local_median = self._cost_ok_on(
+                ok, local_cost = self._cost_ok_on(
                     self.local_costmap, px, py, out_of_bounds_ok=True, **edge_kwargs
                 )
+                if local_cost is not None:
+                    local_costs.append(local_cost)
                 self.get_logger().info(
                     f"  footprint point {i} ({'center' if is_center else 'edge'}) "
-                    f"at ({px:.2f}, {py:.2f}): local_cost={local_median}, ok={ok}"
+                    f"at ({px:.2f}, {py:.2f}): local_cost={local_cost}, ok={ok}"
                 )
                 if not ok:
                     self.get_logger().warn(
                         f"Approach blocked (local costmap) at ({px:.2f}, "
-                        f"{py:.2f}), median_cost={local_median}, "
+                        f"{py:.2f}), median_cost={local_cost}, "
                         f"point={'center' if is_center else 'edge'}."
                     )
                     return False
         self.get_logger().info(
             f"Approach accepted at ({x:.2f}, {y:.2f}): "
-            f"global_median={global_median}, local_median={local_median}."
+            f"global_worst={max(global_costs, default=None)}, "
+            f"local_worst={max(local_costs, default=None)}."
         )
         return True
 
