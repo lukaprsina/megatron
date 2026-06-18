@@ -56,6 +56,8 @@ from megatron.tile_anomaly import (
 )
 from megatron.tile_capture import save_tile_capture
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 # ---------------------------------------------------------------------------
 # State machine
 # ---------------------------------------------------------------------------
@@ -259,7 +261,10 @@ class Task2Controller(Node):
         self.declare_parameter("manual_mode", False)
         self.declare_parameter("avoidance_blind_distance", 0.40)
         self.declare_parameter("capture_tiles", False)
-        self.declare_parameter("tile_capture_dir", "/tmp/megatron_tile_captures")
+        self.declare_parameter(
+            "tile_capture_dir",
+            str(REPO_ROOT / "artifacts" / "tile_detector" / "evaluation"),
+        )
         self.declare_parameter("world_name", "task2")
 
         wp_file = cast(str, self.get_parameter("waypoints_file").value)
