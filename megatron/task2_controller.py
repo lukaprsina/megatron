@@ -44,15 +44,10 @@ from std_srvs.srv import Trigger
 from turtle_tf2_py.turtle_tf2_broadcaster import quaternion_from_euler
 from visualization_msgs.msg import Marker, MarkerArray
 
+from megatron.patchcore_tile_anomaly import PatchCoreConfig, PatchCoreTileDetector
 from megatron.report import AnomalyTask, BarrelTask, ReportBuilder, RingTask
 from megatron.speech import Speaker
-from megatron.tile_anomaly import (
-    DetectorConfig,
-    TileAnomalyDetector,
-    TileAnomalyResult,
-    quad_from_contour,
-    warp_tile,
-)
+from megatron.tile_anomaly import TileAnomalyResult, quad_from_contour, warp_tile
 from megatron.tile_capture import save_tile_capture
 
 # ---------------------------------------------------------------------------
@@ -374,7 +369,7 @@ class Task2Controller(Node):
         self._megatron_share = _share
         _ref_root = _share / "assets" / "tiles" / "reference_good"
         _model_path = _share / "assets" / "tiles" / "model.yaml"
-        _detector_config = DetectorConfig.from_yaml(_model_path)
+        _patchcore_config = PatchCoreConfig.from_yaml(_model_path)
         _world_ref_root = _ref_root / self._world_name
         _ref_red = sorted((_world_ref_root / "red").rglob("*.png")) if (_world_ref_root / "red").is_dir() else []
         _ref_green = sorted((_world_ref_root / "green").rglob("*.png")) if (_world_ref_root / "green").is_dir() else []
@@ -382,8 +377,8 @@ class Task2Controller(Node):
             _ref_red = sorted(p for p in _ref_root.rglob("*.png") if "/red/" in p.as_posix())
         if not _ref_green:
             _ref_green = sorted(p for p in _ref_root.rglob("*.png") if "/green/" in p.as_posix())
-        self._tile_detector_red = TileAnomalyDetector.from_paths(_ref_red, _detector_config)
-        self._tile_detector_green = TileAnomalyDetector.from_paths(_ref_green, _detector_config)
+        self._tile_detector_red = PatchCoreTileDetector.from_paths(_ref_red, _patchcore_config)
+        self._tile_detector_green = PatchCoreTileDetector.from_paths(_ref_green, _patchcore_config)
         self.get_logger().info(
             f"Tile detectors loaded: red={len(_ref_red)} green={len(_ref_green)} refs "
             f"from {_world_ref_root}"
@@ -1922,7 +1917,7 @@ class Task2Controller(Node):
         return box.astype(np.float32), full_mask
 
     def _score_tile(self, frame: np.ndarray) -> TileAnomalyResult:
-        """Score a tile frame using TileAnomalyDetector."""
+        """Score a tile frame using PatchCoreTileDetector."""
         try:
             self._ws_debug_raw_pub.publish(self._cv_bridge.cv2_to_imgmsg(frame, "bgr8"))
         except Exception:
