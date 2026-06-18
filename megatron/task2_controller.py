@@ -238,6 +238,11 @@ class Task2Controller(Node):
     RETREAT_TIMEOUT_S = 8.0
     REAR_SCAN_ANGLE = math.pi / 2  # opposite of the front cone used elsewhere (-pi/2)
 
+    # Minimum decrease in Nav2's reported distance_remaining that counts as
+    # "real progress" — guards against noise in the feedback resetting the
+    # stuck-watchdog clock on every callback.
+    NAV_PROGRESS_MARGIN_M = 0.05
+
     def __init__(self):
         super().__init__("task2_controller")
 
@@ -322,6 +327,8 @@ class Task2Controller(Node):
         self._last_feedback_time: float | None = None
         self._nav_update = False  # Turn when the navigation needs to be updated
         self._nav_goal_sent_time: float | None = None
+        self._nav_progress_distance: float | None = None
+        self._nav_progress_time: float | None = None
         self._room2_nav_attempt = 0
         self._room2_nav_started: float | None = None
         self._room2_goal_sent = False
@@ -1003,17 +1010,28 @@ class Task2Controller(Node):
             self._handle_approach_failure()
 
     def _approach_is_stuck(self) -> bool:
-        """True if the in-flight approach goal has been pending too long.
+        """True if the in-flight approach goal has made no progress in too long.
 
         Nav2's own recovery behaviours (spin/backup) can loop forever if the
         robot is wedged against an obstacle, never returning a terminal
         status — so we time out independently instead of waiting on
-        _nav_aborted()/_nav_succeeded().
+        _nav_aborted()/_nav_succeeded(). The clock is measured from the last
+        time Nav2's feedback showed distance_remaining actually decreasing,
+        not from when the goal was sent: a goal that's simply far away can
+        legitimately take longer than approach_stuck_timeout at the
+        velocity-smoother's capped speed without ever being stuck, and a
+        flat send-time deadline would cancel (and endlessly re-cancel) a
+        perfectly healthy approach before it could finish.
         """
         if self._nav_goal_sent_time is None:
             return False
         timeout = cast(float, self.get_parameter("approach_stuck_timeout").value)
-        elapsed = self.get_clock().now().nanoseconds / 1e9 - self._nav_goal_sent_time
+        reference_time = (
+            self._nav_progress_time
+            if self._nav_progress_time is not None
+            else self._nav_goal_sent_time
+        )
+        elapsed = self.get_clock().now().nanoseconds / 1e9 - reference_time
         return elapsed > timeout
 
     def _handle_approach_failure(self):
@@ -1423,7 +1441,37 @@ class Task2Controller(Node):
                 return True
         return False
 
+    def _retreat_target_point(self, distance: float) -> tuple[float, float] | None:
+        """Point `distance` m straight behind the current pose, in map frame."""
+        pose = self._current_xy()
+        yaw = self._current_yaw()
+        if pose is None or yaw is None:
+            return None
+        return (
+            float(pose[0]) - math.cos(yaw) * distance,
+            float(pose[1]) - math.sin(yaw) * distance,
+        )
+
     def _start_retreat(self):
+        """Begin the retreat, but only if straight-back is verified clear first.
+
+        Backing up is only safe if the robot parked facing *into* the tight
+        spot — true for most approaches, but not guaranteed (e.g. an
+        approach made from the side leaves the wall behind, not ahead).
+        Reversing blind in that case drives the robot deeper into the wall
+        instead of out of it. Gate on the same costmap/keepout check already
+        trusted for every other nav goal (`_cost_at_goal_ok`) rather than a
+        LiDAR cone, which can miss a wall it isn't pointed straight at.
+        """
+        target = self._retreat_target_point(self.RETREAT_DISTANCE_M)
+        if target is None or not self._cost_at_goal_ok(*target):
+            self.get_logger().info(
+                "Retreat skipped: no verified-clear point behind the parked "
+                "pose — sending next goal directly."
+            )
+            self._resume_patrol()
+            return
+
         self._retreat_start_xy = self._current_xy()
         self._retreat_start_time = self.get_clock().now().nanoseconds / 1e9
         self.get_logger().info(
@@ -1450,7 +1498,7 @@ class Task2Controller(Node):
             return
 
         rear_clearance = self._min_scan_distance(
-            self.REAR_SCAN_ANGLE, math.radians(20.0)
+            self.REAR_SCAN_ANGLE, math.radians(35.0)
         )
         if (
             rear_clearance is not None
@@ -2257,6 +2305,8 @@ class Task2Controller(Node):
         self._nav_rejected = False
         self._nav_update = False
         self._nav_goal_sent_time = self.get_clock().now().nanoseconds / 1e9
+        self._nav_progress_distance = None
+        self._nav_progress_time = self._nav_goal_sent_time
         seq = self._nav_seq
         future = self.nav_client.send_goal_async(
             goal, feedback_callback=self._nav_feedback_cb
@@ -2277,8 +2327,16 @@ class Task2Controller(Node):
         self.nav_result_future = self.nav_goal_handle.get_result_async()
 
     def _nav_feedback_cb(self, feedback_msg):
-        self._last_feedback_distance = feedback_msg.feedback.distance_remaining
-        self._last_feedback_time = self.get_clock().now().nanoseconds / 1e9
+        distance = feedback_msg.feedback.distance_remaining
+        now = self.get_clock().now().nanoseconds / 1e9
+        self._last_feedback_distance = distance
+        self._last_feedback_time = now
+        if (
+            self._nav_progress_distance is None
+            or distance < self._nav_progress_distance - self.NAV_PROGRESS_MARGIN_M
+        ):
+            self._nav_progress_distance = distance
+            self._nav_progress_time = now
 
     def _cancel_nav(self):
         self.get_logger().warning("Canceling Nav2 goal ")
@@ -2293,6 +2351,8 @@ class Task2Controller(Node):
         self._last_feedback_distance = None
         self._last_feedback_time = None
         self._nav_goal_sent_time = None
+        self._nav_progress_distance = None
+        self._nav_progress_time = None
 
     def _is_near_goal(self) -> bool:
         if self._last_feedback_distance is None or self._last_feedback_time is None:
@@ -2521,24 +2581,29 @@ class Task2Controller(Node):
         ):
             self.get_logger().warn("Approach blocked (keepout mask).")
             return False
+        global_median = local_median = None
         if self.costmap is not None:
-            ok, median_cost = self._cost_ok_on(
+            ok, global_median = self._cost_ok_on(
                 self.costmap, x, y, out_of_bounds_ok=False
             )
             if not ok:
                 self.get_logger().warn(
-                    f"Approach blocked (global costmap), median_cost={median_cost}."
+                    f"Approach blocked (global costmap), median_cost={global_median}."
                 )
                 return False
         if self.local_costmap is not None:
-            ok, median_cost = self._cost_ok_on(
+            ok, local_median = self._cost_ok_on(
                 self.local_costmap, x, y, out_of_bounds_ok=True
             )
             if not ok:
                 self.get_logger().warn(
-                    f"Approach blocked (local costmap), median_cost={median_cost}."
+                    f"Approach blocked (local costmap), median_cost={local_median}."
                 )
                 return False
+        self.get_logger().info(
+            f"Approach accepted at ({x:.2f}, {y:.2f}): "
+            f"global_median={global_median}, local_median={local_median}."
+        )
         return True
 
     def _world_to_map(self, costmap: OccupancyGrid, x: float, y: float):
