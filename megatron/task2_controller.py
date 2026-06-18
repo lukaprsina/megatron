@@ -1095,8 +1095,15 @@ class Task2Controller(Node):
 
             while idx < len(candidates):
                 ax, ay, yaw = candidates[idx]
-                self._publish_approaching_object(ax, ay, yaw, attempt, total=total)
-                if self._cost_at_goal_ok(ax, ay, yaw):
+                accepted = self._cost_at_goal_ok(ax, ay, yaw)
+                self._publish_approaching_object(
+                    ax, ay, yaw, attempt, total=total, accepted=accepted
+                )
+                self.get_logger().info(
+                    f"Candidate {attempt + 1}/{total} at ({ax:.2f}, {ay:.2f}): "
+                    f"{'ACCEPTED' if accepted else 'rejected'}."
+                )
+                if accepted:
                     self._send_nav_goal(ax, ay, yaw)
                     self._approach_attempt = attempt  # sync for next abort
                     return True
@@ -1736,7 +1743,7 @@ class Task2Controller(Node):
                     tile_center_x = float(tile_box[:, 0].mean())
                     frame_width = self._last_top_frame.shape[1]
                     tile_centered = (
-                        0.42 * frame_width <= tile_center_x <= 0.58 * frame_width
+                        0.36 * frame_width <= tile_center_x <= 0.64 * frame_width
                     )
 
                 if (
@@ -2339,16 +2346,21 @@ class Task2Controller(Node):
 
     # ── Costmap check ──────────────────────────────────────────────────
     def _publish_approaching_object(
-        self, ax, ay, yaw=None, attempt=0, total=8, none=False
+        self, ax, ay, yaw=None, attempt=0, total=8, none=False, accepted=None
     ):
         """
         Publish an approach marker at the current Nav2 approach goal position.
 
-        ax, ay  — goal position in map frame
-        yaw     — if provided, orient the small arrow using this heading
-        attempt — 0-indexed candidate number being tried (shown in label)
-        total   — total candidates available (shown in label)
-        none    — if True, delete both markers
+        ax, ay    — goal position in map frame
+        yaw       — if provided, orient the small arrow using this heading
+        attempt   — 0-indexed candidate number being tried (shown in label)
+        total     — total candidates available (shown in label)
+        none      — if True, delete both markers
+        accepted  — None while the candidate's outcome is unknown (orange);
+                    True/False colors the marker green/red once the costmap
+                    check has decided, so a frozen RViz frame can't be
+                    mistaken for "this is the goal we're driving to" when
+                    it's actually a candidate that just got rejected.
         """
         now = self.get_clock().now().to_msg()
 
@@ -2362,6 +2374,13 @@ class Task2Controller(Node):
                 m.action = Marker.DELETE
                 self.approaching_object_pub.publish(m)
             return
+
+        if accepted is None:
+            color = (1.0, 0.55, 0.0)  # orange = outcome not yet known
+        elif accepted:
+            color = (0.0, 1.0, 0.0)  # green = accepted, this is the goal
+        else:
+            color = (1.0, 0.0, 0.0)  # red = rejected
 
         if yaw is not None:
             # Small arrow centered on the goal and oriented by yaw.
@@ -2383,9 +2402,7 @@ class Task2Controller(Node):
             arrow.scale.x = 0.18
             arrow.scale.y = 0.05
             arrow.scale.z = 0.05
-            arrow.color.r = 1.0
-            arrow.color.g = 0.55
-            arrow.color.b = 0.0
+            arrow.color.r, arrow.color.g, arrow.color.b = color
             arrow.color.a = 1.0
             arrow.lifetime.sec = 0
             self.approaching_object_pub.publish(arrow)
@@ -2411,11 +2428,10 @@ class Task2Controller(Node):
         label.pose.position.z = 1.05
         label.pose.orientation.w = 1.0
         label.scale.z = 0.15
-        label.color.r = 1.0
-        label.color.g = 0.55
-        label.color.b = 0.0
+        label.color.r, label.color.g, label.color.b = color
         label.color.a = 1.0
-        label.text = f"GOAL {attempt + 1}/{total}"
+        suffix = "" if accepted is None else (" ACCEPTED" if accepted else " rejected")
+        label.text = f"GOAL {attempt + 1}/{total}{suffix}"
         label.lifetime.sec = 0
         self.approaching_object_pub.publish(label)
 
@@ -2500,15 +2516,23 @@ class Task2Controller(Node):
             points.append((x + vx * fx + vy * lx, y + vx * fy + vy * ly))
         return points
 
-    def _publish_footprint_check_markers(self, points: list[tuple[float, float]]):
+    def _publish_footprint_check_markers(
+        self, points: list[tuple[float, float]], accepted: bool
+    ):
         """Visualize the sampled footprint-check points (debug aid).
 
         Publishes one small sphere per point in `points` (index 0 = center,
         rest = polygon vertices/edge-midpoints) so the actual sampled
         footprint shape can be eyeballed in RViz against the costmap.
+
+        Colored green/red by `accepted` — these are published once the
+        cost check has actually decided, not while a candidate is still
+        being evaluated, so a frozen RViz frame is never a rejected
+        candidate's dots being mistaken for the chosen goal.
         """
         now = self.get_clock().now().to_msg()
         markers = []
+        base_color = (0.0, 1.0, 0.0) if accepted else (1.0, 0.0, 0.0)
         for i, (px, py) in enumerate(points):
             m = Marker()
             m.header.frame_id = "map"
@@ -2522,11 +2546,8 @@ class Task2Controller(Node):
             m.pose.position.z = 0.10
             m.pose.orientation.w = 1.0
             m.scale.x = m.scale.y = m.scale.z = 0.05
-            if i == 0:
-                m.color.r, m.color.g, m.color.b = 1.0, 1.0, 1.0  # center = white
-            else:
-                m.color.r, m.color.g, m.color.b = 1.0, 1.0, 0.0  # vertices = yellow
-            m.color.a = 1.0
+            m.color.r, m.color.g, m.color.b = base_color
+            m.color.a = 1.0 if i == 0 else 0.6  # center = solid, vertices = dimmer
             m.lifetime.sec = 0
             markers.append(m)
         self.footprint_check_pub.publish(MarkerArray(markers=markers))
@@ -2595,8 +2616,13 @@ class Task2Controller(Node):
         points = (
             self._footprint_sample_points(x, y, yaw) if yaw is not None else [(x, y)]
         )
-        if yaw is not None:
-            self._publish_footprint_check_markers(points)
+
+        def _reject(reason: str) -> bool:
+            self.get_logger().warn(reason)
+            if yaw is not None:
+                self._publish_footprint_check_markers(points, accepted=False)
+            return False
+
         global_costs: list[float] = []
         local_costs: list[float] = []
         for i, (px, py) in enumerate(points):
@@ -2629,10 +2655,9 @@ class Task2Controller(Node):
                     **keepout_kwargs,
                 )[0]
             ):
-                self.get_logger().warn(
+                return _reject(
                     f"Approach blocked (keepout mask) at ({px:.2f}, {py:.2f})."
                 )
-                return False
             if self.costmap is not None:
                 ok, global_cost = self._cost_ok_on(
                     self.costmap, px, py, out_of_bounds_ok=False, **edge_kwargs
@@ -2644,12 +2669,11 @@ class Task2Controller(Node):
                     f"at ({px:.2f}, {py:.2f}): global_cost={global_cost}, ok={ok}"
                 )
                 if not ok:
-                    self.get_logger().warn(
+                    return _reject(
                         f"Approach blocked (global costmap) at ({px:.2f}, "
                         f"{py:.2f}), median_cost={global_cost}, "
                         f"point={'center' if is_center else 'edge'}."
                     )
-                    return False
             if self.local_costmap is not None:
                 ok, local_cost = self._cost_ok_on(
                     self.local_costmap, px, py, out_of_bounds_ok=True, **edge_kwargs
@@ -2661,17 +2685,18 @@ class Task2Controller(Node):
                     f"at ({px:.2f}, {py:.2f}): local_cost={local_cost}, ok={ok}"
                 )
                 if not ok:
-                    self.get_logger().warn(
+                    return _reject(
                         f"Approach blocked (local costmap) at ({px:.2f}, "
                         f"{py:.2f}), median_cost={local_cost}, "
                         f"point={'center' if is_center else 'edge'}."
                     )
-                    return False
         self.get_logger().info(
             f"Approach accepted at ({x:.2f}, {y:.2f}): "
             f"global_worst={max(global_costs, default=None)}, "
             f"local_worst={max(local_costs, default=None)}."
         )
+        if yaw is not None:
+            self._publish_footprint_check_markers(points, accepted=True)
         return True
 
     def _world_to_map(self, costmap: OccupancyGrid, x: float, y: float):
