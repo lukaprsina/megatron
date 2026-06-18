@@ -1089,7 +1089,7 @@ class Task2Controller(Node):
             while idx < len(candidates):
                 ax, ay, yaw = candidates[idx]
                 self._publish_approaching_object(ax, ay, yaw, attempt, total=total)
-                if self._cost_at_goal_ok(ax, ay):
+                if self._cost_at_goal_ok(ax, ay, yaw):
                     self._send_nav_goal(ax, ay, yaw)
                     self._approach_attempt = attempt  # sync for next abort
                     return True
@@ -1463,8 +1463,13 @@ class Task2Controller(Node):
         trusted for every other nav goal (`_cost_at_goal_ok`) rather than a
         LiDAR cone, which can miss a wall it isn't pointed straight at.
         """
+        current_yaw = self._current_yaw()
         target = self._retreat_target_point(self.RETREAT_DISTANCE_M)
-        if target is None or not self._cost_at_goal_ok(*target):
+        if (
+            target is None
+            or current_yaw is None
+            or not self._cost_at_goal_ok(*target, current_yaw)
+        ):
             self.get_logger().info(
                 "Retreat skipped: no verified-clear point behind the parked "
                 "pose — sending next goal directly."
@@ -2527,6 +2532,46 @@ class Task2Controller(Node):
     # pass while the robot's actual body still overlaps a near-obstacle cell.
     APPROACH_CLEARANCE_RADIUS_M = 0.28
 
+    # Offset from a candidate goal to each of its front/back/left/right
+    # footprint-check points (see `_footprint_sample_points`). Set to 0 to
+    # fall back to checking only the center point, e.g. if costmap/scan
+    # coverage near candidates is too sparse to trust the extra points.
+    FOOTPRINT_CHECK_RADIUS_M = 0.22
+
+    # The center point is allowed up to the loose 150 default (needed for
+    # QR-reading distance), but the off-center footprint points stand in
+    # for the robot's actual flanks and must clear a tighter bound — the
+    # observed cost of the painted purple/near-obstacle inflation border
+    # is ~90-100, comfortably under 150, so without this an edge point can
+    # sit right on that border and still pass.
+    FOOTPRINT_EDGE_COST_THRESHOLD = 89
+
+    def _footprint_sample_points(
+        self, x: float, y: float, yaw: float
+    ) -> list[tuple[float, float]]:
+        """Center plus front/back/left/right points around (x, y) at `yaw`.
+
+        A single disc-median check at one point is blind to which side of
+        the parked robot ends up against an obstacle: the candidate can
+        look clear on average (low median) while one flank is jammed
+        against a wall, because the rest of the sampled disc is open and
+        pulls the median down. Gating several points spread across the
+        actual footprint — each individually, not pooled into one
+        statistic — catches that a single median can't.
+        """
+        r = self.FOOTPRINT_CHECK_RADIUS_M
+        if r <= 0:
+            return [(x, y)]
+        fx, fy = math.cos(yaw), math.sin(yaw)
+        lx, ly = -math.sin(yaw), math.cos(yaw)
+        return [
+            (x, y),
+            (x + fx * r, y + fy * r),
+            (x - fx * r, y - fy * r),
+            (x + lx * r, y + ly * r),
+            (x - lx * r, y - ly * r),
+        ]
+
     def _cost_ok_on(
         self,
         costmap: OccupancyGrid,
@@ -2557,7 +2602,7 @@ class Task2Controller(Node):
         median_cost = sorted(costs)[len(costs) // 2]
         return median_cost < threshold, median_cost
 
-    def _cost_at_goal_ok(self, x: float, y: float) -> bool:
+    def _cost_at_goal_ok(self, x: float, y: float, yaw: float | None = None) -> bool:
         """Check the goal clears both costmaps.
 
         The global costmap is what we have readily available for planning,
@@ -2572,34 +2617,62 @@ class Task2Controller(Node):
         repaints — sampling the costmap in that window can read a keepout
         cell as clear. The mask topic itself is latched and never cleared,
         so checking it directly is immune to that race.
+
+        Pass `yaw` for any goal where the robot will actually be parked at
+        that orientation (approach candidates, retreat targets) so the
+        check also covers the footprint's front/back/left/right, not just
+        the center point — see `_footprint_sample_points`. Omit it for
+        orientation-agnostic checks.
         """
-        if (
-            self.keepout_mask is not None
-            and not self._cost_ok_on(
-                self.keepout_mask, x, y, out_of_bounds_ok=True, threshold=50
-            )[0]
-        ):
-            self.get_logger().warn("Approach blocked (keepout mask).")
-            return False
+        points = (
+            self._footprint_sample_points(x, y, yaw) if yaw is not None else [(x, y)]
+        )
         global_median = local_median = None
-        if self.costmap is not None:
-            ok, global_median = self._cost_ok_on(
-                self.costmap, x, y, out_of_bounds_ok=False
+        for i, (px, py) in enumerate(points):
+            is_center = i == 0
+            edge_kwargs = (
+                {} if is_center else {"threshold": self.FOOTPRINT_EDGE_COST_THRESHOLD}
             )
-            if not ok:
+            if (
+                self.keepout_mask is not None
+                and not self._cost_ok_on(
+                    self.keepout_mask, px, py, out_of_bounds_ok=True, threshold=50
+                )[0]
+            ):
                 self.get_logger().warn(
-                    f"Approach blocked (global costmap), median_cost={global_median}."
+                    f"Approach blocked (keepout mask) at ({px:.2f}, {py:.2f})."
                 )
                 return False
-        if self.local_costmap is not None:
-            ok, local_median = self._cost_ok_on(
-                self.local_costmap, x, y, out_of_bounds_ok=True
-            )
-            if not ok:
-                self.get_logger().warn(
-                    f"Approach blocked (local costmap), median_cost={local_median}."
+            if self.costmap is not None:
+                ok, global_median = self._cost_ok_on(
+                    self.costmap, px, py, out_of_bounds_ok=False, **edge_kwargs
                 )
-                return False
+                self.get_logger().info(
+                    f"  footprint point {i} ({'center' if is_center else 'edge'}) "
+                    f"at ({px:.2f}, {py:.2f}): global_cost={global_median}, ok={ok}"
+                )
+                if not ok:
+                    self.get_logger().warn(
+                        f"Approach blocked (global costmap) at ({px:.2f}, "
+                        f"{py:.2f}), median_cost={global_median}, "
+                        f"point={'center' if is_center else 'edge'}."
+                    )
+                    return False
+            if self.local_costmap is not None:
+                ok, local_median = self._cost_ok_on(
+                    self.local_costmap, px, py, out_of_bounds_ok=True, **edge_kwargs
+                )
+                self.get_logger().info(
+                    f"  footprint point {i} ({'center' if is_center else 'edge'}) "
+                    f"at ({px:.2f}, {py:.2f}): local_cost={local_median}, ok={ok}"
+                )
+                if not ok:
+                    self.get_logger().warn(
+                        f"Approach blocked (local costmap) at ({px:.2f}, "
+                        f"{py:.2f}), median_cost={local_median}, "
+                        f"point={'center' if is_center else 'edge'}."
+                    )
+                    return False
         self.get_logger().info(
             f"Approach accepted at ({x:.2f}, {y:.2f}): "
             f"global_median={global_median}, local_median={local_median}."
