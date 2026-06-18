@@ -2543,13 +2543,14 @@ class Task2Controller(Node):
     # coverage near candidates is too sparse to trust the extra points.
     FOOTPRINT_CHECK_RADIUS_M = 0.22
 
-    # The center point is allowed up to the loose 150 default (needed for
-    # QR-reading distance), but the off-center footprint points stand in
-    # for the robot's actual flanks and must clear a tighter bound — the
-    # observed cost of the painted purple/near-obstacle inflation border
-    # is ~90-100, comfortably under 150, so without this an edge point can
-    # sit right on that border and still pass.
-    FOOTPRINT_EDGE_COST_THRESHOLD = 89
+    # Threshold for the off-center footprint points (front/back/left/right
+    # of the candidate, see `_footprint_sample_points`). The painted
+    # purple/near-obstacle inflation border reads ~90-100 and is fine for
+    # the robot's body to be next to; the actual danger zone is the
+    # lethal-obstacle/inscribed-radius cyan band at 253-254. Set well above
+    # the former and well below the latter so purple no longer gets
+    # rejected but a true collision-risk cell still does.
+    FOOTPRINT_EDGE_COST_THRESHOLD = 150
 
     def _footprint_sample_points(
         self, x: float, y: float, yaw: float
