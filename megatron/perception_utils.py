@@ -287,6 +287,37 @@ class IncrementalTrackManager:
         self._tracks: list[dict] = []
         self._next_id = 1
 
+    # Label is a categorical identity attribute, not a continuously-varying
+    # measurement like position — once enough observations clearly agree on
+    # one label, it should be locked rather than re-voted every call (which
+    # lets a near-tied vote flicker between two labels indefinitely).
+    LABEL_LOCK_MIN_VOTES = 3
+    LABEL_LOCK_MARGIN = 2
+
+    def _resolve_label(self, track, labels):
+        """Majority-vote a label, locking it once the vote is clearly decided.
+
+        Returns the track's label (locked value if already locked, otherwise
+        the current best guess from `labels`).
+        """
+        if track.get("locked_label") is not None:
+            return track["locked_label"]
+
+        valid_labels = [lb for lb in labels if lb is not None]
+        if not valid_labels:
+            return None
+
+        counts = Counter(valid_labels).most_common(2)
+        top_label, top_count = counts[0]
+        runner_up_count = counts[1][1] if len(counts) > 1 else 0
+
+        if top_count >= self.LABEL_LOCK_MIN_VOTES and (
+            top_count - runner_up_count >= self.LABEL_LOCK_MARGIN
+        ):
+            track["locked_label"] = top_label
+
+        return top_label
+
     def _compact_points(self, track):
         """Filter observations to those within _inlier_radius_ of the median XY position.
 
@@ -372,6 +403,7 @@ class IncrementalTrackManager:
             "observations": [obs],
             "confirmed": False,
             "label": label,
+            "locked_label": None,
         }
         self._next_id += 1
         self._tracks.append(track)
@@ -403,11 +435,10 @@ class IncrementalTrackManager:
         else:
             n = np.array([1.0, 0.0, 0.0])
 
-        valid_labels = [lb for lb in labels if lb is not None]
-        label = Counter(valid_labels).most_common(1)[0][0] if valid_labels else None
+        label = self._resolve_label(track, labels)
 
         return pos, n, label
-    # temp!!! TODO remove this 
+    # temp!!! TODO remove this
     def get_best_estimate_temp(self, track):
         """Robust estimate: median of compact inliers + weighted normal.
 
@@ -435,8 +466,7 @@ class IncrementalTrackManager:
         else:
             n = np.array([1.0, 0.0, 0.0])
 
-        valid_labels = [lb for lb in labels if lb is not None]
-        label = Counter(valid_labels).most_common(1)[0][0] if valid_labels else None
+        label = self._resolve_label(track, labels)
         cam_dist = cam_dists.mean()
 
         return pos, n, label, cam_dist

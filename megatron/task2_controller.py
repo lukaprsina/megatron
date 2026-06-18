@@ -9,9 +9,10 @@ by position and queues pending_targets for approach.
 """
 
 import math
+from collections.abc import Sequence
 from enum import Enum, auto
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -49,6 +50,8 @@ from megatron.report import AnomalyTask, BarrelTask, ReportBuilder, RingTask
 from megatron.speech import Speaker
 from megatron.tile_anomaly import TileAnomalyResult, quad_from_contour, warp_tile
 from megatron.tile_capture import save_tile_capture
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # ---------------------------------------------------------------------------
 # State machine
@@ -118,17 +121,18 @@ def load_waypoints_from_yaml(path):
     for entry in candidates:
         x = y = yaw = None
         if isinstance(entry, dict):
-            pose = entry.get("pose")
-            orient = entry.get("orientation")
+            pose = cast(Sequence[Any], entry.get("pose"))
+            orient = cast(Sequence[Any], entry.get("orientation"))
             if pose and len(pose) >= 2:
                 x, y = float(pose[0]), float(pose[1])
             if orient and len(orient) == 4:
                 yaw = _quaternion_to_yaw(orient)
         elif isinstance(entry, (list, tuple)):
-            if len(entry) >= 2:
-                x, y = float(entry[0]), float(entry[1])
-            if len(entry) >= 3:
-                yaw = float(entry[2])
+            seq = cast(Sequence[Any], entry)
+            if len(seq) >= 2:
+                x, y = float(seq[0]), float(seq[1])
+            if len(seq) >= 3:
+                yaw = float(seq[2])
         if x is None or y is None:
             continue
         out.append((x, y, yaw or 0.0))
@@ -153,7 +157,6 @@ def _normalize_angle(a: float) -> float:
     while a < -math.pi:
         a += 2 * math.pi
     return a
-
 
 
 def _inspection_completion_reason(
@@ -207,6 +210,7 @@ def _parse_qr_task(text: str) -> str | None:
 # Controller node
 # ---------------------------------------------------------------------------
 
+
 class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.5  # metres — two detections within this are the same object
@@ -215,8 +219,23 @@ class Task2Controller(Node):
     WORKSTATION_SCAN_DISTANCES = {"red": 2.4, "green": 3.0}
     MAX_RETRY_CYCLES = (
         20  # bump distance up to 3× approach_retry_offset before giving up
-    )   
-    WAYPOINT_WAIT_TIME = 0.2 # ms
+    )
+    WAYPOINT_WAIT_TIME = 0.2  # ms
+
+    # Grace period for _approach_is_stuck() once the robot is already near
+    # the goal (see _is_near_goal). RegulatedPurePursuitController does a
+    # slow in-place rotation to finish heading alignment in that final
+    # stretch, which barely moves distance_remaining — the normal
+    # approach_stuck_timeout mistakes that for being wedged and cancels a
+    # goal that was about to settle, interrupting QR reads. Approach
+    # candidates that are actually unreachable still get caught by the
+    # normal timeout everywhere outside this final-alignment window.
+    APPROACH_FINAL_STUCK_GRACE_S = 30.0
+
+    # Minimum decrease in Nav2's reported distance_remaining that counts as
+    # "real progress" — guards against noise in the feedback resetting the
+    # stuck-watchdog clock on every callback.
+    NAV_PROGRESS_MARGIN_M = 0.05
 
     def __init__(self):
         super().__init__("task2_controller")
@@ -229,10 +248,15 @@ class Task2Controller(Node):
         self.declare_parameter("barrel_approach_distance", 0.60)
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.20)
+        self.declare_parameter("approach_stuck_timeout", 15.0)
+        self.declare_parameter("qr_wait_timeout", 20.0)
         self.declare_parameter("manual_mode", False)
         self.declare_parameter("avoidance_blind_distance", 0.40)
         self.declare_parameter("capture_tiles", False)
-        self.declare_parameter("tile_capture_dir", "/tmp/megatron_tile_captures")
+        self.declare_parameter(
+            "tile_capture_dir",
+            str(REPO_ROOT / "artifacts" / "tile_detector" / "evaluation"),
+        )
         self.declare_parameter("world_name", "task2")
 
         wp_file = cast(str, self.get_parameter("waypoints_file").value)
@@ -299,12 +323,17 @@ class Task2Controller(Node):
         self._last_feedback_distance: float | None = None
         self._last_feedback_time: float | None = None
         self._nav_update = False  # Turn when the navigation needs to be updated
+        self._nav_goal_sent_time: float | None = None
+        self._nav_progress_distance: float | None = None
+        self._nav_progress_time: float | None = None
         self._room2_nav_attempt = 0
         self._room2_nav_started: float | None = None
         self._room2_goal_sent = False
 
         # --- Costmap ---
         self.costmap = None
+        self.local_costmap = None
+        self.keepout_mask = None
 
         # --- Detection tracking ---
         # Each entry: {'pos': np.array, 'normal': (nx,ny), 'type': str,
@@ -335,6 +364,7 @@ class Task2Controller(Node):
 
         # --- Interact tracking ---
         self._qr_task_raw: str | None = None
+        self._qr_wait_start_time: float | None = None
         self.ring_task = False
         self.barrel_task = False
         self.barrel_task_done = False
@@ -371,10 +401,20 @@ class Task2Controller(Node):
         _model_path = _share / "assets" / "tiles" / "model.yaml"
         _patchcore_config = PatchCoreConfig.from_yaml(_model_path)
         _world_ref_root = _ref_root / self._world_name
-        _ref_red = sorted((_world_ref_root / "red").rglob("*.png")) if (_world_ref_root / "red").is_dir() else []
-        _ref_green = sorted((_world_ref_root / "green").rglob("*.png")) if (_world_ref_root / "green").is_dir() else []
+        _ref_red = (
+            sorted((_world_ref_root / "red").rglob("*.png"))
+            if (_world_ref_root / "red").is_dir()
+            else []
+        )
+        _ref_green = (
+            sorted((_world_ref_root / "green").rglob("*.png"))
+            if (_world_ref_root / "green").is_dir()
+            else []
+        )
         if not _ref_red:
-            _ref_red = sorted(p for p in _ref_root.rglob("*.png") if "/red/" in p.as_posix())
+            _ref_red = sorted(
+                p for p in _ref_root.rglob("*.png") if "/red/" in p.as_posix()
+            )
         if not _ref_green:
             _ref_green = sorted(p for p in _ref_root.rglob("*.png") if "/green/" in p.as_posix())
         self._tile_detector_red = PatchCoreTileDetector.from_paths(_ref_red, _patchcore_config)
@@ -404,10 +444,15 @@ class Task2Controller(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel_unstamped", 10)
         self.arm_pub = self.create_publisher(String, "/arm_command", 10)
         self._spill_target_pub = self.create_publisher(PointStamped, "/spill_target", 1)
-        self._snapshot_bottom_pub = self.create_publisher(String, "/megatron/snapshot/bottom", 10)
+        self._snapshot_bottom_pub = self.create_publisher(
+            String, "/megatron/snapshot/bottom", 10
+        )
         self.goal_marker_pub = self.create_publisher(MarkerArray, "/goal_markers", 10)
         self.approaching_object_pub = self.create_publisher(
             Marker, "/approaching_object", 10
+        )
+        self.footprint_check_pub = self.create_publisher(
+            MarkerArray, "/footprint_check_points", 10
         )
         self._ws_debug_live_pub = self.create_publisher(
             Image, "/workstation_debug/live", 1
@@ -455,6 +500,18 @@ class Task2Controller(Node):
         )
         self.create_subscription(
             OccupancyGrid, "/global_costmap/costmap", self._costmap_cb, costmap_qos
+        )
+        self.create_subscription(
+            OccupancyGrid,
+            "/local_costmap/costmap",
+            self._local_costmap_cb,
+            costmap_qos,
+        )
+        self.create_subscription(
+            OccupancyGrid,
+            "/keepout_filter_mask",
+            self._keepout_mask_cb,
+            costmap_qos,
         )
         self.create_subscription(String, "/robot_state", self._robot_state_cb, 10)
 
@@ -516,7 +573,7 @@ class Task2Controller(Node):
                     f["normal"] = (nx, ny)
                     f["last_seen"] = now
                     f["label"] = label
-                    
+
                     # if not f.get("approached", False) and self.state == State.PATROL:
                     #     self._requeue_if_not_pending("face", f)
                     return
@@ -549,9 +606,10 @@ class Task2Controller(Node):
                 if (
                     self.current_target is not None
                     and self.current_target.get("type") == "ring"
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) > self.MIN_UPDATE_DISTANCE
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) < self.DEDUP_DISTANCE
-
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    > self.MIN_UPDATE_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    < self.DEDUP_DISTANCE
                 ):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
@@ -569,14 +627,12 @@ class Task2Controller(Node):
                 return
 
         self.get_logger().info(f"New ring ({color}) at ({pos[0]:.2f}, {pos[1]:.2f})")
-        self.found_rings.append(
-            {
-                "type": "ring",
-                "pos": pos,
-                "color": color,
-                "last_seen": self.get_clock().now(),
-            }
-        )
+        self.found_rings.append({
+            "type": "ring",
+            "pos": pos,
+            "color": color,
+            "last_seen": self.get_clock().now(),
+        })
         self.ring_counts[color] = self.ring_counts.get(color, 0) + 1
 
     def _cylinder_cb(self, msg: PoseStamped):
@@ -591,20 +647,22 @@ class Task2Controller(Node):
                 if (
                     self.current_target is not None
                     and self.current_target.get("type") == "barrel"
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) > self.MIN_UPDATE_DISTANCE
-                    and np.linalg.norm(pos - np.array(self.current_target["pos"])) < self.DEDUP_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    > self.MIN_UPDATE_DISTANCE
+                    and np.linalg.norm(pos - np.array(self.current_target["pos"]))
+                    < self.DEDUP_DISTANCE
                 ):
                     self.current_target["pos"] = pos
                     self.current_target["last_seen"] = now
                     self._nav_update = True
                     # self.get_logger().info("Set flag Nav Update to TRUE from barrel cb")
-                
+
                 # elif np.linalg.norm(pos - b["pos"]) < self.DEDUP_DISTANCE:
-                    # self.get_logger().info(
-                    #     f"Requing barrel {b['color']} since the new detected location is more far away"
-                    # )
-                    # if not f.get("approached", False) and self.state == State.PATROL:
-                    #     self._requeue_if_not_pending("face", f)
+                # self.get_logger().info(
+                #     f"Requing barrel {b['color']} since the new detected location is more far away"
+                # )
+                # if not f.get("approached", False) and self.state == State.PATROL:
+                #     self._requeue_if_not_pending("face", f)
                 #     return
                 # if (
                 #     b["orientation"] == "horizontal"
@@ -634,9 +692,10 @@ class Task2Controller(Node):
 
     def _workstation_cb(self, msg: Marker):
         color = msg.ns  # "red" or "green"
-        self.workstation_poses[color] = np.array(
-            [msg.pose.position.x, msg.pose.position.y]
-        )
+        self.workstation_poses[color] = np.array([
+            msg.pose.position.x,
+            msg.pose.position.y,
+        ])
         # self.get_logger().info(
         #     f"Workstation '{color}' at ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
         # )
@@ -695,9 +754,8 @@ class Task2Controller(Node):
     def _top_camera_cb(self, msg: Image):
         frame = self._cv_bridge.imgmsg_to_cv2(msg, "bgr8")
         self._last_top_frame = frame
-        self._last_top_stamp_ns = (
-            int(msg.header.stamp.sec) * 1_000_000_000
-            + int(msg.header.stamp.nanosec)
+        self._last_top_stamp_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(
+            msg.header.stamp.nanosec
         )
         if self.state == State.INSPECT_WORKSTATION:
             try:
@@ -765,6 +823,12 @@ class Task2Controller(Node):
 
     def _costmap_cb(self, msg: OccupancyGrid):
         self.costmap = msg
+
+    def _local_costmap_cb(self, msg: OccupancyGrid):
+        self.local_costmap = msg
+
+    def _keepout_mask_cb(self, msg: OccupancyGrid):
+        self.keepout_mask = msg
 
     # ── Dedup helper ──────────────────────────────────────────────────
 
@@ -859,7 +923,6 @@ class Task2Controller(Node):
         if self._nav_aborted():
             self.get_logger().warn(f"Waypoint {self.waypoint_index} aborted, skipping.")
 
-        
         self.waypoint_index += 1
 
         if self.waypoint_index >= len(self.waypoints):
@@ -915,6 +978,12 @@ class Task2Controller(Node):
             return
 
         if not self._is_nav_complete():
+            if self._approach_is_stuck():
+                self.get_logger().warn(
+                    "Nav2 stuck recovering on approach goal — cancelling and resending."
+                )
+                self._cancel_nav()
+                self._handle_approach_failure()
             return
 
         if self._nav_succeeded():
@@ -925,20 +994,58 @@ class Task2Controller(Node):
 
         if self._nav_aborted():
             self.get_logger().info("approach aborted resending approach")
-            self._approach_attempt += 1
-            if self.current_target is not None:
-                if not self._send_approach(self.current_target, self._approach_attempt):
-                    self.get_logger().warn(
-                        "All approach candidates exhausted — re-queuing target."
-                    )
-                    self.current_target["approached"] = False
-                    self.pending_targets.append(self.current_target)
-                    self.current_target = None
-                    if self._patrol_complete:
-                        self._next_post_patrol_target()
-                    else:
-                        self._transition(State.PATROL)
-                        self._send_next_waypoint()
+            self._handle_approach_failure()
+
+    def _approach_is_stuck(self) -> bool:
+        """True if the in-flight approach goal has made no progress in too long.
+
+        Nav2's own recovery behaviours (spin/backup) can loop forever if the
+        robot is wedged against an obstacle, never returning a terminal
+        status — so we time out independently instead of waiting on
+        _nav_aborted()/_nav_succeeded(). The clock is measured from the last
+        time Nav2's feedback showed distance_remaining actually decreasing,
+        not from when the goal was sent: a goal that's simply far away can
+        legitimately take longer than approach_stuck_timeout at the
+        velocity-smoother's capped speed without ever being stuck, and a
+        flat send-time deadline would cancel (and endlessly re-cancel) a
+        perfectly healthy approach before it could finish.
+
+        Once near the goal (see _is_near_goal), a longer grace period
+        applies instead: the final in-place heading-alignment rotation
+        barely moves distance_remaining, which would otherwise look
+        identical to being wedged and cancel a goal that was about to
+        settle (see APPROACH_FINAL_STUCK_GRACE_S).
+        """
+        if self._nav_goal_sent_time is None:
+            return False
+        timeout = (
+            self.APPROACH_FINAL_STUCK_GRACE_S
+            if self._is_near_goal()
+            else cast(float, self.get_parameter("approach_stuck_timeout").value)
+        )
+        reference_time = (
+            self._nav_progress_time
+            if self._nav_progress_time is not None
+            else self._nav_goal_sent_time
+        )
+        elapsed = self.get_clock().now().nanoseconds / 1e9 - reference_time
+        return elapsed > timeout
+
+    def _handle_approach_failure(self):
+        self._approach_attempt += 1
+        if self.current_target is not None:
+            if not self._send_approach(self.current_target, self._approach_attempt):
+                self.get_logger().warn(
+                    "All approach candidates exhausted — re-queuing target."
+                )
+                self.current_target["approached"] = False
+                self.pending_targets.append(self.current_target)
+                self.current_target = None
+                if self._patrol_complete:
+                    self._next_post_patrol_target()
+                else:
+                    self._transition(State.PATROL)
+                    self._send_next_waypoint()
 
     def _send_approach(self, target: dict, attempt: int) -> bool:
         """Try candidate at `attempt`, costmap-skip forward if blocked.
@@ -947,7 +1054,7 @@ class Task2Controller(Node):
         retry distances have been exhausted.
         """
         _type = target["type"]
-        self.get_logger().info(f"Sending approach to {_type} at {target["pos"]}")
+        self.get_logger().info(f"Sending approach to {_type} at {target['pos']}")
 
         if _type == "face":
             n_candidates = 8
@@ -957,8 +1064,9 @@ class Task2Controller(Node):
                 return self._face_approach_candidates(
                     target["pos"], target["normal"], distance=d
                 )
+
         else:
-            n_candidates = 1
+            n_candidates = len(self.BARREL_FAN_DEGREES)
             base_dist = cast(
                 float, self.get_parameter("barrel_approach_distance").value
             )
@@ -977,8 +1085,15 @@ class Task2Controller(Node):
 
             while idx < len(candidates):
                 ax, ay, yaw = candidates[idx]
-                self._publish_approaching_object(ax, ay, yaw, attempt, total=total)
-                if self._cost_at_goal_ok(ax, ay):
+                accepted = self._cost_at_goal_ok(ax, ay, yaw)
+                self._publish_approaching_object(
+                    ax, ay, yaw, attempt, total=total, accepted=accepted
+                )
+                self.get_logger().info(
+                    f"Candidate {attempt + 1}/{total} at ({ax:.2f}, {ay:.2f}): "
+                    f"{'ACCEPTED' if accepted else 'rejected'}."
+                )
+                if accepted:
                     self._send_nav_goal(ax, ay, yaw)
                     self._approach_attempt = attempt  # sync for next abort
                     return True
@@ -1034,8 +1149,16 @@ class Task2Controller(Node):
             for i, o in enumerate(offsets)
         ]
 
+    BARREL_FAN_DEGREES = [0, 15, -15]  # barrels are cylindrical — only need a small fan
+
     def _barrel_approach_candidates(self, target: dict, distance=None):
-        """Single approach candidate — position-based (no fanout)."""
+        """Small fan of candidates around the primary approach direction.
+
+        Barrels are radially symmetric, so unlike faces we don't need a wide
+        8-way fan — a few small angular offsets around the direction the
+        barrel was first seen from are enough to route around a locally
+        blocked costmap cell.
+        """
         pos = target["pos"]
         dist = (
             distance
@@ -1063,10 +1186,15 @@ class Task2Controller(Node):
                     dx, dy = 1.0, 0.0
             else:
                 dx, dy = 1.0, 0.0
-            ax = px - dx * dist
-            ay = py - dy * dist
-            yaw = math.atan2(dy, dx)
-            return [(ax, ay, yaw)]
+            base_angle = math.atan2(dy, dx)
+            return [
+                (
+                    px - math.cos(base_angle + o) * dist,
+                    py - math.sin(base_angle + o) * dist,
+                    math.atan2(math.sin(base_angle + o), math.cos(base_angle + o)),
+                )
+                for o in (math.radians(d) for d in self.BARREL_FAN_DEGREES)
+            ]
 
         # Horizontal barrel: perpendicular to axis + lateral shift
         q = target.get("quat")
@@ -1084,14 +1212,20 @@ class Task2Controller(Node):
         if rx is None and self.current_pose is not None:
             rx, ry = self.current_pose.position.x, self.current_pose.position.y
         if rx is not None and ry is not None:
-            if (ry - px) * perp_x + (ry - py) * perp_y < 0:
+            if (rx - px) * perp_x + (ry - py) * perp_y < 0:
                 perp_x, perp_y = -perp_x, -perp_y
-        # Lateral shift to robot-right (cross product of approach direction and Z-up)
-        right_x = -perp_y  # rotate approach 90° CW in XY
-        right_y = perp_x
-        approach_x = px + perp_x * dist + right_x * lateral
-        approach_y = py + perp_y * dist + right_y * lateral
-        yaw = math.atan2(-perp_y, -perp_x)
+        base_angle = math.atan2(perp_y, perp_x)
+        candidates = []
+        for d in self.BARREL_FAN_DEGREES:
+            angle = base_angle + math.radians(d)
+            cx, cy = math.cos(angle), math.sin(angle)
+            # Lateral shift to robot-right (cross product of approach direction and Z-up)
+            right_x, right_y = -cy, cx  # rotate approach 90° CW in XY
+            approach_x = px + cx * dist + right_x * lateral
+            approach_y = py + cy * dist + right_y * lateral
+            yaw = math.atan2(-cy, -cx)
+            candidates.append((approach_x, approach_y, yaw))
+        return candidates
         return [(approach_x, approach_y, yaw)]
 
     # ── INTERACT ──────────────────────────────────────────────────────
@@ -1108,9 +1242,10 @@ class Task2Controller(Node):
             # pronoun = "woman" if "she" in label.lower() else "man"
             self.speaker.speak(f"Hi {name}! What task should I perform?")
             self._qr_task_raw = None
+            self._qr_wait_start_time = self.get_clock().now().nanoseconds / 1e9
 
         elif target["type"] == "barrel":
-            self.speaker.speak(f"Inspecting {target["color"]} barrel.")
+            self.speaker.speak(f"Inspecting {target['color']} barrel.")
             self._spill_future = None
             self._spill_start_time = None
 
@@ -1175,17 +1310,15 @@ class Task2Controller(Node):
             else:
                 self.speaker.speak("Barrel OK.")
 
-            self.barrel_report.append(
-                {
-                    "id": len(self.barrel_report) + 1,
-                    "color": target.get("color", "unknown"),
-                    "orientation": orientation,
-                    "leaking": leaking,
-                    "spill_count": spill_count,
-                    "spill_threshold": 4000,
-                    "pos": target["pos"].tolist(),
-                }
-            )
+            self.barrel_report.append({
+                "id": len(self.barrel_report) + 1,
+                "color": target.get("color", "unknown"),
+                "orientation": orientation,
+                "leaking": leaking,
+                "spill_count": spill_count,
+                "spill_threshold": 4000,
+                "pos": target["pos"].tolist(),
+            })
             self._mark_approached(target)
             self._resume_patrol()
             return
@@ -1194,9 +1327,24 @@ class Task2Controller(Node):
         if (
             self._qr_task_raw is None or self._qr_task_raw == ""
         ):  # if qr_task is not seen it is failed
+            timeout = cast(float, self.get_parameter("qr_wait_timeout").value)
+            start = self._qr_wait_start_time
+            if (
+                start is not None
+                and self.get_clock().now().nanoseconds / 1e9 - start > timeout
+            ):
+                self.get_logger().warn(
+                    "Timed out waiting for QR task — giving up on this worker."
+                )
+                self.speaker.speak("I couldn't read your task. Moving on.")
+                self._qr_wait_start_time = None
+                self._mark_approached(target)
+                self._resume_patrol()
+                return
             self.get_logger().info("Waitting for qr task")
             return
 
+        self._qr_wait_start_time = None
         qr_raw = self._qr_task_raw
         task_token = _parse_qr_task(qr_raw)
         self._qr_task_raw = None
@@ -1210,7 +1358,11 @@ class Task2Controller(Node):
             rclpy.shutdown()
             return
 
-        if task_token is not None and task_token != "nothing" and task_token != "emergency":
+        if (
+            task_token is not None
+            and task_token != "nothing"
+            and task_token != "emergency"
+        ):
             requestor = (target.get("label") or "Unknown") if target else "Unknown"
             if "defects" in task_token:
                 self._anomaly_requestor = requestor
@@ -1219,7 +1371,9 @@ class Task2Controller(Node):
                     self.workstation_color = "red"
                 elif "green" in task_token:
                     self.workstation_color = "green"
-                self.get_logger().info(f"Workstation color set to '{self.workstation_color}' from QR.")
+                self.get_logger().info(
+                    f"Workstation color set to '{self.workstation_color}' from QR."
+                )
 
             elif task_token == "barrels":
                 self._barrel_requestor = requestor
@@ -1236,7 +1390,7 @@ class Task2Controller(Node):
             self.speaker.speak("OK, no task for me. Continuing patrol.")
         else:
             self.speaker.speak("Understood.")
-        
+
         self._mark_approached(target)
         self._resume_patrol()
 
@@ -1281,17 +1435,19 @@ class Task2Controller(Node):
                             f"at ({b['pos'][0]:.2f}, {b['pos'][1]:.2f})"
                         )
 
-                if self.pending_targets: #pending targets is not empty
+                if self.pending_targets:  # pending targets is not empty
                     self.speaker.speak("Inspecting barrels")
                     self._next_post_patrol_target()
                     return
-                else: # pending targets are empty, which means None barrels were found
-                    # continue with the workstation task 
+                else:  # pending targets are empty, which means None barrels were found
+                    # continue with the workstation task
                     pass
-                    
-            
+
             # workstation
-            if self.workstation_color is not None and self.workstation_color in self.workstation_poses:
+            if (
+                self.workstation_color is not None
+                and self.workstation_color in self.workstation_poses
+            ):
                 color = self.workstation_color
                 self.get_logger().info(
                     f"Post-patrol done — starting {color} workstation inspection."
@@ -1583,7 +1739,7 @@ class Task2Controller(Node):
                     tile_center_x = float(tile_box[:, 0].mean())
                     frame_width = self._last_top_frame.shape[1]
                     tile_centered = (
-                        0.42 * frame_width <= tile_center_x <= 0.58 * frame_width
+                        0.36 * frame_width <= tile_center_x <= 0.64 * frame_width
                     )
 
                 if (
@@ -1683,9 +1839,13 @@ class Task2Controller(Node):
         """Write a PDF inspection report via ReportBuilder."""
         tasks = []
         if self.ring_task:
-            tasks.append(RingTask(requestor=self._ring_requestor, counts=self.ring_counts))
+            tasks.append(
+                RingTask(requestor=self._ring_requestor, counts=self.ring_counts)
+            )
         if self.barrel_task:
-            tasks.append(BarrelTask(requestor=self._barrel_requestor, results=self.barrel_report))
+            tasks.append(
+                BarrelTask(requestor=self._barrel_requestor, results=self.barrel_report)
+            )
         if self.anomaly_task:
             tasks.append(
                 AnomalyTask(
@@ -1695,7 +1855,7 @@ class Task2Controller(Node):
                 )
             )
         try:
-            path = ReportBuilder(logger = self.get_logger()).save_pdf(tasks)
+            path = ReportBuilder(logger=self.get_logger()).save_pdf(tasks)
             self.get_logger().info(f"Report written to {path}")
         except Exception as e:
             self.get_logger().error(f"Report write failed: {e}")
@@ -1809,7 +1969,9 @@ class Task2Controller(Node):
         current_yaw = self._current_yaw()
         if current_yaw is None:
             return None
-        body_angle = _normalize_angle(self._belt_world_perp() - current_yaw - math.pi / 2)
+        body_angle = _normalize_angle(
+            self._belt_world_perp() - current_yaw - math.pi / 2
+        )
         dist = self._median_scan_distance(body_angle, math.radians(8.0))
         if dist is None:
             return None
@@ -1833,7 +1995,7 @@ class Task2Controller(Node):
         distance_correction = 0.0
         if side is not None and self._inspection_side_target is not None:
             distance_error = side - self._inspection_side_target
-            if abs(distance_error) > 0.04:
+            if abs(distance_error) > 0.01:  # TODO: tweak
                 belt_side_sign = math.copysign(
                     1.0, math.sin(self._belt_world_perp() - (current_yaw or 0.0))
                 )
@@ -1913,7 +2075,7 @@ class Task2Controller(Node):
         box = quad_from_contour(best)
         if box is None:
             box = cv2.boxPoints(cv2.minAreaRect(best))
-        box[:, 1] += crop_y
+        box[:, 1] += crop_y  # ty: ignore[unsupported-operator]  # ndarray += int is valid at runtime; stub lacks this overload
         return box.astype(np.float32), full_mask
 
     def _score_tile(self, frame: np.ndarray) -> TileAnomalyResult:
@@ -1930,7 +2092,9 @@ class Task2Controller(Node):
         except Exception:
             pass
         if box is None:
-            return TileAnomalyResult(status="UNKNOWN", reason="tile contour not detected")
+            return TileAnomalyResult(
+                status="UNKNOWN", reason="tile contour not detected"
+            )
         canonical = warp_tile(frame, box)
         try:
             self._ws_debug_warped_pub.publish(
@@ -2059,6 +2223,9 @@ class Task2Controller(Node):
         self._nav_ever_sent = True
         self._nav_rejected = False
         self._nav_update = False
+        self._nav_goal_sent_time = self.get_clock().now().nanoseconds / 1e9
+        self._nav_progress_distance = None
+        self._nav_progress_time = self._nav_goal_sent_time
         seq = self._nav_seq
         future = self.nav_client.send_goal_async(
             goal, feedback_callback=self._nav_feedback_cb
@@ -2079,8 +2246,16 @@ class Task2Controller(Node):
         self.nav_result_future = self.nav_goal_handle.get_result_async()
 
     def _nav_feedback_cb(self, feedback_msg):
-        self._last_feedback_distance = feedback_msg.feedback.distance_remaining
-        self._last_feedback_time = self.get_clock().now().nanoseconds / 1e9
+        distance = feedback_msg.feedback.distance_remaining
+        now = self.get_clock().now().nanoseconds / 1e9
+        self._last_feedback_distance = distance
+        self._last_feedback_time = now
+        if (
+            self._nav_progress_distance is None
+            or distance < self._nav_progress_distance - self.NAV_PROGRESS_MARGIN_M
+        ):
+            self._nav_progress_distance = distance
+            self._nav_progress_time = now
 
     def _cancel_nav(self):
         self.get_logger().warning("Canceling Nav2 goal ")
@@ -2094,6 +2269,9 @@ class Task2Controller(Node):
         self._nav_update = False
         self._last_feedback_distance = None
         self._last_feedback_time = None
+        self._nav_goal_sent_time = None
+        self._nav_progress_distance = None
+        self._nav_progress_time = None
 
     def _is_near_goal(self) -> bool:
         if self._last_feedback_distance is None or self._last_feedback_time is None:
@@ -2181,16 +2359,21 @@ class Task2Controller(Node):
 
     # ── Costmap check ──────────────────────────────────────────────────
     def _publish_approaching_object(
-        self, ax, ay, yaw=None, attempt=0, total=8, none=False
+        self, ax, ay, yaw=None, attempt=0, total=8, none=False, accepted=None
     ):
         """
         Publish an approach marker at the current Nav2 approach goal position.
 
-        ax, ay  — goal position in map frame
-        yaw     — if provided, orient the small arrow using this heading
-        attempt — 0-indexed candidate number being tried (shown in label)
-        total   — total candidates available (shown in label)
-        none    — if True, delete both markers
+        ax, ay    — goal position in map frame
+        yaw       — if provided, orient the small arrow using this heading
+        attempt   — 0-indexed candidate number being tried (shown in label)
+        total     — total candidates available (shown in label)
+        none      — if True, delete both markers
+        accepted  — None while the candidate's outcome is unknown (orange);
+                    True/False colors the marker green/red once the costmap
+                    check has decided, so a frozen RViz frame can't be
+                    mistaken for "this is the goal we're driving to" when
+                    it's actually a candidate that just got rejected.
         """
         now = self.get_clock().now().to_msg()
 
@@ -2204,6 +2387,13 @@ class Task2Controller(Node):
                 m.action = Marker.DELETE
                 self.approaching_object_pub.publish(m)
             return
+
+        if accepted is None:
+            color = (1.0, 0.55, 0.0)  # orange = outcome not yet known
+        elif accepted:
+            color = (0.0, 1.0, 0.0)  # green = accepted, this is the goal
+        else:
+            color = (1.0, 0.0, 0.0)  # red = rejected
 
         if yaw is not None:
             # Small arrow centered on the goal and oriented by yaw.
@@ -2225,9 +2415,7 @@ class Task2Controller(Node):
             arrow.scale.x = 0.18
             arrow.scale.y = 0.05
             arrow.scale.z = 0.05
-            arrow.color.r = 1.0
-            arrow.color.g = 0.55
-            arrow.color.b = 0.0
+            arrow.color.r, arrow.color.g, arrow.color.b = color
             arrow.color.a = 1.0
             arrow.lifetime.sec = 0
             self.approaching_object_pub.publish(arrow)
@@ -2253,60 +2441,282 @@ class Task2Controller(Node):
         label.pose.position.z = 1.05
         label.pose.orientation.w = 1.0
         label.scale.z = 0.15
-        label.color.r = 1.0
-        label.color.g = 0.55
-        label.color.b = 0.0
+        label.color.r, label.color.g, label.color.b = color
         label.color.a = 1.0
-        label.text = f"GOAL {attempt + 1}/{total}"
+        suffix = "" if accepted is None else (" ACCEPTED" if accepted else " rejected")
+        label.text = f"GOAL {attempt + 1}/{total}{suffix}"
         label.lifetime.sec = 0
         self.approaching_object_pub.publish(label)
 
     # ── Costmap check ──────────────────────────────────────────────────
 
-    def _cost_at_goal_ok(self, x: float, y: float, kernel = 5) -> bool:
-        if self.costmap is None:
-            return True
-        mx, my = self._world_to_map(x, y)
-        w, h = self.costmap.info.width, self.costmap.info.height
-        half = kernel // 2
+    # Robot footprint radius (~0.189 m, see nav2.yaml) plus a small safety
+    # margin. The check window must cover at least this much, or a goal can
+    # pass while the robot's actual body still overlaps a near-obstacle cell.
+    APPROACH_CLEARANCE_RADIUS_M = 0.28
+
+    # The robot's actual footprint polygon (body frame, x forward/y left),
+    # copied from the `footprint:` list in nav2.yaml — keep these in sync.
+    # It's a near-regular octagon, so the diagonal vertices stick out just
+    # as far as the cardinal ones; a check that only sampled front/back/
+    # left/right left the diagonal corners completely unchecked, which is
+    # exactly where a diagonal wall edge (the "staircase" aliasing visible
+    # in the costmap) can clip the robot while every cardinal sample reads
+    # clear.
+    FOOTPRINT_VERTICES_M = [
+        (0.189, 0.000),
+        (0.134, -0.134),
+        (0.000, -0.189),
+        (-0.134, -0.134),
+        (-0.189, 0.000),
+        (-0.134, 0.134),
+        (0.000, 0.189),
+        (0.134, 0.134),
+    ]
+
+    # Multiplier on FOOTPRINT_VERTICES_M's offsets (see
+    # `_footprint_sample_points`). Set to 0 to fall back to checking only
+    # the center point, e.g. if costmap/scan coverage near candidates is
+    # too sparse to trust the extra points.
+    FOOTPRINT_MARGIN_SCALE = 1.1  # 1.0
+
+    # Threshold for the off-center footprint points (the footprint polygon
+    # vertices around the candidate, see `_footprint_sample_points`). The painted
+    # purple/near-obstacle inflation border reads ~90-100 and is fine for
+    # the robot's body to be next to; the actual danger zone is the
+    # lethal-obstacle/inscribed-radius cyan band at 253-254. Set well above
+    # the former and well below the latter so purple no longer gets
+    # rejected but a true collision-risk cell still does.
+    FOOTPRINT_EDGE_COST_THRESHOLD = 150
+
+    # Sampling radius used for the off-center footprint points. Deliberately
+    # much smaller than APPROACH_CLEARANCE_RADIUS_M (0.28): that radius is
+    # tuned for "is the broad neighborhood around the candidate's center
+    # navigable," but a vertex point's whole job is "is the cell right here,
+    # where the robot's body will actually be, lethal." A 0.28m disc spaced
+    # only ~0.19m from the center would overlap the center's own disc almost
+    # entirely, diluting the vertex check back into the same broad-area
+    # average it was meant to catch a failure of.
+    FOOTPRINT_EDGE_SAMPLE_RADIUS_M = 0.06
+
+    def _footprint_sample_points(
+        self, x: float, y: float, yaw: float
+    ) -> list[tuple[float, float]]:
+        """Center plus the 8 footprint-polygon vertices around (x, y) at `yaw`.
+
+        A single disc-median check at one point is blind to which side of
+        the parked robot ends up against an obstacle: the candidate can
+        look clear on average (low median) while one flank is jammed
+        against a wall, because the rest of the sampled disc is open and
+        pulls the median down. Gating several points spread across the
+        actual footprint — each individually, not pooled into one
+        statistic — catches that a single median can't.
+
+        The points used are the actual FOOTPRINT_VERTICES_M polygon, not
+        just front/back/left/right: the robot's footprint is a near-regular
+        octagon, so the diagonal vertices reach just as far as the cardinal
+        ones, and a diagonal wall edge can clip a diagonal vertex while every
+        cardinal sample still reads clear.
+        """
+        if self.FOOTPRINT_MARGIN_SCALE <= 0:
+            return [(x, y)]
+        fx, fy = math.cos(yaw), math.sin(yaw)
+        lx, ly = -math.sin(yaw), math.cos(yaw)
+        s = self.FOOTPRINT_MARGIN_SCALE
+        points = [(x, y)]
+        for vx, vy in self.FOOTPRINT_VERTICES_M:
+            vx, vy = vx * s, vy * s
+            points.append((x + vx * fx + vy * lx, y + vx * fy + vy * ly))
+        return points
+
+    def _publish_footprint_check_markers(
+        self, points: list[tuple[float, float]], accepted: bool
+    ):
+        """Visualize the sampled footprint-check points (debug aid).
+
+        Publishes one small sphere per point in `points` (index 0 = center,
+        rest = polygon vertices/edge-midpoints) so the actual sampled
+        footprint shape can be eyeballed in RViz against the costmap.
+
+        Colored green/red by `accepted` — these are published once the
+        cost check has actually decided, not while a candidate is still
+        being evaluated, so a frozen RViz frame is never a rejected
+        candidate's dots being mistaken for the chosen goal.
+        """
+        now = self.get_clock().now().to_msg()
+        markers = []
+        base_color = (0.0, 1.0, 0.0) if accepted else (1.0, 0.0, 0.0)
+        for i, (px, py) in enumerate(points):
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = now
+            m.ns = "footprint_check_points"
+            m.id = i
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position.x = float(px)
+            m.pose.position.y = float(py)
+            m.pose.position.z = 0.10
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = 0.05
+            m.color.r, m.color.g, m.color.b = base_color
+            m.color.a = 1.0 if i == 0 else 0.6  # center = solid, vertices = dimmer
+            m.lifetime.sec = 0
+            markers.append(m)
+        self.footprint_check_pub.publish(MarkerArray(markers=markers))
+
+    def _cost_ok_on(
+        self,
+        costmap: OccupancyGrid,
+        x: float,
+        y: float,
+        out_of_bounds_ok: bool,
+        threshold: float = 150,
+        radius_m: float | None = None,
+        stat: str = "median",
+    ) -> tuple[bool, float | None]:
+        mx, my = self._world_to_map(costmap, x, y)
+        w, h = costmap.info.width, costmap.info.height
+        radius = radius_m if radius_m is not None else self.APPROACH_CLEARANCE_RADIUS_M
+        half = max(1, round(radius / costmap.info.resolution))
         costs = []
 
         for dy in range(-half, half + 1):
             for dx in range(-half, half + 1):
                 nx_, ny_ = mx + dx, my + dy
                 if 0 <= nx_ < w and 0 <= ny_ < h:
-                    c = self.costmap.data[ny_ * w + nx_]
-                    if c >= 0:
+                    # OccupancyGrid.data is int8, but Nav2 costmap publishers
+                    # write the raw unsigned cost (0-255) into it — any cost
+                    # >= 128 wraps to negative on deserialization (e.g. 254
+                    # arrives as -2). Mask back to the unsigned byte before
+                    # using it, or every high-cost/lethal cell silently
+                    # vanishes from `costs` instead of being counted as bad.
+                    c = costmap.data[ny_ * w + nx_] & 0xFF
+                    if c != 255:  # 255 = NO_INFORMATION, not a real cost
                         costs.append(c)
         if not costs:
+            # No cells in this costmap cover the point at all — e.g. the
+            # local costmap is a small window around the robot and the
+            # candidate is still far away. That's "no information," not
+            # "blocked"; only the global costmap (which covers the whole
+            # known map) should treat unseen ground as blocked.
+            return out_of_bounds_ok, None
+        cost = max(costs) if stat == "max" else sorted(costs)[len(costs) // 2]
+        return cost < threshold, cost
+
+    def _cost_at_goal_ok(self, x: float, y: float, yaw: float | None = None) -> bool:
+        """Check the goal clears both costmaps.
+
+        The global costmap is what we have readily available for planning,
+        but Nav2's controller_server and behavior_server (the things that
+        actually drive and recover) act on the local costmap, which has its
+        own more reactive voxel layer. A goal can look clear on one and not
+        the other, so both must agree before we commit to it.
+
+        The keepout mask is checked separately from the live costmap: Nav2's
+        recovery behaviors call clearEntirely on the costmap, which briefly
+        wipes the KeepoutFilter's painted cells until it re-subscribes and
+        repaints — sampling the costmap in that window can read a keepout
+        cell as clear. The mask topic itself is latched and never cleared,
+        so checking it directly is immune to that race.
+
+        Pass `yaw` for any goal where the robot will actually be parked at
+        that orientation (approach candidates, retreat targets) so the
+        check also covers the footprint polygon's vertices, not just the
+        center point — see `_footprint_sample_points`. Omit it for
+        orientation-agnostic checks.
+        """
+        points = (
+            self._footprint_sample_points(x, y, yaw) if yaw is not None else [(x, y)]
+        )
+
+        def _reject(reason: str) -> bool:
+            self.get_logger().warn(reason)
+            if yaw is not None:
+                self._publish_footprint_check_markers(points, accepted=False)
             return False
-        median_cost = sorted(costs)[len(costs) // 2]
-        if median_cost >= 80:
-            self.get_logger().warn(f"Approach blocked (median cost={median_cost}).")
-            return False
+
+        global_costs: list[float] = []
+        local_costs: list[float] = []
+        for i, (px, py) in enumerate(points):
+            is_center = i == 0
+            edge_kwargs = (
+                {}
+                if is_center
+                else {
+                    "threshold": self.FOOTPRINT_EDGE_COST_THRESHOLD,
+                    "radius_m": self.FOOTPRINT_EDGE_SAMPLE_RADIUS_M,
+                    "stat": "max",
+                }
+            )
+            keepout_kwargs = (
+                {}
+                if is_center
+                else {
+                    "radius_m": self.FOOTPRINT_EDGE_SAMPLE_RADIUS_M,
+                    "stat": "max",
+                }
+            )
+            if (
+                self.keepout_mask is not None
+                and not self._cost_ok_on(
+                    self.keepout_mask,
+                    px,
+                    py,
+                    out_of_bounds_ok=True,
+                    threshold=50,
+                    **keepout_kwargs,
+                )[0]
+            ):
+                return _reject(
+                    f"Approach blocked (keepout mask) at ({px:.2f}, {py:.2f})."
+                )
+            if self.costmap is not None:
+                ok, global_cost = self._cost_ok_on(
+                    self.costmap, px, py, out_of_bounds_ok=False, **edge_kwargs
+                )
+                if global_cost is not None:
+                    global_costs.append(global_cost)
+                self.get_logger().info(
+                    f"  footprint point {i} ({'center' if is_center else 'edge'}) "
+                    f"at ({px:.2f}, {py:.2f}): global_cost={global_cost}, ok={ok}"
+                )
+                if not ok:
+                    return _reject(
+                        f"Approach blocked (global costmap) at ({px:.2f}, "
+                        f"{py:.2f}), median_cost={global_cost}, "
+                        f"point={'center' if is_center else 'edge'}."
+                    )
+            if self.local_costmap is not None:
+                ok, local_cost = self._cost_ok_on(
+                    self.local_costmap, px, py, out_of_bounds_ok=True, **edge_kwargs
+                )
+                if local_cost is not None:
+                    local_costs.append(local_cost)
+                self.get_logger().info(
+                    f"  footprint point {i} ({'center' if is_center else 'edge'}) "
+                    f"at ({px:.2f}, {py:.2f}): local_cost={local_cost}, ok={ok}"
+                )
+                if not ok:
+                    return _reject(
+                        f"Approach blocked (local costmap) at ({px:.2f}, "
+                        f"{py:.2f}), median_cost={local_cost}, "
+                        f"point={'center' if is_center else 'edge'}."
+                    )
+        self.get_logger().info(
+            f"Approach accepted at ({x:.2f}, {y:.2f}): "
+            f"global_worst={max(global_costs, default=None)}, "
+            f"local_worst={max(local_costs, default=None)}."
+        )
+        if yaw is not None:
+            self._publish_footprint_check_markers(points, accepted=True)
         return True
 
-        # if not (0 <= mx < w and 0 <= my < h):
-        #     return False
-        # cost = self.costmap.data[my * w + mx]
-        # if cost >= 80 or cost < 0:
-        #     c_type = (
-        #         self.current_target["type"]
-        #         if self.current_target is not None
-        #         else "NONE"
-        #     )
-        #     self.get_logger().warn(
-        #         f"Approach {c_type}({x:.2f}, {y:.2f}) blocked (cost={cost})."
-        #     )
-        #     return False
-        # return True
-
-    def _world_to_map(self, x: float, y: float):
-        assert self.costmap is not None
-        res = self.costmap.info.resolution
+    def _world_to_map(self, costmap: OccupancyGrid, x: float, y: float):
+        res = costmap.info.resolution
         ox, oy = (
-            self.costmap.info.origin.position.x,
-            self.costmap.info.origin.position.y,
+            costmap.info.origin.position.x,
+            costmap.info.origin.position.y,
         )
         return int((x - ox) / res), int((y - oy) / res)
 

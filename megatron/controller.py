@@ -10,9 +10,10 @@ Approach pose is computed along the surface normal (in free space, facing the ob
 """
 
 import math
+from collections.abc import Sequence
 from enum import Enum, auto
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import rclpy
@@ -91,19 +92,20 @@ def load_waypoints_from_yaml(path):
     for entry in candidates:
         x = y = yaw = None
         if isinstance(entry, dict):
-            pose = entry.get("pose")
-            orient = entry.get("orientation")
+            pose = cast(Sequence[Any], entry.get("pose"))
+            orient = cast(Sequence[Any], entry.get("orientation"))
             if pose and len(pose) >= 2:
                 x = float(pose[0])
                 y = float(pose[1])
             if orient and len(orient) == 4:
                 yaw = _quaternion_to_yaw(orient)
         elif isinstance(entry, (list, tuple)):
-            if len(entry) >= 2:
-                x = float(entry[0])
-                y = float(entry[1])
-            if len(entry) >= 3:
-                yaw = float(entry[2])
+            seq = cast(Sequence[Any], entry)
+            if len(seq) >= 2:
+                x = float(seq[0])
+                y = float(seq[1])
+            if len(seq) >= 3:
+                yaw = float(seq[2])
 
         if x is None or y is None:
             continue
@@ -326,24 +328,20 @@ class MissionController(Node):
             f"New face detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_faces) + 1}"
         )
 
-        self.found_faces.append(
-            {
-                "pos": pos,
-                "normal": (nx, ny),
-                "greeted": False,
-                "last_seen": now,
-            }
-        )
+        self.found_faces.append({
+            "pos": pos,
+            "normal": (nx, ny),
+            "greeted": False,
+            "last_seen": now,
+        })
 
         if self.state != State.DONE:
-            self.pending_approaches.append(
-                {
-                    "type": "face",
-                    "pos": pos,
-                    "normal": (nx, ny),
-                    "color": None,
-                }
-            )
+            self.pending_approaches.append({
+                "type": "face",
+                "pos": pos,
+                "normal": (nx, ny),
+                "color": None,
+            })
 
     def _ring_callback(self, msg: PoseStamped):
         pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
@@ -369,25 +367,21 @@ class MissionController(Node):
             f"New ring ({color}) detected at ({pos[0]:.2f}, {pos[1]:.2f}), total: {len(self.found_rings) + 1}"
         )
 
-        self.found_rings.append(
-            {
-                "pos": pos,
-                "color": color,
-                "normal": (nx, ny),
-                "greeted": False,
-                "last_seen": now,
-            }
-        )
+        self.found_rings.append({
+            "pos": pos,
+            "color": color,
+            "normal": (nx, ny),
+            "greeted": False,
+            "last_seen": now,
+        })
 
         if self.state != State.DONE:
-            self.pending_approaches.append(
-                {
-                    "type": "ring",
-                    "pos": pos,
-                    "normal": (nx, ny),
-                    "color": color,
-                }
-            )
+            self.pending_approaches.append({
+                "type": "ring",
+                "pos": pos,
+                "normal": (nx, ny),
+                "color": color,
+            })
 
     # ── Nav2 / dock callbacks ─────────────────────────────────────────
 
@@ -421,14 +415,12 @@ class MissionController(Node):
         self.get_logger().info(
             f"Re-queuing ungreeted {obj_type} at ({pos[0]:.2f}, {pos[1]:.2f})"
         )
-        self.pending_approaches.append(
-            {
-                "type": obj_type,
-                "pos": pos,
-                "normal": (nx, ny),
-                "color": color,
-            }
-        )
+        self.pending_approaches.append({
+            "type": obj_type,
+            "pos": pos,
+            "normal": (nx, ny),
+            "color": color,
+        })
 
     def _dock_callback(self, msg: DockStatus):
         self.is_docked = msg.is_docked

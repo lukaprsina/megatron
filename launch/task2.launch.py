@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -5,6 +7,8 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 # keep the unused nodes, they are disabled when working on other nodes
@@ -66,7 +70,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "tile_capture_dir",
-            default_value="/tmp/megatron_tile_captures",
+            default_value=str(REPO_ROOT / "artifacts" / "tile_detector" / "evaluation"),
             description="Writable directory for camera-domain tile captures",
         ),
         DeclareLaunchArgument(
@@ -166,7 +170,7 @@ def generate_launch_description():
                 "waypoints_file": PathJoinSubstitution([
                     pkg_megatron,
                     "waypoints",
-                    "task2-00.yaml",
+                    "task2-01.yaml",
                 ]),
                 "room2_entry_file": PathJoinSubstitution([
                     pkg_megatron,
@@ -254,7 +258,7 @@ def generate_launch_description():
             {
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
             }
-        ]
+        ],
     )
 
     ld = LaunchDescription(args)
