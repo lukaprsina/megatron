@@ -5,7 +5,9 @@ tile_detector:
   analysis_inset_y: 0.08
   min_stddev: 7.0
   min_laplacian_variance: 2.0
+  use_ecc_alignment: false
   max_alignment_error: 0.34
+  max_reference_defect_ratio: 0.08
   color_threshold: 8.0
   self_color_threshold: 8.0
   self_color_min_area: 24
@@ -19,6 +21,7 @@ tile_detector:
   strong_line_area: 64
   border_defect_area: 1800
   border_intrusion_min_width_ratio: 0.12
+  border_intrusion_min_height_ratio: 0.25
   dark_blob_threshold: 45.0
   dark_blob_min_area: 120
   component_border_margin: 12

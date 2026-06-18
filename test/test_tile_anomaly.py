@@ -17,6 +17,8 @@ from megatron.tile_anomaly import (  # noqa: E402
     TileAnomalyDetector,
     _dark_blobs,
     _lateral_border_intrusions,
+    anomaly_panel_canvas,
+    binary_damage_mask,
     order_quad,
     quad_from_contour,
     warp_tile,
@@ -85,6 +87,21 @@ def test_warp_tile_extracts_complete_inset_region() -> None:
     assert float((warped[:, :, 2] > 200).mean()) > 0.98
 
 
+def test_binary_damage_mask_uses_raw_threshold() -> None:
+    anomaly_map = np.array([[0.1, 1.1], [2.0, 0.2]], dtype=np.float32)
+    mask = binary_damage_mask(anomaly_map, (2, 2), threshold=1.0)
+    assert mask.tolist() == [[0, 255], [255, 0]]
+
+
+def test_anomaly_panel_canvas_matches_patchcore_layout() -> None:
+    image = np.full((32, 32, 3), 120, dtype=np.uint8)
+    anomaly_map = np.zeros((8, 8), dtype=np.float32)
+    anomaly_map[2:4, 3:5] = 2.0
+    canvas = anomaly_panel_canvas(image, anomaly_map, threshold=1.0)
+    assert canvas.shape == (32, 128, 3)
+    assert cv2.countNonZero(cv2.cvtColor(canvas[:, 96:], cv2.COLOR_BGR2GRAY)) > 0
+
+
 def test_all_unique_supplied_textures_are_classified() -> None:
     detector = _detector()
     good = _unique_textures("good")
@@ -134,6 +151,31 @@ def test_green_cross_from_workstation_screenshot_is_localized() -> None:
     assert result.defect_ratio < 0.08
 
 
+def test_task2_green_good_tile_02_does_not_require_ecc_alignment() -> None:
+    capture = (
+        REPO_ROOT
+        / "artifacts"
+        / "tile_captures"
+        / "task2"
+        / "green"
+        / "canonical"
+        / "tile-02-156981000000.png"
+    )
+    if not capture.exists():
+        return
+    references = sorted(
+        (PACKAGE_ROOT / "assets" / "tiles" / "reference_good" / "task2" / "green").glob("*.png")
+    )
+    detector = TileAnomalyDetector.from_paths(
+        references,
+        DetectorConfig.from_yaml(CONFIG_PATH),
+    )
+    result = detector.detect(cv2.imread(str(capture)))
+    assert result.status == "OK"
+    assert result.reason is None
+    assert result.alignment_error is None
+
+
 def test_low_information_image_is_unknown() -> None:
     result = _detector().detect(np.full((512, 512, 3), 128, dtype=np.uint8))
     assert result.status == "UNKNOWN"
@@ -143,7 +185,9 @@ def test_low_information_image_is_unknown() -> None:
 def test_narrow_conveyor_rail_is_not_a_side_intrusion() -> None:
     gray = np.full((512, 512), 180, dtype=np.uint8)
     gray[:, -24:] = 20
-    mask = _lateral_border_intrusions(gray, min_area=1800, min_width_ratio=0.12)
+    mask = _lateral_border_intrusions(
+        gray, min_area=1800, min_width_ratio=0.12, min_height_ratio=0.25
+    )
     assert cv2.countNonZero(mask) == 0
 
 
@@ -151,8 +195,43 @@ def test_wide_side_separation_is_a_side_intrusion() -> None:
     gray = np.full((512, 512), 180, dtype=np.uint8)
     polygon = np.array([[512, 100], [512, 410], [420, 330], [435, 170]])
     cv2.fillConvexPoly(gray, polygon, (20,))
-    mask = _lateral_border_intrusions(gray, min_area=1800, min_width_ratio=0.12)
+    mask = _lateral_border_intrusions(
+        gray, min_area=1800, min_width_ratio=0.12, min_height_ratio=0.25
+    )
     assert cv2.countNonZero(mask) >= 1800
+
+
+def test_short_diagonal_side_shadow_is_not_a_side_intrusion() -> None:
+    gray = np.full((512, 512), 180, dtype=np.uint8)
+    polygon = np.array([[0, 135], [112, 235], [88, 235], [0, 155]])
+    cv2.fillConvexPoly(gray, polygon, (35,))
+    mask = _lateral_border_intrusions(
+        gray, min_area=1800, min_width_ratio=0.12, min_height_ratio=0.25
+    )
+    assert cv2.countNonZero(mask) == 0
+
+
+def test_task2_red_good_tile_01_is_not_a_side_intrusion_false_positive() -> None:
+    capture = (
+        REPO_ROOT
+        / "artifacts"
+        / "tile_captures"
+        / "task2"
+        / "red"
+        / "canonical"
+        / "tile-01-159456000000.png"
+    )
+    if not capture.exists():
+        return
+    references = sorted(
+        (PACKAGE_ROOT / "assets" / "tiles" / "reference_good" / "task2" / "red").glob("*.png")
+    )
+    detector = TileAnomalyDetector.from_paths(
+        references,
+        DetectorConfig.from_yaml(CONFIG_PATH),
+    )
+    result = detector.detect(cv2.imread(str(capture)))
+    assert result.status == "OK"
 
 
 def test_dark_crack_endpoint_at_lower_edge_is_retained() -> None:

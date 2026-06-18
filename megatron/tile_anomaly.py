@@ -20,7 +20,9 @@ class DetectorConfig:
     analysis_inset_y: float = 0.08
     min_stddev: float = 7.0
     min_laplacian_variance: float = 2.0
+    use_ecc_alignment: bool = False
     max_alignment_error: float = 0.34
+    max_reference_defect_ratio: float = 0.08
     color_threshold: float = 8.0
     self_color_threshold: float = 8.0
     self_color_min_area: int = 24
@@ -34,6 +36,7 @@ class DetectorConfig:
     strong_line_area: int = 64
     border_defect_area: int = 1800
     border_intrusion_min_width_ratio: float = 0.12
+    border_intrusion_min_height_ratio: float = 0.25
     dark_blob_threshold: float = 45.0
     dark_blob_min_area: int = 200
     component_border_margin: int = 12
@@ -59,8 +62,11 @@ class TileAnomalyResult:
     defect_ratio: float = 0.0
     reference_name: str | None = None
     alignment_error: float | None = None
+    anomaly_score: float | None = None
+    anomaly_threshold: float | None = None
     reason: str | None = None
     mask: np.ndarray | None = field(default=None, repr=False)
+    anomaly_map: np.ndarray | None = field(default=None, repr=False)
     aligned_reference: np.ndarray | None = field(default=None, repr=False)
     normalized_sample: np.ndarray | None = field(default=None, repr=False)
     evidence: dict[str, np.ndarray] = field(default_factory=dict, repr=False)
@@ -146,6 +152,48 @@ def normalize_lab(image: np.ndarray, size: int = 512) -> np.ndarray:
     return cv2.merge((lightness, a_channel, b_channel))
 
 
+def binary_damage_mask(
+    anomaly_map: np.ndarray,
+    output_shape: tuple[int, int],
+    threshold: float,
+) -> np.ndarray:
+    """Return a uint8 mask: white where the raw anomaly score crosses threshold."""
+    height, width = output_shape
+    resized_map = cv2.resize(anomaly_map, (width, height), interpolation=cv2.INTER_CUBIC)
+    if not np.isfinite(threshold):
+        return np.zeros((height, width), dtype=np.uint8)
+    return np.where(resized_map >= threshold, 255, 0).astype(np.uint8)
+
+
+def anomaly_heatmap_panel(anomaly_map: np.ndarray, output_shape: tuple[int, int]) -> np.ndarray:
+    height, width = output_shape
+    resized_map = cv2.resize(anomaly_map, (width, height), interpolation=cv2.INTER_CUBIC)
+    finite = resized_map[np.isfinite(resized_map)]
+    if finite.size == 0:
+        normalized = np.zeros((height, width), dtype=np.float32)
+    else:
+        normalized = resized_map.astype(np.float32) - float(finite.min())
+        denom = float(normalized.max())
+        normalized = normalized / denom if denom > 0 else normalized
+    return cv2.applyColorMap((normalized * 255).astype(np.uint8), cv2.COLORMAP_JET)
+
+
+def anomaly_panel_canvas(
+    image: np.ndarray,
+    anomaly_map: np.ndarray,
+    threshold: float,
+) -> np.ndarray:
+    """Return original | heatmap | overlay | binary mask, matching PatchCore panels."""
+    image = _as_bgr(image)
+    heatmap = anomaly_heatmap_panel(anomaly_map, image.shape[:2])
+    overlay = cv2.addWeighted(image, 0.55, heatmap, 0.45, 0)
+    mask = cv2.cvtColor(
+        binary_damage_mask(anomaly_map, image.shape[:2], threshold),
+        cv2.COLOR_GRAY2BGR,
+    )
+    return np.hstack((image, heatmap, overlay, mask))
+
+
 class TileAnomalyDetector:
     def __init__(
         self,
@@ -211,66 +259,130 @@ class TileAnomalyDetector:
 
         normalized_sample = normalize_lab(sample, self.config.image_size)
         variant = self._select_reference(normalized_sample[:, :, 0])
-        aligned, alignment_error = self._align_reference(
-            variant.normalized, normalized_sample
-        )
-        if aligned is None or alignment_error > self.config.max_alignment_error:
-            self_evidence = self._build_self_evidence(sample, include_lines=False)
-            self_mask, self_components = self._build_self_mask(self_evidence)
-            self_area = int(cv2.countNonZero(self_mask))
-            color_area = int(
-                cv2.countNonZero(self_evidence["self_color_filtered"])
+        if self.config.use_ecc_alignment:
+            aligned, alignment_error = self._align_reference(
+                variant.normalized, normalized_sample
             )
-            border_area = int(cv2.countNonZero(self_evidence["border_intrusion"]))
-            dark_blob_area = int(cv2.countNonZero(self_evidence["dark_blob"]))
-            strong_self_evidence = (
-                color_area >= self.config.strong_color_area
-                or border_area >= self.config.border_defect_area
-                or dark_blob_area >= self.config.dark_blob_min_area
-            )
-            if not strong_self_evidence:
-                self_evidence = self._build_self_evidence(sample, include_lines=True)
-                self_mask, self_components = self._build_self_mask(self_evidence)
-                self_area = int(cv2.countNonZero(self_mask))
-                line_area = int(cv2.countNonZero(self_evidence["line_filtered"]))
-                strong_self_evidence = line_area >= self.config.strong_line_area
-            if strong_self_evidence:
-                return TileAnomalyResult(
-                    status="DEFECT",
-                    defect_area=self_area,
-                    defect_ratio=self_area / float(self_mask.size),
-                    reference_name=variant.name,
-                    alignment_error=alignment_error,
-                    mask=self_mask,
-                    normalized_sample=cv2.cvtColor(normalized_sample, cv2.COLOR_LAB2BGR),
-                    evidence=self_evidence,
-                    component_scores=self_components,
-                )
-            return TileAnomalyResult(
-                status="UNKNOWN",
-                reference_name=variant.name,
-                alignment_error=alignment_error,
-                reason="reference alignment quality is inadequate",
-                normalized_sample=cv2.cvtColor(normalized_sample, cv2.COLOR_LAB2BGR),
+        else:
+            aligned = variant.normalized
+            alignment_error = None
+        if (
+            aligned is None
+            or alignment_error is not None
+            and alignment_error > self.config.max_alignment_error
+        ):
+            return self._detect_with_self_evidence(
+                sample,
+                normalized_sample,
+                variant.name,
+                alignment_error,
+                weak_status="UNKNOWN",
+                weak_reason="reference alignment quality is inadequate",
             )
 
         evidence = self._build_evidence(normalized_sample, aligned)
         mask, components = self._build_mask(evidence)
         defect_area = int(cv2.countNonZero(mask))
+        defect_ratio = defect_area / float(mask.size)
+        if (
+            not self.config.use_ecc_alignment
+            and defect_ratio > self.config.max_reference_defect_ratio
+        ):
+            return self._detect_with_self_evidence(
+                sample,
+                normalized_sample,
+                variant.name,
+                alignment_error,
+                weak_status="OK",
+                weak_reason=None,
+                allow_weak_defect=True,
+            )
         status: TileStatus = (
             "DEFECT" if defect_area >= self.config.min_defect_area else "OK"
         )
         return TileAnomalyResult(
             status=status,
             defect_area=defect_area,
-            defect_ratio=defect_area / float(mask.size),
+            defect_ratio=defect_ratio,
             reference_name=variant.name,
             alignment_error=alignment_error,
+            anomaly_score=_max_score(evidence["anomaly_map"]),
+            anomaly_threshold=1.0,
             mask=mask,
+            anomaly_map=evidence["anomaly_map"],
             aligned_reference=cv2.cvtColor(aligned, cv2.COLOR_LAB2BGR),
             normalized_sample=cv2.cvtColor(normalized_sample, cv2.COLOR_LAB2BGR),
             evidence=evidence,
             component_scores=components,
+        )
+
+    def _detect_with_self_evidence(
+        self,
+        sample: np.ndarray,
+        normalized_sample: np.ndarray,
+        reference_name: str,
+        alignment_error: float | None,
+        *,
+        weak_status: TileStatus,
+        weak_reason: str | None,
+        allow_weak_defect: bool = False,
+    ) -> TileAnomalyResult:
+        self_evidence = self._build_self_evidence(sample, include_lines=False)
+        self_mask, self_components = self._build_self_mask(self_evidence)
+        self_area = int(cv2.countNonZero(self_mask))
+        color_area = int(cv2.countNonZero(self_evidence["self_color_filtered"]))
+        border_area = int(cv2.countNonZero(self_evidence["border_intrusion"]))
+        dark_blob_area = int(cv2.countNonZero(self_evidence["dark_blob"]))
+        strong_self_evidence = (
+            color_area >= self.config.strong_color_area
+            or border_area >= self.config.border_defect_area
+            or dark_blob_area >= self.config.dark_blob_min_area
+        )
+        if not strong_self_evidence:
+            self_evidence = self._build_self_evidence(sample, include_lines=True)
+            self_mask, self_components = self._build_self_mask(self_evidence)
+            self_area = int(cv2.countNonZero(self_mask))
+            line_area = int(cv2.countNonZero(self_evidence["line_filtered"]))
+            strong_self_evidence = line_area >= self.config.strong_line_area
+        if strong_self_evidence:
+            return TileAnomalyResult(
+                status="DEFECT",
+                defect_area=self_area,
+                defect_ratio=self_area / float(self_mask.size),
+                reference_name=reference_name,
+                alignment_error=alignment_error,
+                anomaly_score=_max_score(self_evidence["anomaly_map"]),
+                anomaly_threshold=1.0,
+                mask=self_mask,
+                anomaly_map=self_evidence["anomaly_map"],
+                normalized_sample=cv2.cvtColor(normalized_sample, cv2.COLOR_LAB2BGR),
+                evidence=self_evidence,
+                component_scores=self_components,
+            )
+        if allow_weak_defect and self_area >= self.config.min_defect_area:
+            return TileAnomalyResult(
+                status="DEFECT",
+                defect_area=self_area,
+                defect_ratio=self_area / float(self_mask.size),
+                reference_name=reference_name,
+                alignment_error=alignment_error,
+                anomaly_score=_max_score(self_evidence["anomaly_map"]),
+                anomaly_threshold=1.0,
+                mask=self_mask,
+                anomaly_map=self_evidence["anomaly_map"],
+                normalized_sample=cv2.cvtColor(normalized_sample, cv2.COLOR_LAB2BGR),
+                evidence=self_evidence,
+                component_scores=self_components,
+            )
+        return TileAnomalyResult(
+            status=weak_status,
+            reference_name=reference_name,
+            alignment_error=alignment_error,
+            reason=weak_reason,
+            normalized_sample=cv2.cvtColor(normalized_sample, cv2.COLOR_LAB2BGR),
+            anomaly_map=self_evidence["anomaly_map"],
+            anomaly_score=_max_score(self_evidence["anomaly_map"]),
+            anomaly_threshold=1.0,
         )
 
     def _prepare_image(self, image: np.ndarray) -> np.ndarray:
@@ -383,6 +495,7 @@ class TileAnomalyDetector:
             gray,
             self.config.border_defect_area,
             self.config.border_intrusion_min_width_ratio,
+            self.config.border_intrusion_min_height_ratio,
         )
         dark_blob = _dark_blobs(
             gray,
@@ -390,11 +503,20 @@ class TileAnomalyDetector:
             self.config.dark_blob_min_area,
             self.config.component_border_margin,
         )
+        anomaly_map = np.maximum.reduce(
+            [
+                color_distance / max(self.config.self_color_threshold, 1.0e-6),
+                lines.astype(np.float32) / 255.0,
+                border_intrusion.astype(np.float32) / 255.0,
+                dark_blob.astype(np.float32) / 255.0,
+            ]
+        ).astype(np.float32)
         return {
             "self_color": color,
             "line": lines,
             "border_intrusion": border_intrusion,
             "dark_blob": dark_blob,
+            "anomaly_map": anomaly_map,
         }
 
     def _build_self_mask(
@@ -465,12 +587,22 @@ class TileAnomalyDetector:
         sample_dark = cv2.morphologyEx(sample_l, cv2.MORPH_BLACKHAT, kernel)
         reference_dark = cv2.morphologyEx(reference_l, cv2.MORPH_BLACKHAT, kernel)
         dark_line = cv2.subtract(sample_dark, reference_dark)
+        anomaly_map = np.maximum.reduce(
+            [
+                color / max(self.config.color_threshold, 1.0e-6),
+                intensity.astype(np.float32) / max(self.config.intensity_threshold, 1.0e-6),
+                gradient.astype(np.float32) / max(self.config.gradient_threshold, 1.0e-6),
+                dark_line.astype(np.float32)
+                / max(self.config.dark_line_threshold, 1.0e-6),
+            ]
+        ).astype(np.float32)
 
         return {
             "color": np.clip(color, 0, 255).astype(np.uint8),
             "intensity": intensity,
             "gradient": gradient,
             "dark_line": dark_line,
+            "anomaly_map": anomaly_map,
         }
 
     def _build_mask(
@@ -547,6 +679,11 @@ def _as_bgr(image: np.ndarray) -> np.ndarray:
 def _standardize(image: np.ndarray) -> np.ndarray:
     image = image.astype(np.float32)
     return (image - float(image.mean())) / max(float(image.std()), 1.0)
+
+
+def _max_score(image: np.ndarray) -> float:
+    finite = image[np.isfinite(image)]
+    return float(finite.max()) if finite.size else 0.0
 
 
 def _gradient_magnitude(image: np.ndarray) -> np.ndarray:
@@ -637,7 +774,10 @@ def _filter_components(mask: np.ndarray, margin: int, min_area: int) -> np.ndarr
 
 
 def _lateral_border_intrusions(
-    gray: np.ndarray, min_area: int, min_width_ratio: float
+    gray: np.ndarray,
+    min_area: int,
+    min_width_ratio: float,
+    min_height_ratio: float,
 ) -> np.ndarray:
     original_shape = gray.shape
     gray = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
@@ -655,16 +795,19 @@ def _lateral_border_intrusions(
     for label in range(1, count):
         x = int(stats[label, cv2.CC_STAT_LEFT])
         component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
         area = int(stats[label, cv2.CC_STAT_AREA])
         center_y = float(centroids[label, 1])
         touches_side = x <= 1 or x + component_width >= width - 1
         away_from_corners = 0.2 * height <= center_y <= 0.8 * height
         wide_enough = component_width >= min_width_ratio * width
+        tall_enough = component_height >= min_height_ratio * height
         if (
             area >= max(1, min_area // 4)
             and touches_side
             and away_from_corners
             and wide_enough
+            and tall_enough
         ):
             output[labels == label] = 255
     return cv2.resize(

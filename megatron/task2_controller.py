@@ -371,6 +371,7 @@ class Task2Controller(Node):
         self._last_top_frame: np.ndarray | None = None
         self._last_top_stamp_ns = 0
         _share = Path(get_package_share_directory("megatron"))
+        self._megatron_share = _share
         _ref_root = _share / "assets" / "tiles" / "reference_good"
         _model_path = _share / "assets" / "tiles" / "model.yaml"
         _detector_config = DetectorConfig.from_yaml(_model_path)
@@ -1546,18 +1547,22 @@ class Task2Controller(Node):
                 pause_elapsed = now - self._tile_pause_start
                 if pause_elapsed >= 0.3 and self._last_top_frame is not None:
                     if not self._tile_scored_this_pause:
-                        if self._capture_tiles:
-                            self._capture_current_tile(self._last_top_frame)
                         _result = self._score_tile(self._last_top_frame)
-                        self.tile_results.append(
-                            {
-                                "station": self._inspection_color,
-                                "tile_id": self._tile_index,
-                                "status": _result.status,
-                                "defect_area": _result.defect_area,
-                                "defect_ratio": _result.defect_ratio,
-                            }
-                        )
+                        _capture_metadata: dict | None = None
+                        if self._capture_tiles:
+                            _capture_metadata = self._capture_current_tile(
+                                self._last_top_frame, _result
+                            )
+                        tile_row = {
+                            "station": self._inspection_color,
+                            "tile_id": self._tile_index,
+                            "status": _result.status,
+                            "defect_area": _result.defect_area,
+                            "defect_ratio": _result.defect_ratio,
+                        }
+                        if _capture_metadata is not None:
+                            tile_row.update(_capture_metadata)
+                        self.tile_results.append(tile_row)
                         self._tile_index += 1
                         self._tile_scored_this_pause = True
                         self.get_logger().info(
@@ -1947,11 +1952,13 @@ class Task2Controller(Node):
         )
         return detector.detect(canonical)
 
-    def _capture_current_tile(self, frame: np.ndarray) -> None:
+    def _capture_current_tile(
+        self, frame: np.ndarray, anomaly_result: TileAnomalyResult
+    ) -> dict | None:
         box, _ = self._detect_tile(frame)
         if box is None:
             self.get_logger().warn("Tile capture skipped: contour was lost during pause")
-            return
+            return None
 
         pose = None
         current_xy = self._current_xy()
@@ -1972,10 +1979,27 @@ class Task2Controller(Node):
                 tile_index=self._tile_index,
                 stamp_ns=self._last_top_stamp_ns,
                 pose=pose,
+                anomaly_result=anomaly_result,
+                megatron_root=self._megatron_share,
             )
             self.get_logger().info(f"Captured tile sample: {metadata_path}")
+            metadata = yaml.safe_load(metadata_path.read_text()) or {}
+            anomaly = metadata.get("anomaly", {})
+            return {
+                "warped_image": anomaly.get("megatron_report_warped_image"),
+                "mask_image": anomaly.get("megatron_report_mask_image"),
+                "artifact_warped_image": str(
+                    metadata_path.parent.parent / metadata["canonical_image"]
+                ),
+                "artifact_mask_image": str(
+                    metadata_path.parent.parent / anomaly["mask_image"]
+                )
+                if anomaly.get("mask_image")
+                else None,
+            }
         except (OSError, ValueError, cv2.error) as exc:
             self.get_logger().error(f"Tile capture failed: {exc}")
+            return None
 
     # ── Navigation helpers ─────────────────────────────────────────────
 

@@ -7,9 +7,14 @@ the controller at report time.
 
 from dataclasses import dataclass, field
 from datetime import date as _date
+from html import escape
 from pathlib import Path
 
-from ament_index_python.packages import get_package_share_directory
+import yaml
+from ament_index_python.packages import (
+    PackageNotFoundError,
+    get_package_share_directory,
+)
 from markdown_pdf import MarkdownPdf, Section
 
 # ---------------------------------------------------------------------------
@@ -85,12 +90,12 @@ table {
 }
 
 table thead {
-    background-color: #003366;
-    color: #fff;
     font-weight: bold;
 }
 
 table th {
+    background-color: #003366;
+    color: white;
     padding: 12px;
     text-align: left;
     border: 1px solid #ddd;
@@ -116,14 +121,36 @@ table tbody tr:hover {
 .ok   { color: green; font-weight: bold; }
 .nok  { color: red;   font-weight: bold; }
 .leak { color: red;   font-weight: bold; }
+.tile-defect {
+    margin: 12px 0 18px 0;
+    page-break-before: always;
+    page-break-inside: avoid;
+}
+.tile-defect span {
+    display: inline-block;
+    min-width: 70px;
+    font-weight: bold;
+    vertical-align: top;
+    padding-top: 36px;
+}
+.tile-defect img {
+    width: 150px;
+    margin-right: 14px;
+    border: 1px solid #ccc;
+    vertical-align: top;
+}
 </style>
 """
 
 # ---------------------------------------------------------------------------
 # ReportBuilder
 # ---------------------------------------------------------------------------
-REPORT_PATH = Path(get_package_share_directory("megatron")) / "assets" / "report.pdf"
-SNAPSHOT_DIR = Path(get_package_share_directory("megatron")) / "assets" / "snapshots"
+try:
+    PACKAGE_SHARE = Path(get_package_share_directory("megatron"))
+except PackageNotFoundError:
+    PACKAGE_SHARE = Path(__file__).resolve().parents[1]
+REPORT_PATH = PACKAGE_SHARE / "assets" / "report.pdf"
+SNAPSHOT_DIR = PACKAGE_SHARE / "assets" / "snapshots"
 
 
 class ReportBuilder:
@@ -247,6 +274,24 @@ class ReportBuilder:
                 )
             lines.append("</tbody></table>\n")
 
+            for t in task.results:
+                if t.get("status") != "DEFECT":
+                    continue
+                warped_image, mask_image = _tile_report_images(task, t)
+                if warped_image is None or mask_image is None:
+                    self.logger.info(
+                        f"missing anomaly images for tile_id {t.get('tile_id', '?')}"
+                    )
+                    continue
+                tile_id = escape(str(t.get("tile_id", "?")))
+                lines.append(
+                    '<div class="tile-defect">'
+                    f"<span>ID: {tile_id}</span>"
+                    f'<img src="{escape(str(warped_image))}">'
+                    f'<img src="{escape(str(mask_image))}">'
+                    "</div>\n"
+                )
+
         lines.append("---\n")
         return lines
 
@@ -268,3 +313,84 @@ class ReportBuilder:
         pdf.add_section(Section(markdown, root="/"))
         pdf.save(str(out))
         return out
+
+
+def _existing_image_path(value) -> Path | None:
+    if not value:
+        return None
+    path = Path(str(value)).expanduser()
+    return path if path.is_file() else None
+
+
+def _tile_report_images(task: AnomalyTask, tile: dict) -> tuple[Path | None, Path | None]:
+    warped_image = _existing_image_path(
+        tile.get("warped_image") or tile.get("artifact_warped_image")
+    )
+    mask_image = _existing_image_path(tile.get("mask_image") or tile.get("artifact_mask_image"))
+    if warped_image is not None and mask_image is not None:
+        return warped_image, mask_image
+    return _find_capture_images(task, tile)
+
+
+def _find_capture_images(task: AnomalyTask, tile: dict) -> tuple[Path | None, Path | None]:
+    tile_id = tile.get("tile_id")
+    if tile_id is None:
+        return None, None
+    station = str(tile.get("station") or task.color)
+    world = str(tile.get("world") or "task2")
+    try:
+        tile_number = int(tile_id)
+    except (TypeError, ValueError):
+        return None, None
+
+    for root in _candidate_capture_roots():
+        captures_dir = root / world / station / "captures"
+        if not captures_dir.is_dir():
+            continue
+        metadata_paths = sorted(
+            captures_dir.glob(f"tile-{tile_number:02d}-*.yaml"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for metadata_path in metadata_paths:
+            pair = _images_from_capture_metadata(metadata_path)
+            if pair != (None, None):
+                return pair
+    return None, None
+
+
+def _images_from_capture_metadata(metadata_path: Path) -> tuple[Path | None, Path | None]:
+    station_dir = metadata_path.parent.parent
+    try:
+        metadata = yaml.safe_load(metadata_path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return None, None
+    anomaly = metadata.get("anomaly", {}) or {}
+    warped_image = _existing_image_path(anomaly.get("megatron_report_warped_image"))
+    mask_image = _existing_image_path(anomaly.get("megatron_report_mask_image"))
+    if warped_image is not None and mask_image is not None:
+        return warped_image, mask_image
+
+    warped_image = _existing_image_path(station_dir / str(metadata.get("canonical_image", "")))
+    mask_image = _existing_image_path(
+        station_dir
+        / str(anomaly.get("report_mask_image") or anomaly.get("mask_image") or "")
+    )
+    return warped_image, mask_image
+
+
+def _candidate_capture_roots() -> list[Path]:
+    roots = [
+        Path.cwd() / "artifacts" / "tile_captures",
+        Path("/tmp/megatron_tile_captures"),
+    ]
+    roots.extend(parent / "artifacts" / "tile_captures" for parent in PACKAGE_SHARE.parents)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        root = root.expanduser()
+        if root in seen:
+            continue
+        seen.add(root)
+        unique.append(root)
+    return unique
