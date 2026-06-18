@@ -416,9 +416,15 @@ class Task2Controller(Node):
                 p for p in _ref_root.rglob("*.png") if "/red/" in p.as_posix()
             )
         if not _ref_green:
-            _ref_green = sorted(p for p in _ref_root.rglob("*.png") if "/green/" in p.as_posix())
-        self._tile_detector_red = PatchCoreTileDetector.from_paths(_ref_red, _patchcore_config)
-        self._tile_detector_green = PatchCoreTileDetector.from_paths(_ref_green, _patchcore_config)
+            _ref_green = sorted(
+                p for p in _ref_root.rglob("*.png") if "/green/" in p.as_posix()
+            )
+        self._tile_detector_red = PatchCoreTileDetector.from_paths(
+            _ref_red, _patchcore_config
+        )
+        self._tile_detector_green = PatchCoreTileDetector.from_paths(
+            _ref_green, _patchcore_config
+        )
         self.get_logger().info(
             f"Tile detectors loaded: red={len(_ref_red)} green={len(_ref_green)} refs "
             f"from {_world_ref_root}"
@@ -2116,7 +2122,9 @@ class Task2Controller(Node):
     ) -> dict | None:
         box, _ = self._detect_tile(frame)
         if box is None:
-            self.get_logger().warn("Tile capture skipped: contour was lost during pause")
+            self.get_logger().warn(
+                "Tile capture skipped: contour was lost during pause"
+            )
             return None
 
         pose = None
@@ -2478,7 +2486,7 @@ class Task2Controller(Node):
     # `_footprint_sample_points`). Set to 0 to fall back to checking only
     # the center point, e.g. if costmap/scan coverage near candidates is
     # too sparse to trust the extra points.
-    FOOTPRINT_MARGIN_SCALE = 1.1  # 1.0
+    FOOTPRINT_MARGIN_SCALE = 0.7  # 1.0
 
     # Threshold for the off-center footprint points (the footprint polygon
     # vertices around the candidate, see `_footprint_sample_points`). The painted
@@ -2487,7 +2495,7 @@ class Task2Controller(Node):
     # lethal-obstacle/inscribed-radius cyan band at 253-254. Set well above
     # the former and well below the latter so purple no longer gets
     # rejected but a true collision-risk cell still does.
-    FOOTPRINT_EDGE_COST_THRESHOLD = 150
+    FOOTPRINT_EDGE_COST_THRESHOLD = 89  # 150
 
     # Sampling radius used for the off-center footprint points. Deliberately
     # much smaller than APPROACH_CLEARANCE_RADIUS_M (0.28): that radius is
