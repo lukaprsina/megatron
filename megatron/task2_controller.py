@@ -1959,7 +1959,9 @@ class Task2Controller(Node):
         # Workstation colors have known belt axes, but each axis has two possible
         # headings. Choose the one whose forward vector points toward the detected
         # workstation center from the robot's current position.
-        axis_yaw = 0.0 if self._inspection_color == "red" else math.pi / 2
+        # Both belts run north-south (vertical in the map), not east-west —
+        # confirmed against the costmap (red's tile row runs along +y, not +x).
+        axis_yaw = math.pi / 2
         current_xy = self._current_xy()
         workstation_xy = self.workstation_poses.get(self._inspection_color or "")
         if current_xy is None or workstation_xy is None:
@@ -1970,7 +1972,7 @@ class Task2Controller(Node):
 
         toward_center = workstation_xy - current_xy
         axis = np.array([math.cos(axis_yaw), math.sin(axis_yaw)])
-        dot = float(np.dot(axis, toward_center))
+        dot = float(np.dot(axis, toward_center))  # change here
         self.get_logger().info(
             f"[inspection][dbg] axis_yaw_pre_flip={axis_yaw:.3f} "
             f"toward_center=({toward_center[0]:.2f},{toward_center[1]:.2f}) "
@@ -2006,7 +2008,8 @@ class Task2Controller(Node):
         return float(np.median(distances)) if distances else None
 
     def _belt_world_perp(self) -> float:
-        return math.pi / 2 if self._inspection_color == "red" else math.pi
+        # Perpendicular to the (now vertical, see _inspection_target_yaw) belt axis.
+        return math.pi
 
     def _belt_side_distance(self) -> float | None:
         current_yaw = self._current_yaw()
