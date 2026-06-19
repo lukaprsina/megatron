@@ -30,80 +30,10 @@ from megatron.perception_utils import (
     normal_to_quaternion,
     transform_point_and_normal,
 )
-from megatron.tile_anomaly import quad_from_contour, warp_tile
-
-# Side length of the canonical fronto-parallel square that the detected
-# picture quad gets warped to before recognition.
-RECOGNITION_SIZE = 200
 
 # Debug dump of every face detection, for inspecting why crops are tiny.
 DEBUG_DETECTED_DIR = "/home/luka/coding/dis/debug_faces_detected"
 DEBUG_CROPPED_DIR = "/home/luka/coding/dis/debug_faces_cropped"
-
-# How far past the YOLO box to look for the picture's actual edge. The
-# picture frame is pasted flat on the wall, so its true boundary often
-# sits outside YOLO's (loose) face box on one side and inside it on
-# another — pad generously and let the contour search find the edge.
-PLANE_PAD_FRAC = 0.6
-
-
-def _detect_picture_quad(
-    frame: np.ndarray, x1: int, y1: int, x2: int, y2: int
-) -> tuple[np.ndarray | None, tuple[int, int, int, int]]:
-    """Find the 4 corners of the picture billboard around a YOLO face box.
-
-    Same recipe as task2_controller._detect_tile: Otsu-threshold the region
-    to separate the (textured, brighter) picture from the (flat) wall, then
-    pick the contour that looks like a quad. Returns corners in full-frame
-    pixel coordinates, or None if nothing quad-like was found, plus the
-    padded crop bounds (px1, py1, px2, py2) used for the search.
-    """
-    h, w = frame.shape[:2]
-    bw, bh = x2 - x1, y2 - y1
-    pad_x, pad_y = int(bw * PLANE_PAD_FRAC), int(bh * PLANE_PAD_FRAC)
-    px1, py1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-    px2, py2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
-    if px2 <= px1 or py2 <= py1:
-        return None, (px1, py1, px2, py2)
-
-    crop = cv2.cvtColor(frame[py1:py2, px1:px2], cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    cy, cx = crop.shape[0] // 2, crop.shape[1] // 2
-    if thresh[cy, cx] == 0:
-        thresh = 255 - thresh
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    crop_area = crop.shape[0] * crop.shape[1]
-    crop_center = np.array([crop.shape[1] / 2, crop.shape[0] / 2])
-
-    best = None
-    best_dist = None
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area < crop_area * 0.15 or area > crop_area * 0.95:
-            continue
-        box = cv2.boxPoints(cv2.minAreaRect(contour))
-        bw_, bh_ = (
-            float(np.linalg.norm(box[0] - box[1])),
-            float(np.linalg.norm(box[1] - box[2])),
-        )
-        aspect = max(bw_, bh_) / max(min(bw_, bh_), 1.0)
-        if aspect > 1.8:
-            continue
-        dist = float(np.linalg.norm(box.mean(axis=0) - crop_center))
-        if best is None or dist < best_dist:
-            best, best_dist = contour, dist
-
-    if best is None:
-        return None, (px1, py1, px2, py2)
-
-    quad = quad_from_contour(best)
-    if quad is None:
-        quad = cv2.boxPoints(cv2.minAreaRect(best)).astype(np.float32)
-    quad = quad + np.array([px1, py1], dtype=np.float32)
-    return quad, (px1, py1, px2, py2)
 
 
 def parse_personnel_filename(filename):
@@ -361,47 +291,22 @@ class FaceDetectorNode(Node):
                 if rx2 <= rx1 or ry2 <= ry1:
                     continue
 
-                # Find the picture's true rectangular boundary (the YOLO
-                # box is just a rough position) and warp it to a canonical
-                # fronto-parallel square — gives recognition a clean, full,
-                # correctly-scaled view instead of a YOLO-box crop.
-                quad, (px1, py1, px2, py2) = _detect_picture_quad(
-                    cv_image, x1, y1, x2, y2
-                )
-                if quad is not None:
-                    # Warp to the quad's own native resolution, capped at
-                    # RECOGNITION_SIZE — upsampling small/far detections up
-                    # to a fixed 200x200 introduces enough blur to break
-                    # dlib's encoder (confirmed: every 200x200 upsampled
-                    # crop in testing came back Unknown, while native-size
-                    # raw-box fallbacks recognized correctly).
-                    qw, qh = cv2.boundingRect(quad.astype(np.int32))[2:4]
-                    warp_size = min(RECOGNITION_SIZE, max(qw, qh))
-                    # Small positive inset: the detected quad tends to run
-                    # slightly past the picture into the wall (visible as a
-                    # blue-grey margin in debug_faces_cropped), so shrink
-                    # corners inward a bit before warping.
-                    recognition_crop = warp_tile(
-                        cv_image, quad, size=warp_size, border_inset=0.08
-                    )
-                else:
-                    recognition_crop = cv_image[y1:y2, x1:x2]
+                # Recognition uses the raw YOLO box directly. A picture-
+                # plane quad-detect + perspective-warp was tried here, but
+                # across repeated testing it consistently performed worse
+                # than this plain box — even well-framed warped crops came
+                # back with uniformly bad, uncorrelated distances to every
+                # known face, most likely because face_recognition's
+                # encoder does no internal alignment and expects roughly
+                # dlib's own detector framing, which the warp doesn't
+                # reproduce. See git history on this file for that attempt.
+                recognition_crop = cv_image[y1:y2, x1:x2]
 
-                # Debug dump: full frame with raw YOLO box, padded search
-                # region, and detected quad drawn; plus the recognition
-                # input (warped picture, or the raw box crop on fallback).
+                # Debug dump: full frame with YOLO box drawn, plus the
+                # exact crop fed to recognition.
                 self.debug_save_counter += 1
                 detected_frame = cv_image.copy()
                 cv2.rectangle(detected_frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
-                cv2.rectangle(detected_frame, (px1, py1), (px2, py2), (255, 0, 0), 1)
-                if quad is not None:
-                    cv2.polylines(
-                        detected_frame,
-                        [quad.astype(np.int32)],
-                        isClosed=True,
-                        color=(0, 255, 0),
-                        thickness=1,
-                    )
                 cv2.imwrite(
                     os.path.join(
                         DEBUG_DETECTED_DIR, f"{self.debug_save_counter:06d}.png"
