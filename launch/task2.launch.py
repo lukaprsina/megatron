@@ -171,8 +171,8 @@ def generate_launch_description():
                     pkg_megatron,
                     "waypoints",
                     # "task2-01.yaml",
-                    # "task2-00.yaml",
-                    "workstation.yaml",
+                    "task2-02.yaml",
+                    #"workstation.yaml",
                 ]),
                 "room2_entry_file": PathJoinSubstitution([
                     pkg_megatron,
@@ -267,10 +267,10 @@ def generate_launch_description():
     ld.add_action(sim_arm_nav)
     ld.add_action(rviz)
     ld.add_action(keepout_filter_launch)
-    # ld.add_action(cylinder_segmentation)
-    # ld.add_action(cylinder_detector)
+    ld.add_action(cylinder_segmentation)
+    ld.add_action(cylinder_detector)
     ld.add_action(face_detector)
-    # ld.add_action(ring_detector)
+    ld.add_action(ring_detector)
     ld.add_action(qr_reader)
     ld.add_action(arm_mover)
     # ld.add_action(yellow_line_injector)

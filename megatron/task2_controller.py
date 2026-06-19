@@ -192,9 +192,9 @@ def _parse_qr_task(text: str) -> str | None:
     if "report" in t or "thanks" in t:  # qr_cto.png
         return "report"
     if "red belt" in t or ("red" in t and ("defect" in t or "fault" in t)):
-        return "defects_red"
-    if "green belt" in t or ("green" in t and ("defect" in t or "fault" in t)):
         return "defects_green"
+    if "green belt" in t or ("green" in t and ("defect" in t or "fault" in t)):
+        return "defects_red"
     if "barrel" in t:
         return "barrels"
     if "ring" in t:
