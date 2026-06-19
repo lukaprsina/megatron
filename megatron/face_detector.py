@@ -9,7 +9,6 @@ import os
 from typing import cast
 
 import cv2
-import face_recognition
 import message_filters
 import numpy as np
 import rclpy
@@ -30,6 +29,19 @@ from megatron.perception_utils import (
     normal_to_quaternion,
     transform_point_and_normal,
 )
+
+
+# Reference photos are 512x512 portraits; face crops from the 256x320
+# YOLO input are often only tens of pixels wide. ORB's scale pyramid
+# (8 levels, 1.2x each) only covers ~4.3x — far less than that gap — so
+# matching raw-resolution crops against full-res references starves ORB
+# of correspondences. Resizing both sides to the same fixed size keeps
+# them within ORB's working range.
+RECOGNITION_SIZE = 200
+
+# Debug dump of every face detection, for inspecting why crops are tiny.
+DEBUG_DETECTED_DIR = "/home/luka/coding/dis/debug_faces_detected"
+DEBUG_CROPPED_DIR = "/home/luka/coding/dis/debug_faces_cropped"
 
 
 def parse_personnel_filename(filename):
@@ -53,7 +65,8 @@ class FaceDetectorNode(Node):
         self.declare_parameter("roi_shrink", 0.3)
         self.declare_parameter("track_max_age", 30.0)
         self.declare_parameter("lateral_offset", 0.2)
-        self.declare_parameter("recognition_tolerance", 0.8)
+        self.declare_parameter("recognition_min_inliers", 12)
+        self.declare_parameter("recognition_ratio_threshold", 0.8)
         self.declare_parameter(
             "personnel_dir",
             "/home/iota/dis/src/vendor/teammate-project/src/task1/config/personnel",
@@ -73,16 +86,26 @@ class FaceDetectorNode(Node):
         self.roi_shrink = cast(float, self.get_parameter("roi_shrink").value)
         self.track_max_age = cast(float, self.get_parameter("track_max_age").value)
         self.lateral_offset = cast(float, self.get_parameter("lateral_offset").value)
-        self.recognition_tolerance = cast(
-            float, self.get_parameter("recognition_tolerance").value
+        self.recognition_min_inliers = cast(
+            int, self.get_parameter("recognition_min_inliers").value
+        )
+        self.recognition_ratio_threshold = cast(
+            float, self.get_parameter("recognition_ratio_threshold").value
         )
         self.personnel_dir = cast(str, self.get_parameter("personnel_dir").value)
 
         self.bridge = CvBridge()
         self.model = YOLO("yolov8n-face.pt")
 
-        # Face recognition bank
-        self.known_encodings = []
+        # Face recognition bank: ORB keypoints/descriptors per personnel photo.
+        # The photos are pasted directly onto walls in-sim as flat billboards,
+        # so matching against the exact reference texture (planar homography)
+        # is far more reliable here than a deep face-embedding model trained
+        # on real photographs of actual human faces.
+        self.orb = cv2.ORB_create(nfeatures=1000)
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+        self.known_keypoints = []
+        self.known_descriptors = []
         self.known_names = []
         self._load_personnel()
 
@@ -123,6 +146,11 @@ class FaceDetectorNode(Node):
         # Rate limiting
         self.last_inference_time = 0.0
 
+        # Debug image dump
+        os.makedirs(DEBUG_DETECTED_DIR, exist_ok=True)
+        os.makedirs(DEBUG_CROPPED_DIR, exist_ok=True)
+        self.debug_save_counter = 0
+
         self.get_logger().info("Face detector initialized (PointCloud2 mode).")
 
     def _load_personnel(self):
@@ -140,54 +168,99 @@ class FaceDetectorNode(Node):
             name = parse_personnel_filename(filename)
 
             try:
-                img = face_recognition.load_image_file(filepath)
-                encodings = face_recognition.face_encodings(img)
-                if encodings:
-                    self.known_encodings.append(encodings[0])
-                    self.known_names.append(name)
-                    self.get_logger().info(f"Loaded personnel:  <{name}>")
-                else:
-                    self.get_logger().warn(f"No face found in {filename}")
+                img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
+                if img is None:
+                    self.get_logger().error(f"Failed to read {filename}")
+                    continue
+                img = cv2.resize(
+                    img, (RECOGNITION_SIZE, RECOGNITION_SIZE),
+                    interpolation=cv2.INTER_AREA,
+                )
+                kp, desc = self.orb.detectAndCompute(img, None)
+                if desc is None or len(kp) == 0:
+                    self.get_logger().warn(f"No ORB features found in {filename}")
+                    continue
+                self.known_keypoints.append(kp)
+                self.known_descriptors.append(desc)
+                self.known_names.append(name)
+                self.get_logger().info(
+                    f"Loaded personnel: <{name}> ({len(kp)} ORB keypoints)"
+                )
             except Exception as e:
                 self.get_logger().error(f"Failed to load {filename}: {e}")
 
     def _recognize_face(self, face_crop) -> str:
-        """Run face recognition on a BGR image crop. Returns 'Unknown' or name."""
-        if face_crop.size == 0 or not self.known_encodings:
+        """Match a BGR image crop against the personnel wall photos via ORB +
+        homography RANSAC. Returns 'Unknown' or name.
+
+        The personnel photos are pasted as flat billboards in-sim, so the
+        crop is a perspective-warped view of the exact same texture rather
+        than a different photo of the same person — planar feature matching
+        is the right tool, not a face-embedding model trained on real photos.
+        """
+        if face_crop.size == 0 or not self.known_descriptors:
             return "Unknown"
 
         try:
-            # Convert BGR to RGB
-            face_crop_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
-            ch, cw = face_crop_rgb.shape[:2]
-
-            # Use whole crop as the face location (top, right, bottom, left)
-            face_locs = [(0, cw, ch, 0)]
-            encodings = face_recognition.face_encodings(
-                face_crop_rgb, known_face_locations=face_locs
+            crop_gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+            crop_h, crop_w = crop_gray.shape[:2]
+            crop_gray = cv2.resize(
+                crop_gray, (RECOGNITION_SIZE, RECOGNITION_SIZE),
+                interpolation=cv2.INTER_CUBIC,
             )
-
-            if not encodings:
+            kp_crop, desc_crop = self.orb.detectAndCompute(crop_gray, None)
+            if desc_crop is None or len(kp_crop) < 4:
+                self.get_logger().info(
+                    f"Recognition: crop {crop_w}x{crop_h} -> "
+                    f"{0 if kp_crop is None else len(kp_crop)} ORB keypoints, "
+                    "too few to match",
+                    throttle_duration_sec=1.0,
+                )
                 return "Unknown"
 
-            matches = face_recognition.compare_faces(
-                self.known_encodings,
-                encodings[0],
-                tolerance=self.recognition_tolerance,
-            )
+            best_name = "Unknown"
+            best_inliers = self.recognition_min_inliers - 1
+            debug_scores = []
 
-            if True in matches:
-                # Use distance to find the best match among confirmed candidates
-                distances = face_recognition.face_distance(
-                    self.known_encodings, encodings[0]
-                )
-                best_idx = np.argmin(distances)
-                if matches[best_idx]:
-                    return self.known_names[best_idx]
+            for kp_ref, desc_ref, name in zip(
+                self.known_keypoints,
+                self.known_descriptors,
+                self.known_names,
+                strict=True,
+            ):
+                knn_matches = self.matcher.knnMatch(desc_crop, desc_ref, k=2)
+                good = [
+                    m
+                    for m, n in (pair for pair in knn_matches if len(pair) == 2)
+                    if m.distance < self.recognition_ratio_threshold * n.distance
+                ]
+                if len(good) < 4:
+                    debug_scores.append(f"{name}:{len(good)}good/0in")
+                    continue
+
+                src_pts = np.float32([
+                    kp_crop[m.queryIdx].pt for m in good
+                ]).reshape(-1, 1, 2)
+                dst_pts = np.float32([
+                    kp_ref[m.trainIdx].pt for m in good
+                ]).reshape(-1, 1, 2)
+                _, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                inliers = 0 if mask is None else int(mask.sum())
+                debug_scores.append(f"{name}:{len(good)}good/{inliers}in")
+
+                if inliers > best_inliers:
+                    best_inliers = inliers
+                    best_name = name
+
+            self.get_logger().info(
+                f"Recognition: crop {crop_w}x{crop_h}, {len(kp_crop)} kp -> "
+                f"{', '.join(debug_scores)} => {best_name}",
+                throttle_duration_sec=1.0,
+            )
+            return best_name
         except Exception as e:
             self.get_logger().error(f"Face recognition error: {e}")
-
-        return "Unknown"
+            return "Unknown"
 
     # ------------------------------------------------------------------
     # Synced RGB + PointCloud2 callback
@@ -238,11 +311,16 @@ class FaceDetectorNode(Node):
                     continue
                 bbox = box.xyxy[0]
                 x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
 
                 # Draw bounding box on display image
                 # cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-                # Shrink ROI toward center to avoid background pixels
+                # Shrink ROI toward center to avoid background pixels.
+                # Used for the depth/point-cloud mask only — recognition
+                # uses the full YOLO box below, since it's already a tight
+                # face crop and shrinking it further cuts into the face.
                 bw, bh = x2 - x1, y2 - y1
                 sx = int(bw * self.roi_shrink / 2)
                 sy = int(bh * self.roi_shrink / 2)
@@ -253,6 +331,25 @@ class FaceDetectorNode(Node):
 
                 if rx2 <= rx1 or ry2 <= ry1:
                     continue
+
+                # Debug dump: full frame with both raw YOLO box and shrunk
+                # recognition ROI drawn, plus the exact crop fed to ORB.
+                self.debug_save_counter += 1
+                detected_frame = cv_image.copy()
+                cv2.rectangle(detected_frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
+                cv2.rectangle(detected_frame, (rx1, ry1), (rx2, ry2), (0, 255, 0), 1)
+                cv2.imwrite(
+                    os.path.join(
+                        DEBUG_DETECTED_DIR, f"{self.debug_save_counter:06d}.png"
+                    ),
+                    detected_frame,
+                )
+                cv2.imwrite(
+                    os.path.join(
+                        DEBUG_CROPPED_DIR, f"{self.debug_save_counter:06d}.png"
+                    ),
+                    cv_image[y1:y2, x1:x2],
+                )
 
                 # Create mask for the shrunk ROI
                 mask = np.zeros((h, w), dtype=np.uint8)
@@ -274,8 +371,8 @@ class FaceDetectorNode(Node):
                     centroid, normal, tf_stamped
                 )
 
-                # Face Recognition
-                face_crop = cv_image[ry1:ry2, rx1:rx2]
+                # Face Recognition: full YOLO box, not the shrunk depth ROI
+                face_crop = cv_image[y1:y2, x1:x2]
                 person_name = self._recognize_face(face_crop)
 
                 cam_dist = float(np.linalg.norm(centroid))

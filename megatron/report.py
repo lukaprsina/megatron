@@ -123,7 +123,6 @@ table tbody tr:hover {
 .leak { color: red;   font-weight: bold; }
 .tile-defect {
     margin: 12px 0 18px 0;
-    page-break-before: always;
     page-break-inside: avoid;
 }
 .tile-defect span {
@@ -141,6 +140,13 @@ table tbody tr:hover {
 }
 </style>
 """
+
+# Plain CSS (no <style> wrapper) for use as `user_css` on the per-tile-defect
+# Sections created in save_pdf — see the comment there for why those are
+# split out of the main flow.
+_CSS_RAW = _CSS.removeprefix("<style>").removesuffix("</style>\n").removesuffix("</style>")
+
+_TILE_DEFECT_MARKER = '<div class="tile-defect">'
 
 # ---------------------------------------------------------------------------
 # ReportBuilder
@@ -307,12 +313,32 @@ class ReportBuilder:
         markdown = self.build(tasks, robot_name=robot_name, report_date=report_date)
         out = REPORT_PATH
         pdf = MarkdownPdf()
-        # root="/" so absolute <img src> paths (snapshot files) resolve —
-        # PyMuPDF's Archive treats Section's default root "." as the only
-        # base for resolving src paths and otherwise drops the image silently.
-        pdf.add_section(Section(markdown, root="/"))
+        # Each tile-defect block is added as its own Section instead of being
+        # flowed into the same Section as the preceding tables. PyMuPDF's
+        # Story layout (used by markdown-pdf) corrupts earlier tables —
+        # redrawing them as blank header/row shapes with no cell text — when
+        # a later block in the same Section forces/avoids a page break after
+        # one or more tables. Splitting into separate Sections sidesteps the
+        # bug entirely (confirmed via direct repro against pymupdf 1.27).
+        for i, chunk in enumerate(_split_tile_defect_chunks(markdown)):
+            # root="/" so absolute <img src> paths (snapshot files) resolve —
+            # PyMuPDF's Archive treats Section's default root "." as the only
+            # base for resolving src paths and otherwise drops the image silently.
+            user_css = None if i == 0 else _CSS_RAW
+            pdf.add_section(Section(chunk, root="/"), user_css=user_css)
         pdf.save(str(out))
         return out
+
+
+def _split_tile_defect_chunks(markdown: str) -> list[str]:
+    """Split rendered markdown into one chunk per tile-defect block.
+
+    The first chunk holds everything before the first tile-defect div
+    (the CSS, task summaries, and tables); each subsequent chunk holds
+    exactly one tile-defect div.
+    """
+    parts = markdown.split(_TILE_DEFECT_MARKER)
+    return [parts[0]] + [_TILE_DEFECT_MARKER + part for part in parts[1:]]
 
 
 def _existing_image_path(value) -> Path | None:
