@@ -244,7 +244,7 @@ class Task2Controller(Node):
         self.declare_parameter("waypoints_file", "waypoints/task.yaml")
         self.declare_parameter("room2_entry_file", "waypoints/bluelinepoint.yaml")
         self.declare_parameter("workstation_file", "waypoints/workstation.yaml")
-        self.declare_parameter("face_approach_distance", 0.50)
+        self.declare_parameter("face_approach_distance", 0.60)  # 0.50
         self.declare_parameter("barrel_approach_distance", 0.60)
         self.declare_parameter("barrel_lateral_offset", 0.30)
         self.declare_parameter("approach_retry_offset", 0.20)
@@ -759,6 +759,8 @@ class Task2Controller(Node):
 
     def _top_camera_cb(self, msg: Image):
         frame = self._cv_bridge.imgmsg_to_cv2(msg, "bgr8")
+        if self._last_top_frame is None:
+            self.get_logger().info(f"[dbg] top camera frame shape={frame.shape}")
         self._last_top_frame = frame
         self._last_top_stamp_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(
             msg.header.stamp.nanosec
@@ -960,6 +962,7 @@ class Task2Controller(Node):
         self._approach_attempt = 0
         self._transition(State.APPROACH_TARGET)
         if not self._send_approach(target, attempt=0):
+            self._log_costmap_at_target(target, "initial_blocked")
             self.get_logger().warn(
                 "Initial approach candidates blocked — re-queuing target."
             )
@@ -1041,6 +1044,10 @@ class Task2Controller(Node):
         self._approach_attempt += 1
         if self.current_target is not None:
             if not self._send_approach(self.current_target, self._approach_attempt):
+                self._log_costmap_at_target(
+                    self.current_target,
+                    f"approach_failure_{self.current_target['type']}",
+                )
                 self.get_logger().warn(
                     "All approach candidates exhausted — re-queuing target."
                 )
@@ -1422,6 +1429,9 @@ class Task2Controller(Node):
             self._approach_attempt = 0
             self._transition(State.APPROACH_TARGET)
             if not self._send_approach(target, attempt=0):
+                self._log_costmap_at_target(
+                    target, f"post_patrol_blocked_{target['type']}"
+                )
                 self.get_logger().warn(
                     "Post-patrol approach candidates blocked — re-queuing."
                 )
@@ -1534,7 +1544,10 @@ class Task2Controller(Node):
             self._cancel_nav()
             self._stop_cmd_vel()
             arm_pose = "look_at_belt_right"
-            self.get_logger().info(f"[inspection] moving top camera to {arm_pose}")
+            self.get_logger().info(
+                f"[inspection][dbg] moving top camera to {arm_pose} "
+                f"for color={self._inspection_color} at yaw={yaw_text} pose={pose_text}"
+            )
             self._pub_arm(arm_pose)
             self._arm_settle_until = now + 5.0
             self._inspection_phase = 1
@@ -1732,6 +1745,16 @@ class Task2Controller(Node):
                 return
 
             if self._last_top_frame is not None:
+                if int(now * 2) % 2 == 0 and int(now * 2) != getattr(
+                    self, "_last_dbg_dump_tick", None
+                ):
+                    self._last_dbg_dump_tick = int(now * 2)
+                    dbg_dir = Path("/tmp/phase5_frames")
+                    dbg_dir.mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(
+                        str(dbg_dir / f"{self._inspection_color}_{now:.1f}.png"),
+                        self._last_top_frame,
+                    )
                 tile_box, _ = self._detect_tile(self._last_top_frame)
                 if tile_box is not None:
                     self._tile_hit_count += 1
@@ -1743,9 +1766,16 @@ class Task2Controller(Node):
                 tile_centered = False
                 if tile_box is not None:
                     tile_center_x = float(tile_box[:, 0].mean())
-                    frame_width = self._last_top_frame.shape[1]
-                    tile_centered = (
-                        0.36 * frame_width <= tile_center_x <= 0.64 * frame_width
+                    frame_height, frame_width = self._last_top_frame.shape[:2]
+                    band_lo, band_hi = 0.36 * frame_width, 0.64 * frame_width
+                    tile_centered = band_lo <= tile_center_x <= band_hi
+                    self.get_logger().info(
+                        f"[phase5][dbg] color={self._inspection_color} "
+                        f"frame={frame_width}x{frame_height} "
+                        f"center_x={tile_center_x:.0f} band=[{band_lo:.0f},{band_hi:.0f}] "
+                        f"centered={tile_centered} hit={self._tile_hit_count} "
+                        f"yaw={self._current_yaw()}",
+                        throttle_duration_sec=0.5,
                     )
 
                 if (
@@ -1940,7 +1970,14 @@ class Task2Controller(Node):
 
         toward_center = workstation_xy - current_xy
         axis = np.array([math.cos(axis_yaw), math.sin(axis_yaw)])
-        if float(np.dot(axis, toward_center)) < 0.0:
+        dot = float(np.dot(axis, toward_center))
+        self.get_logger().info(
+            f"[inspection][dbg] axis_yaw_pre_flip={axis_yaw:.3f} "
+            f"toward_center=({toward_center[0]:.2f},{toward_center[1]:.2f}) "
+            f"dot={dot:.2f} -> flip={dot < 0.0}",
+            throttle_duration_sec=1.0,
+        )
+        if dot < 0.0:
             axis_yaw = _normalize_angle(axis_yaw + math.pi)
         self.get_logger().info(
             f"[inspection] scan direction robot=({current_xy[0]:.2f},{current_xy[1]:.2f}) "
@@ -1977,6 +2014,11 @@ class Task2Controller(Node):
             return None
         body_angle = _normalize_angle(
             self._belt_world_perp() - current_yaw - math.pi / 2
+        )
+        self.get_logger().info(
+            f"[inspection][dbg] belt_world_perp={self._belt_world_perp():.3f} "
+            f"current_yaw={current_yaw:.3f} body_angle={body_angle:.3f}",
+            throttle_duration_sec=1.0,
         )
         dist = self._median_scan_distance(body_angle, math.radians(8.0))
         if dist is None:
@@ -2486,7 +2528,7 @@ class Task2Controller(Node):
     # `_footprint_sample_points`). Set to 0 to fall back to checking only
     # the center point, e.g. if costmap/scan coverage near candidates is
     # too sparse to trust the extra points.
-    FOOTPRINT_MARGIN_SCALE = 0.7  # 1.0
+    FOOTPRINT_MARGIN_SCALE = 1.3  # 1.1  # 1.0
 
     # Threshold for the off-center footprint points (the footprint polygon
     # vertices around the candidate, see `_footprint_sample_points`). The painted
@@ -2495,7 +2537,7 @@ class Task2Controller(Node):
     # lethal-obstacle/inscribed-radius cyan band at 253-254. Set well above
     # the former and well below the latter so purple no longer gets
     # rejected but a true collision-risk cell still does.
-    FOOTPRINT_EDGE_COST_THRESHOLD = 89  # 150
+    FOOTPRINT_EDGE_COST_THRESHOLD = 150  # 89  # 150
 
     # Sampling radius used for the off-center footprint points. Deliberately
     # much smaller than APPROACH_CLEARANCE_RADIUS_M (0.28): that radius is
@@ -2719,6 +2761,28 @@ class Task2Controller(Node):
         if yaw is not None:
             self._publish_footprint_check_markers(points, accepted=True)
         return True
+
+    def _log_costmap_at_target(self, target: dict, tag: str = ""):
+        """Log costmap values at the target position for debugging approach failures."""
+        pos = target["pos"]
+        px, py = float(pos[0]), float(pos[1])
+        for cm_name, cm in [("global", self.costmap), ("local", self.local_costmap)]:
+            if cm is None:
+                self.get_logger().warn(f"[{tag}] {cm_name} costmap: None")
+                continue
+            mx, my = self._world_to_map(cm, px, py)
+            w, h = cm.info.width, cm.info.height
+            if 0 <= mx < w and 0 <= my < h:
+                cost = cm.data[my * w + mx] & 0xFF
+                self.get_logger().error(
+                    f"[{tag}] {cm_name} cost at target ({px:.2f}, {py:.2f}) "
+                    f"cell=({mx},{my}) = {cost}"
+                )
+            else:
+                self.get_logger().warn(
+                    f"[{tag}] {cm_name}: target ({px:.2f}, {py:.2f}) "
+                    f"OOB in [{int(w)}x{int(h)}]"
+                )
 
     def _world_to_map(self, costmap: OccupancyGrid, x: float, y: float):
         res = costmap.info.resolution

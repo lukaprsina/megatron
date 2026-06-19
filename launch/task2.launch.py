@@ -17,7 +17,7 @@ def generate_launch_description():
 
     args = [
         DeclareLaunchArgument(
-            "world", default_value="task2", description="Gazebo world name"
+            "world", default_value="task2_delay", description="Gazebo world name"
         ),
         DeclareLaunchArgument(
             "map",
