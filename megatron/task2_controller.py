@@ -215,8 +215,8 @@ class Task2Controller(Node):
     NODES_TO_CHECK = ["amcl", "bt_navigator", "global_costmap/global_costmap"]
     DEDUP_DISTANCE = 0.5  # metres — two detections within this are the same object
     MIN_UPDATE_DISTANCE = 0.05
-    WORKSTATION_TILE_COUNTS = {"red": 4, "green": 5}
-    WORKSTATION_SCAN_DISTANCES = {"red": 2.4, "green": 3.0}
+    WORKSTATION_TILE_COUNTS = {"red": 5, "green": 4}
+    WORKSTATION_SCAN_DISTANCES = {"red": 3.0, "green": 2.4}
     MAX_RETRY_CYCLES = (
         20  # bump distance up to 3× approach_retry_offset before giving up
     )
@@ -278,16 +278,18 @@ class Task2Controller(Node):
         ws_entries = load_waypoints_from_yaml(ws_file)
         if len(ws_entries) != 2:
             raise ValueError(
-                f"Workstation file must contain exactly two waypoints (red, green): {ws_file}"
+                f"Workstation file must contain exactly two waypoints (green, red): {ws_file}"
             )
+        # World layout: the belt at waypoint 0 is green, the belt at waypoint 1
+        # is red (the two belts kept their positions but swapped paint colours).
         self._workstation_approaches: dict[str, tuple[float, float, float]] = {
-            "red": ws_entries[0],
-            "green": ws_entries[1],
+            "green": ws_entries[0],
+            "red": ws_entries[1],
         }
         self.get_logger().info(
             f"Loaded workstation approaches from {ws_file}: "
-            f"red=({ws_entries[0][0]:.2f}, {ws_entries[0][1]:.2f}) "
-            f"green=({ws_entries[1][0]:.2f}, {ws_entries[1][1]:.2f})"
+            f"green=({ws_entries[0][0]:.2f}, {ws_entries[0][1]:.2f}) "
+            f"red=({ws_entries[1][0]:.2f}, {ws_entries[1][1]:.2f})"
         )
         self.manual_mode = cast(bool, self.get_parameter("manual_mode").value)
         self._capture_tiles = cast(bool, self.get_parameter("capture_tiles").value)
@@ -397,37 +399,18 @@ class Task2Controller(Node):
         self._last_top_stamp_ns = 0
         _share = Path(get_package_share_directory("megatron"))
         self._megatron_share = _share
-        _ref_root = _share / "assets" / "tiles" / "reference_good"
         _model_path = _share / "assets" / "tiles" / "model.yaml"
         _patchcore_config = PatchCoreConfig.from_yaml(_model_path)
-        _world_ref_root = _ref_root / self._world_name
-        _ref_red = (
-            sorted((_world_ref_root / "red").rglob("*.png"))
-            if (_world_ref_root / "red").is_dir()
-            else []
-        )
-        _ref_green = (
-            sorted((_world_ref_root / "green").rglob("*.png"))
-            if (_world_ref_root / "green").is_dir()
-            else []
-        )
-        if not _ref_red:
-            _ref_red = sorted(
-                p for p in _ref_root.rglob("*.png") if "/red/" in p.as_posix()
-            )
-        if not _ref_green:
-            _ref_green = sorted(
-                p for p in _ref_root.rglob("*.png") if "/green/" in p.as_posix()
-            )
-        self._tile_detector_red = PatchCoreTileDetector.from_paths(
-            _ref_red, _patchcore_config
-        )
-        self._tile_detector_green = PatchCoreTileDetector.from_paths(
-            _ref_green, _patchcore_config
-        )
+        # One shared detector for both belts, regardless of inspection color: pool
+        # every "okay" (good) reference from the AD_data/degraded_lighting dataset
+        # so the percentile-of-held-out-good threshold calibration (same recipe as
+        # scripts/patchcore_tile_detector.py) has enough images to hold any out.
+        _ad_data_root = REPO_ROOT / "AD_data" / "degraded_lighting" / "train" / "images"
+        _refs = sorted(_ad_data_root.glob("okay_*.png"))
+        self._tile_detector = PatchCoreTileDetector.from_paths(_refs, _patchcore_config)
         self.get_logger().info(
-            f"Tile detectors loaded: red={len(_ref_red)} green={len(_ref_green)} refs "
-            f"from {_world_ref_root}"
+            f"Tile detector loaded: {len(_refs)} refs from {_ad_data_root} "
+            f"(threshold={self._tile_detector.threshold:.3f})"
         )
         if self._capture_tiles:
             self.get_logger().info(
@@ -1630,20 +1613,20 @@ class Task2Controller(Node):
             return
 
         # Phase 3 — Capture the map-aligned scan heading and side distance.
-        # Capture the map-aligned scan heading and (for green only) calibrate the
-        # lateral distance target. Red's calibration position sits on structural
-        # gaps that produce unreliable readings; red relies on yaw-only control.
+        # Capture the map-aligned scan heading and (for red only) calibrate the
+        # lateral distance target. Green's calibration position sits on structural
+        # gaps that produce unreliable readings; green relies on yaw-only control.
         if self._inspection_phase == 3:
             self._stop_cmd_vel()
             self._inspection_scan_yaw = self._inspection_target_yaw()
-            if self._inspection_color == "green":
+            if self._inspection_color == "red":
                 sample = self._belt_side_distance()
                 if sample is not None:
                     self._inspection_side_samples.append(sample)
             elapsed_p3 = now - self._phase_start_time
             if elapsed_p3 < 0.5:
                 return
-            if self._inspection_color == "green" and self._inspection_side_samples:
+            if self._inspection_color == "red" and self._inspection_side_samples:
                 self._inspection_side_target = float(
                     np.median(self._inspection_side_samples)
                 )
@@ -1959,7 +1942,7 @@ class Task2Controller(Node):
         # Workstation colors have known belt axes, but each axis has two possible
         # headings. Choose the one whose forward vector points toward the detected
         # workstation center from the robot's current position.
-        axis_yaw = 0.0 if self._inspection_color == "red" else math.pi / 2
+        axis_yaw = 0.0 if self._inspection_color == "green" else math.pi / 2
         current_xy = self._current_xy()
         workstation_xy = self.workstation_poses.get(self._inspection_color or "")
         if current_xy is None or workstation_xy is None:
@@ -2006,7 +1989,7 @@ class Task2Controller(Node):
         return float(np.median(distances)) if distances else None
 
     def _belt_world_perp(self) -> float:
-        return math.pi / 2 if self._inspection_color == "red" else math.pi
+        return math.pi / 2 if self._inspection_color == "green" else math.pi
 
     def _belt_side_distance(self) -> float | None:
         current_yaw = self._current_yaw()
@@ -2024,9 +2007,9 @@ class Task2Controller(Node):
         if dist is None:
             return None
         # Reject structural gaps where the perpendicular ray shoots past the belt face.
-        # Red belt face is ~1.8 m away; green is ~0.5 m away. Use per-belt ceilings
+        # Green belt face is ~1.8 m away; red is ~0.5 m away. Use per-belt ceilings
         # well above the observed face range but below the nearest gap reading.
-        max_valid = 2.5 if self._inspection_color == "red" else 1.0
+        max_valid = 2.5 if self._inspection_color == "green" else 1.0
         if dist > max_valid:
             return None
         return dist
@@ -2152,12 +2135,7 @@ class Task2Controller(Node):
             )
         except Exception:
             pass
-        detector = (
-            self._tile_detector_red
-            if self._inspection_color == "red"
-            else self._tile_detector_green
-        )
-        return detector.detect(canonical)
+        return self._tile_detector.detect(canonical)
 
     def _capture_current_tile(
         self, frame: np.ndarray, anomaly_result: TileAnomalyResult
