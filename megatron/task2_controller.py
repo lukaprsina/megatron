@@ -350,6 +350,7 @@ class Task2Controller(Node):
         self._barrel_requestor: str = "Unknown"
         self._anomaly_requestor: str = "Unknown"
         self.workstation_poses: dict[str, np.ndarray] = {}
+        self.workstation_axes: dict[str, float] = {}
 
         # --- Report data ---
         self.ring_counts: dict[str, int] = {}
@@ -702,8 +703,15 @@ class Task2Controller(Node):
             msg.pose.position.x,
             msg.pose.position.y,
         ])
+        yaw = _quaternion_to_yaw([
+            msg.pose.orientation.w,
+            msg.pose.orientation.x,
+            msg.pose.orientation.y,
+            msg.pose.orientation.z,
+        ])
+        self.workstation_axes[color] = yaw % math.pi
         # self.get_logger().info(
-        #     f"Workstation '{color}' at ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
+        #     f"Workstation '{color}' at ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f}) axis={self.workstation_axes[color]:.2f}"
         # )
 
     def _qr_cb(self, msg: String):
@@ -1956,36 +1964,54 @@ class Task2Controller(Node):
         return float(np.linalg.norm(current_xy - self._inspection_scan_start))
 
     def _inspection_target_yaw(self) -> float:
-        # Workstation colors have known belt axes, but each axis has two possible
-        # headings. Choose the one whose forward vector points toward the detected
-        # workstation center from the robot's current position.
-        axis_yaw = 0.0 if self._inspection_color == "red" else math.pi / 2
+        # The detector publishes the workstation normal as an orientationless
+        # yaw (modulo pi). The scan direction is perpendicular to that normal:
+        # driving on the normal itself moves toward/away from the belt.
+        color = self._inspection_color or ""
+        normal_yaw = self.workstation_axes.get(color)
+        normal_source = "detected"
+        if normal_yaw is None:
+            normal_yaw = 0.0
+            normal_source = "fallback"
         current_xy = self._current_xy()
-        workstation_xy = self.workstation_poses.get(self._inspection_color or "")
-        if current_xy is None or workstation_xy is None:
+        workstation_xy = self.workstation_poses.get(color)
+        current_yaw = self._current_yaw()
+        if current_xy is None or workstation_xy is None or current_yaw is None:
+            scan_yaw = _normalize_angle(normal_yaw - math.pi / 2)
             self.get_logger().warn(
-                f"[inspection] missing geometry for scan direction; using yaw={axis_yaw:.3f}"
+                f"[inspection] missing geometry for scan direction; using "
+                f"normal={normal_yaw:.3f} scan_yaw={scan_yaw:.3f} "
+                f"source={normal_source}"
             )
-            return axis_yaw
+            return scan_yaw
 
         toward_center = workstation_xy - current_xy
-        axis = np.array([math.cos(axis_yaw), math.sin(axis_yaw)])
-        dot = float(np.dot(axis, toward_center))
+        normal = np.array([math.cos(normal_yaw), math.sin(normal_yaw)])
+        normal_dot = float(np.dot(normal, toward_center))
+        candidates = [
+            _normalize_angle(normal_yaw - math.pi / 2),
+            _normalize_angle(normal_yaw + math.pi / 2),
+        ]
+        turn_errors = [_normalize_angle(c - current_yaw) for c in candidates]
+        chosen_index = 0
+        scan_yaw = candidates[chosen_index]
         self.get_logger().info(
-            f"[inspection][dbg] axis_yaw_pre_flip={axis_yaw:.3f} "
+            f"[inspection][dbg] normal_yaw={normal_yaw:.3f} "
+            f"source={normal_source} "
             f"toward_center=({toward_center[0]:.2f},{toward_center[1]:.2f}) "
-            f"dot={dot:.2f} -> flip={dot < 0.0}",
+            f"normal_dot={normal_dot:.2f} "
+            f"scan_candidates=({candidates[0]:.3f},{candidates[1]:.3f}) "
+            f"turn_errors=({turn_errors[0]:+.3f},{turn_errors[1]:+.3f}) "
+            f"chosen={scan_yaw:.3f}",
             throttle_duration_sec=1.0,
         )
-        if dot < 0.0:
-            axis_yaw = _normalize_angle(axis_yaw + math.pi)
         self.get_logger().info(
             f"[inspection] scan direction robot=({current_xy[0]:.2f},{current_xy[1]:.2f}) "
             f"workstation=({workstation_xy[0]:.2f},{workstation_xy[1]:.2f}) "
-            f"target_yaw={axis_yaw:.3f}",
+            f"target_yaw={scan_yaw:.3f}",
             throttle_duration_sec=1.0,
         )
-        return axis_yaw
+        return scan_yaw
 
     def _median_scan_distance(
         self, center_angle: float, half_cone: float
@@ -2006,7 +2032,19 @@ class Task2Controller(Node):
         return float(np.median(distances)) if distances else None
 
     def _belt_world_perp(self) -> float:
-        return math.pi / 2 if self._inspection_color == "red" else math.pi
+        color = self._inspection_color or ""
+        normal_yaw = self.workstation_axes.get(color)
+        if normal_yaw is None:
+            normal_yaw = 0.0
+        current_xy = self._current_xy()
+        workstation_xy = self.workstation_poses.get(color)
+        if current_xy is None or workstation_xy is None:
+            return normal_yaw
+        toward_center = workstation_xy - current_xy
+        normal = np.array([math.cos(normal_yaw), math.sin(normal_yaw)])
+        if float(np.dot(normal, toward_center)) < 0.0:
+            normal_yaw = _normalize_angle(normal_yaw + math.pi)
+        return normal_yaw
 
     def _belt_side_distance(self) -> float | None:
         current_yaw = self._current_yaw()

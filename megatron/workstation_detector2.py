@@ -17,9 +17,10 @@ This version ports the teammate's line_localizator + workstation_recorder pipeli
   - 10-sighting median accumulation then lock (no ITM compaction)
 
 Publishes /detected_workstations (Marker, ns="red"|"green") with the belt
-center in map frame — same format and semantics as v1 so task2_controller
-needs no changes.
+center and belt-axis orientation in map frame.
 """
+
+import math
 
 import cv2
 import numpy as np
@@ -71,6 +72,18 @@ _MARKER_COLORS = {"red": (1.0, 0.0, 0.0), "green": (0.0, 1.0, 0.0)}
 _MARKER_IDS = {"red": 0, "green": 1}
 
 
+def _normalize_axis_yaw(yaw: float) -> float:
+    return yaw % math.pi
+
+
+def _median_axis_yaw(yaws: np.ndarray) -> float:
+    doubled = 2.0 * yaws
+    return _normalize_axis_yaw(
+        0.5
+        * math.atan2(float(np.sin(doubled).mean()), float(np.cos(doubled).mean()))
+    )
+
+
 class WorkstationDetector2(Node):
     def __init__(self):
         super().__init__("workstation_detector2")
@@ -96,8 +109,9 @@ class WorkstationDetector2(Node):
         self._latest_pc2: PointCloud2 | None = None
         self._robot_state: str = "INIT"
 
-        # Per-color accumulation: list of (center_x, center_y) in map frame
-        self._candidates: dict[str, list[tuple[float, float]]] = {
+        # Per-color accumulation: list of (center_x, center_y, axis_yaw) in map frame.
+        # PCA axis direction can flip, so axis_yaw is orientationless modulo pi.
+        self._candidates: dict[str, list[tuple[float, float, float]]] = {
             "red": [],
             "green": [],
         }
@@ -343,34 +357,40 @@ class WorkstationDetector2(Node):
             return
 
         cx, cy = float(center_map[0]), float(center_map[1])
-        self._candidates[color].append((cx, cy))
+        axis_vec = p2_map[:2] - p1_map[:2]
+        axis_yaw = _normalize_axis_yaw(
+            math.atan2(float(axis_vec[1]), float(axis_vec[0]))
+        )
+        self._candidates[color].append((cx, cy, axis_yaw))
         self._last_reject[color] = f"ok len={belt_length:.2f}m"
         n = len(self._candidates[color])
 
         self.get_logger().debug(
             f"[{color}] candidate {n}/{CONFIRM_COUNT}  "
             f"center=({cx:.2f}, {cy:.2f})  "
-            f"len={belt_length:.2f} m  flat_std={stds[0]:.3f}"
+            f"axis={axis_yaw:.3f}  len={belt_length:.2f} m  flat_std={stds[0]:.3f}"
         )
 
         if n >= CONFIRM_COUNT:
             arr = np.array(self._candidates[color])
-            median_center = np.median(arr, axis=0)
-            self._lock(color, median_center)
+            median_center = np.median(arr[:, :2], axis=0)
+            median_axis_yaw = _median_axis_yaw(arr[:, 2])
+            self._lock(color, median_center, median_axis_yaw)
 
     # ── Lock & publish ─────────────────────────────────────────────────────────
 
-    def _lock(self, color: str, center: np.ndarray) -> None:
+    def _lock(self, color: str, center: np.ndarray, axis_yaw: float) -> None:
         self._locked[color] = True
-        m = self._make_marker(color, center)
+        m = self._make_marker(color, center, axis_yaw)
         self._locked_markers[color] = m
         self._pub.publish(m)
         self.get_logger().info(
             f"Workstation '{color}' locked at "
-            f"({center[0]:.2f}, {center[1]:.2f}) after {CONFIRM_COUNT} sightings"
+            f"({center[0]:.2f}, {center[1]:.2f}) axis={axis_yaw:.3f} "
+            f"after {CONFIRM_COUNT} sightings"
         )
 
-    def _make_marker(self, color: str, center: np.ndarray) -> Marker:
+    def _make_marker(self, color: str, center: np.ndarray, axis_yaw: float) -> Marker:
         m = Marker()
         m.header.frame_id = "map"
         m.header.stamp = self.get_clock().now().to_msg()
@@ -381,7 +401,8 @@ class WorkstationDetector2(Node):
         m.pose.position.x = float(center[0])
         m.pose.position.y = float(center[1])
         m.pose.position.z = 0.1
-        m.pose.orientation.w = 1.0
+        m.pose.orientation.z = math.sin(axis_yaw / 2.0)
+        m.pose.orientation.w = math.cos(axis_yaw / 2.0)
         m.scale.x = m.scale.y = m.scale.z = 0.4
         r, g, b = _MARKER_COLORS[color]
         m.color.r, m.color.g, m.color.b, m.color.a = r, g, b, 1.0
