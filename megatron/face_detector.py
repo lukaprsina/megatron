@@ -9,6 +9,7 @@ import os
 from typing import cast
 
 import cv2
+import face_recognition
 import message_filters
 import numpy as np
 import rclpy
@@ -29,19 +30,80 @@ from megatron.perception_utils import (
     normal_to_quaternion,
     transform_point_and_normal,
 )
+from megatron.tile_anomaly import quad_from_contour, warp_tile
 
-
-# Reference photos are 512x512 portraits; face crops from the 256x320
-# YOLO input are often only tens of pixels wide. ORB's scale pyramid
-# (8 levels, 1.2x each) only covers ~4.3x — far less than that gap — so
-# matching raw-resolution crops against full-res references starves ORB
-# of correspondences. Resizing both sides to the same fixed size keeps
-# them within ORB's working range.
+# Side length of the canonical fronto-parallel square that the detected
+# picture quad gets warped to before recognition.
 RECOGNITION_SIZE = 200
 
 # Debug dump of every face detection, for inspecting why crops are tiny.
 DEBUG_DETECTED_DIR = "/home/luka/coding/dis/debug_faces_detected"
 DEBUG_CROPPED_DIR = "/home/luka/coding/dis/debug_faces_cropped"
+
+# How far past the YOLO box to look for the picture's actual edge. The
+# picture frame is pasted flat on the wall, so its true boundary often
+# sits outside YOLO's (loose) face box on one side and inside it on
+# another — pad generously and let the contour search find the edge.
+PLANE_PAD_FRAC = 0.6
+
+
+def _detect_picture_quad(
+    frame: np.ndarray, x1: int, y1: int, x2: int, y2: int
+) -> tuple[np.ndarray | None, tuple[int, int, int, int]]:
+    """Find the 4 corners of the picture billboard around a YOLO face box.
+
+    Same recipe as task2_controller._detect_tile: Otsu-threshold the region
+    to separate the (textured, brighter) picture from the (flat) wall, then
+    pick the contour that looks like a quad. Returns corners in full-frame
+    pixel coordinates, or None if nothing quad-like was found, plus the
+    padded crop bounds (px1, py1, px2, py2) used for the search.
+    """
+    h, w = frame.shape[:2]
+    bw, bh = x2 - x1, y2 - y1
+    pad_x, pad_y = int(bw * PLANE_PAD_FRAC), int(bh * PLANE_PAD_FRAC)
+    px1, py1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+    px2, py2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
+    if px2 <= px1 or py2 <= py1:
+        return None, (px1, py1, px2, py2)
+
+    crop = cv2.cvtColor(frame[py1:py2, px1:px2], cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    cy, cx = crop.shape[0] // 2, crop.shape[1] // 2
+    if thresh[cy, cx] == 0:
+        thresh = 255 - thresh
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    crop_area = crop.shape[0] * crop.shape[1]
+    crop_center = np.array([crop.shape[1] / 2, crop.shape[0] / 2])
+
+    best = None
+    best_dist = None
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < crop_area * 0.15 or area > crop_area * 0.95:
+            continue
+        box = cv2.boxPoints(cv2.minAreaRect(contour))
+        bw_, bh_ = (
+            float(np.linalg.norm(box[0] - box[1])),
+            float(np.linalg.norm(box[1] - box[2])),
+        )
+        aspect = max(bw_, bh_) / max(min(bw_, bh_), 1.0)
+        if aspect > 1.8:
+            continue
+        dist = float(np.linalg.norm(box.mean(axis=0) - crop_center))
+        if best is None or dist < best_dist:
+            best, best_dist = contour, dist
+
+    if best is None:
+        return None, (px1, py1, px2, py2)
+
+    quad = quad_from_contour(best)
+    if quad is None:
+        quad = cv2.boxPoints(cv2.minAreaRect(best)).astype(np.float32)
+    quad = quad + np.array([px1, py1], dtype=np.float32)
+    return quad, (px1, py1, px2, py2)
 
 
 def parse_personnel_filename(filename):
@@ -65,8 +127,8 @@ class FaceDetectorNode(Node):
         self.declare_parameter("roi_shrink", 0.3)
         self.declare_parameter("track_max_age", 30.0)
         self.declare_parameter("lateral_offset", 0.2)
-        self.declare_parameter("recognition_min_inliers", 12)
-        self.declare_parameter("recognition_ratio_threshold", 0.8)
+        self.declare_parameter("recognition_tolerance", 0.55)
+        self.declare_parameter("recognition_margin", 0.08)
         self.declare_parameter(
             "personnel_dir",
             "/home/iota/dis/src/vendor/teammate-project/src/task1/config/personnel",
@@ -86,26 +148,19 @@ class FaceDetectorNode(Node):
         self.roi_shrink = cast(float, self.get_parameter("roi_shrink").value)
         self.track_max_age = cast(float, self.get_parameter("track_max_age").value)
         self.lateral_offset = cast(float, self.get_parameter("lateral_offset").value)
-        self.recognition_min_inliers = cast(
-            int, self.get_parameter("recognition_min_inliers").value
+        self.recognition_tolerance = cast(
+            float, self.get_parameter("recognition_tolerance").value
         )
-        self.recognition_ratio_threshold = cast(
-            float, self.get_parameter("recognition_ratio_threshold").value
+        self.recognition_margin = cast(
+            float, self.get_parameter("recognition_margin").value
         )
         self.personnel_dir = cast(str, self.get_parameter("personnel_dir").value)
 
         self.bridge = CvBridge()
         self.model = YOLO("yolov8n-face.pt")
 
-        # Face recognition bank: ORB keypoints/descriptors per personnel photo.
-        # The photos are pasted directly onto walls in-sim as flat billboards,
-        # so matching against the exact reference texture (planar homography)
-        # is far more reliable here than a deep face-embedding model trained
-        # on real photographs of actual human faces.
-        self.orb = cv2.ORB_create(nfeatures=1000)
-        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
-        self.known_keypoints = []
-        self.known_descriptors = []
+        # Face recognition bank
+        self.known_encodings = []
         self.known_names = []
         self._load_personnel()
 
@@ -168,96 +223,70 @@ class FaceDetectorNode(Node):
             name = parse_personnel_filename(filename)
 
             try:
-                img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
-                if img is None:
-                    self.get_logger().error(f"Failed to read {filename}")
-                    continue
-                img = cv2.resize(
-                    img, (RECOGNITION_SIZE, RECOGNITION_SIZE),
-                    interpolation=cv2.INTER_AREA,
-                )
-                kp, desc = self.orb.detectAndCompute(img, None)
-                if desc is None or len(kp) == 0:
-                    self.get_logger().warn(f"No ORB features found in {filename}")
-                    continue
-                self.known_keypoints.append(kp)
-                self.known_descriptors.append(desc)
-                self.known_names.append(name)
-                self.get_logger().info(
-                    f"Loaded personnel: <{name}> ({len(kp)} ORB keypoints)"
-                )
+                img = face_recognition.load_image_file(filepath)
+                encodings = face_recognition.face_encodings(img)
+                if encodings:
+                    self.known_encodings.append(encodings[0])
+                    self.known_names.append(name)
+                    self.get_logger().info(f"Loaded personnel: <{name}>")
+                else:
+                    self.get_logger().warn(f"No face found in {filename}")
             except Exception as e:
                 self.get_logger().error(f"Failed to load {filename}: {e}")
 
     def _recognize_face(self, face_crop) -> str:
-        """Match a BGR image crop against the personnel wall photos via ORB +
-        homography RANSAC. Returns 'Unknown' or name.
-
-        The personnel photos are pasted as flat billboards in-sim, so the
-        crop is a perspective-warped view of the exact same texture rather
-        than a different photo of the same person — planar feature matching
-        is the right tool, not a face-embedding model trained on real photos.
-        """
-        if face_crop.size == 0 or not self.known_descriptors:
+        """Run face recognition on a BGR image crop. Returns 'Unknown' or name."""
+        if face_crop.size == 0 or not self.known_encodings:
             return "Unknown"
 
         try:
-            crop_gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
-            crop_h, crop_w = crop_gray.shape[:2]
-            crop_gray = cv2.resize(
-                crop_gray, (RECOGNITION_SIZE, RECOGNITION_SIZE),
-                interpolation=cv2.INTER_CUBIC,
+            crop_h, crop_w = face_crop.shape[:2]
+            crop_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+
+            # The crop is now a clean warped picture (or, on fallback, a raw
+            # YOLO box) — try dlib's own face detector first for proper
+            # landmark alignment; only fall back to "whole crop is the
+            # face" if it can't find anything (e.g. on a degraded fallback
+            # crop).
+            face_locs = face_recognition.face_locations(crop_rgb)
+            if not face_locs:
+                face_locs = [(0, crop_w, crop_h, 0)]
+
+            encodings = face_recognition.face_encodings(
+                crop_rgb, known_face_locations=face_locs
             )
-            kp_crop, desc_crop = self.orb.detectAndCompute(crop_gray, None)
-            if desc_crop is None or len(kp_crop) < 4:
+            if not encodings:
                 self.get_logger().info(
-                    f"Recognition: crop {crop_w}x{crop_h} -> "
-                    f"{0 if kp_crop is None else len(kp_crop)} ORB keypoints, "
-                    "too few to match",
+                    f"Recognition: crop {crop_w}x{crop_h} -> no encoding",
                     throttle_duration_sec=1.0,
                 )
                 return "Unknown"
 
-            best_name = "Unknown"
-            best_inliers = self.recognition_min_inliers - 1
-            debug_scores = []
+            distances = face_recognition.face_distance(
+                self.known_encodings, encodings[0]
+            )
+            order = np.argsort(distances)
+            best_idx = order[0]
+            best_dist = float(distances[best_idx])
+            second_dist = float(distances[order[1]]) if len(order) > 1 else None
 
-            for kp_ref, desc_ref, name in zip(
-                self.known_keypoints,
-                self.known_descriptors,
-                self.known_names,
-                strict=True,
+            name = "Unknown"
+            if best_dist < self.recognition_tolerance and (
+                second_dist is None
+                or second_dist - best_dist >= self.recognition_margin
             ):
-                knn_matches = self.matcher.knnMatch(desc_crop, desc_ref, k=2)
-                good = [
-                    m
-                    for m, n in (pair for pair in knn_matches if len(pair) == 2)
-                    if m.distance < self.recognition_ratio_threshold * n.distance
-                ]
-                if len(good) < 4:
-                    debug_scores.append(f"{name}:{len(good)}good/0in")
-                    continue
-
-                src_pts = np.float32([
-                    kp_crop[m.queryIdx].pt for m in good
-                ]).reshape(-1, 1, 2)
-                dst_pts = np.float32([
-                    kp_ref[m.trainIdx].pt for m in good
-                ]).reshape(-1, 1, 2)
-                _, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-                inliers = 0 if mask is None else int(mask.sum())
-                debug_scores.append(f"{name}:{len(good)}good/{inliers}in")
-
-                if inliers > best_inliers:
-                    best_inliers = inliers
-                    best_name = name
+                name = self.known_names[best_idx]
 
             self.get_logger().info(
-                f"Recognition: crop {crop_w}x{crop_h}, {len(kp_crop)} kp -> "
-                f"{', '.join(debug_scores)} => {best_name}",
+                f"Recognition: crop {crop_w}x{crop_h} -> "
+                + ", ".join(
+                    f"{n}:{d:.3f}"
+                    for n, d in zip(self.known_names, distances, strict=True)
+                )
+                + f" => {name}",
                 throttle_duration_sec=1.0,
             )
-            return best_name
+            return name
         except Exception as e:
             self.get_logger().error(f"Face recognition error: {e}")
             return "Unknown"
@@ -332,12 +361,47 @@ class FaceDetectorNode(Node):
                 if rx2 <= rx1 or ry2 <= ry1:
                     continue
 
-                # Debug dump: full frame with both raw YOLO box and shrunk
-                # recognition ROI drawn, plus the exact crop fed to ORB.
+                # Find the picture's true rectangular boundary (the YOLO
+                # box is just a rough position) and warp it to a canonical
+                # fronto-parallel square — gives recognition a clean, full,
+                # correctly-scaled view instead of a YOLO-box crop.
+                quad, (px1, py1, px2, py2) = _detect_picture_quad(
+                    cv_image, x1, y1, x2, y2
+                )
+                if quad is not None:
+                    # Warp to the quad's own native resolution, capped at
+                    # RECOGNITION_SIZE — upsampling small/far detections up
+                    # to a fixed 200x200 introduces enough blur to break
+                    # dlib's encoder (confirmed: every 200x200 upsampled
+                    # crop in testing came back Unknown, while native-size
+                    # raw-box fallbacks recognized correctly).
+                    qw, qh = cv2.boundingRect(quad.astype(np.int32))[2:4]
+                    warp_size = min(RECOGNITION_SIZE, max(qw, qh))
+                    # Small positive inset: the detected quad tends to run
+                    # slightly past the picture into the wall (visible as a
+                    # blue-grey margin in debug_faces_cropped), so shrink
+                    # corners inward a bit before warping.
+                    recognition_crop = warp_tile(
+                        cv_image, quad, size=warp_size, border_inset=0.08
+                    )
+                else:
+                    recognition_crop = cv_image[y1:y2, x1:x2]
+
+                # Debug dump: full frame with raw YOLO box, padded search
+                # region, and detected quad drawn; plus the recognition
+                # input (warped picture, or the raw box crop on fallback).
                 self.debug_save_counter += 1
                 detected_frame = cv_image.copy()
                 cv2.rectangle(detected_frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
-                cv2.rectangle(detected_frame, (rx1, ry1), (rx2, ry2), (0, 255, 0), 1)
+                cv2.rectangle(detected_frame, (px1, py1), (px2, py2), (255, 0, 0), 1)
+                if quad is not None:
+                    cv2.polylines(
+                        detected_frame,
+                        [quad.astype(np.int32)],
+                        isClosed=True,
+                        color=(0, 255, 0),
+                        thickness=1,
+                    )
                 cv2.imwrite(
                     os.path.join(
                         DEBUG_DETECTED_DIR, f"{self.debug_save_counter:06d}.png"
@@ -348,7 +412,7 @@ class FaceDetectorNode(Node):
                     os.path.join(
                         DEBUG_CROPPED_DIR, f"{self.debug_save_counter:06d}.png"
                     ),
-                    cv_image[y1:y2, x1:x2],
+                    recognition_crop,
                 )
 
                 # Create mask for the shrunk ROI
@@ -371,9 +435,8 @@ class FaceDetectorNode(Node):
                     centroid, normal, tf_stamped
                 )
 
-                # Face Recognition: full YOLO box, not the shrunk depth ROI
-                face_crop = cv_image[y1:y2, x1:x2]
-                person_name = self._recognize_face(face_crop)
+                # Face Recognition: warped picture plane (or raw box on fallback)
+                person_name = self._recognize_face(recognition_crop)
 
                 cam_dist = float(np.linalg.norm(centroid))
                 # Feed to tracker
