@@ -171,7 +171,8 @@ def generate_launch_description():
                     pkg_megatron,
                     "waypoints",
                     # "task2-01.yaml",
-                    "task2-00.yaml",
+                    # "task2-00.yaml",
+                    "workstation.yaml",
                 ]),
                 "room2_entry_file": PathJoinSubstitution([
                     pkg_megatron,
