@@ -273,7 +273,7 @@ def generate_launch_description():
     ld.add_action(arm_mover)
     # ld.add_action(yellow_line_injector) # not used anymore, we use factory_keepout.pgm only
     ld.add_action(blue_line_follower)
-    ld.add_action(workstation_detector)
+    # ld.add_action(workstation_detector)
     ld.add_action(controller)
     ld.add_action(visualizer)
     ld.add_action(workstation_visualizer)
