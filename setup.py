@@ -32,6 +32,7 @@ setup(
             glob(os.path.join("config", "*")),
         ),
         (os.path.join("share", package_name, "maps"), glob(os.path.join("maps", "*"))),
+        *_tree("worlds", os.path.join("share", package_name)),
         (
             os.path.join("share", package_name, "waypoints"),
             glob(os.path.join("waypoints", "*")),

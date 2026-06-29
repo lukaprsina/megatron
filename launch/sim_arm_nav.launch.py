@@ -55,7 +55,7 @@ for pose_element in ["x", "y", "z", "yaw"]:
 
 def generate_launch_description():
     ignition_launch = PathJoinSubstitution(
-        [pkg_dis_tutorial3, "launch", "sim.launch.py"]
+        [pkg_megatron, "launch", "sim_ignition.launch.py"]
     )
     robot_spawn_launch = PathJoinSubstitution(
         [pkg_dis_tutorial7, "launch", "turtlebot4_spawn.launch.py"]
